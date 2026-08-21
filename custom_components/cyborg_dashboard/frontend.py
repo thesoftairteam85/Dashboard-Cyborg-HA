@@ -3,11 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from aiohttp import web
-
-from .const import FRONTEND_MODULE
 
 FRONTEND_URL = "/cyborg_dashboard/frontend"
 
