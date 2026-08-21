@@ -16,7 +16,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     """Register the Cyborg Dashboard sidebar panel."""
     www = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(STATIC_PATH, str(www), False)]
+        [StaticPathConfig(STATIC_PATH, str(www), cache_headers=False)]
     )
     await panel_custom.async_register_panel(
         hass,
