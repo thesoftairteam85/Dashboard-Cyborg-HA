@@ -1,0 +1,8 @@
+{
+  "domain": "cyborg_dashboard",
+  "name": "Cyborg Dashboard",
+  "version": "0.1.0",
+  "documentation": "https://github.com/thesoftairteam85/Dashboard-Cyborg-HA",
+  "requirements": [],
+  "codeowners": ["@thesoftairteam85"]
+}
