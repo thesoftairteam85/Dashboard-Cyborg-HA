@@ -1,0 +1,30 @@
+"""Cyborg Dashboard sidebar panel."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from homeassistant.components import panel_custom
+from homeassistant.core import HomeAssistant
+
+PANEL_PATH = "cyborg-dashboard"
+WEB_COMPONENT = "cyborg-dashboard"
+
+
+async def async_register_panel(hass: HomeAssistant) -> None:
+    """Register the Cyborg Dashboard sidebar panel."""
+    www = Path(__file__).parent / "www"
+    hass.http.register_static_path(
+        "/cyborg_dashboard/static",
+        str(www),
+        cache_headers=False,
+    )
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=PANEL_PATH,
+        webcomponent_name=WEB_COMPONENT,
+        sidebar_title="Cyborg Dashboard",
+        sidebar_icon="mdi:view-dashboard-edit",
+        module_url="/cyborg_dashboard/static/cyborg-dashboard.js",
+        config={"version": "0.1.4"},
+        require_admin=False,
+    )
