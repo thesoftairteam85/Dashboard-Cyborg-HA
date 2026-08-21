@@ -1,65 +1,39 @@
 import { DashboardStore, DEFAULT_CONFIG } from "./core/dashboard-store.js";
 import { HABridge } from "./core/ha-bridge.js";
-import { createCard } from "./core/card-registry.js";
+import { createCard, getCard } from "./core/card-registry.js";
 import "./cards/entity-card.js";
+import "./editor/dashboard-editor.js";
 
 export class CyborgDashboard extends HTMLElement {
-  constructor() {
-    super();
-    this.store = new DashboardStore(DEFAULT_CONFIG);
-    this.hass = null;
-    this.connection = null;
-  }
-
-  set hass(value) {
-    this._hass = value;
-    this.render();
-  }
-
+  constructor() { super(); this.store = new DashboardStore(DEFAULT_CONFIG); this._hass = null; this.connection = null; this.editing = false; }
+  set hass(value) { this._hass = value; this.render(); }
   get hass() { return this._hass; }
-
-  setConfig(config) {
-    this.store = new DashboardStore(config);
-    this.render();
-  }
-
+  setConfig(config) { this.store = new DashboardStore(config); this.render(); }
   async setConnection(connection) {
-    this.connection = connection;
-    this.bridge = new HABridge(connection);
-    try {
-      const config = await this.bridge.loadConfig();
-      this.store = new DashboardStore(config);
-      this.render();
-    } catch (error) {
-      console.warn("Cyborg Dashboard: backend storage unavailable", error);
-    }
+    this.connection = connection; this.bridge = new HABridge(connection);
+    try { this.store = new DashboardStore(await this.bridge.loadConfig()); this.render(); }
+    catch (error) { console.warn("Cyborg Dashboard: backend storage unavailable", error); }
   }
-
+  async persist(config) { if (this.bridge) await this.bridge.saveConfig(config); }
+  renderCard(card) {
+    const definition = getCard(card.type);
+    if (!definition) return `<article class="cyborg-card"><strong>${card.type}</strong><div>Card non registrata</div></article>`;
+    return definition.render ? definition.render(card, this._hass) : `<article class="cyborg-card"><strong>${card.config.name || card.config.entity || card.type}</strong></article>`;
+  }
   render() {
     if (!this._hass) return;
     const page = this.store.config.pages[0];
-    const cards = page?.sections?.flatMap(section => section.cards || []) || [];
-    if (!cards.length) {
-      const firstEntity = Object.keys(this._hass.states || {})[0];
-      if (firstEntity) {
-        this.store.addCard(page.id, createCard("entity", { entity: firstEntity }));
-      }
-    }
-    const current = this.store.config.pages[0];
-    const currentCards = current.sections.flatMap(section => section.cards || []);
-    this.innerHTML = `<div class="cyborg-shell">
-      <header><div><strong>${current.title}</strong><small>Cyborg Dashboard</small></div></header>
-      <main>${currentCards.map(card => {
-        const def = customElements.get("cyborg-card-${card.type}");
-        return def?.render ? def.render(card, this._hass) : renderFallback(card, this._hass);
-      }).join("")}</main>
-    </div>`;
+    page.sections ??= [{ id: crypto.randomUUID(), cards: [] }];
+    const cards = page.sections.flatMap(section => section.cards || []);
+    this.innerHTML = `<div class="cyborg-shell"><header><div><strong>${page.title}</strong><small>Cyborg Dashboard</small></div><button data-edit>${this.editing ? "✓ Fine" : "⚙ Modifica"}</button></header><main>${cards.map(card => this.renderCard(card)).join("")}</main>${this.editing ? `<cyborg-dashboard-editor></cyborg-dashboard-editor>` : ""}</div>`;
+    this.querySelector("[data-edit]")?.addEventListener("click", () => { this.editing = !this.editing; this.render(); this.initEditor(); });
+    this.initEditor();
+  }
+  initEditor() {
+    const editor = this.querySelector("cyborg-dashboard-editor");
+    if (!editor) return;
+    editor.value = this.store.config; editor.setHass(this._hass);
+    editor.addEventListener("config-changed", async (event) => { this.store = new DashboardStore(event.detail); await this.persist(event.detail); this.render(); });
   }
 }
-
-function renderFallback(card, hass) {
-  const state = hass?.states?.[card.config.entity];
-  return `<article class="cyborg-card"><strong>${card.config.name || card.config.entity}</strong><div>${state?.state || "—"}</div></article>`;
-}
-
 customElements.define("cyborg-dashboard", CyborgDashboard);
