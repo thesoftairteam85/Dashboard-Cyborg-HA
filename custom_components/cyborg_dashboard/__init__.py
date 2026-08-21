@@ -1,12 +1,11 @@
 """Cyborg Dashboard Home Assistant integration."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .panel import async_register_panel
+from .websocket import async_register_websocket
 
 DOMAIN = "cyborg_dashboard"
 
@@ -14,6 +13,7 @@ DOMAIN = "cyborg_dashboard"
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Cyborg Dashboard integration."""
     hass.data.setdefault(DOMAIN, {})
+    async_register_websocket(hass)
     return True
 
 
