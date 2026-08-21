@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from homeassistant.components import panel_custom
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant
 
 PANEL_PATH = "cyborg-dashboard"
@@ -15,7 +16,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     """Register the Cyborg Dashboard sidebar panel."""
     www = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
-        [{"url_path": STATIC_PATH, "path": str(www), "cache_headers": False}]
+        [StaticPathConfig(STATIC_PATH, str(www), False)]
     )
     await panel_custom.async_register_panel(
         hass,
@@ -24,6 +25,6 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         sidebar_title="Cyborg Dashboard",
         sidebar_icon="mdi:view-dashboard-edit",
         module_url=f"{STATIC_PATH}/cyborg-dashboard.js",
-        config={"version": "0.1.5"},
+        config={"version": "0.1.6"},
         require_admin=False,
     )
