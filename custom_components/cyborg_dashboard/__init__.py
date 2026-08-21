@@ -2,9 +2,21 @@
 from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+
+from .api import register
+from .storage import DashboardStorage
 
 DOMAIN = "cyborg_dashboard"
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the Cyborg Dashboard integration."""
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["storage"] = DashboardStorage(hass)
+    register(hass)
+    return True
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    return True
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
