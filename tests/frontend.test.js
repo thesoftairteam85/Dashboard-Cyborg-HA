@@ -188,6 +188,100 @@ ok("sparkline path valido", /d="M0\.0,[\d.]+ L[\d.]+,[\d.]+/.test(sp), sp.match(
 ok("sparkline valori costanti non crasha", sparkline([5,5,5],200,50).includes("<svg"));
 ok("sparkline 1 punto -> vuoto", sparkline([5],200,50) === "");
 
+console.log("\n== 10. MAPPA 3D ==");
+el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] },
+  { id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+    view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true },
+    rooms: [] }]};
+el._pageIndex = 1; el._selected = null; el._editing = false;
+ok("pagina floorplan riconosciuta", el._isFloorplan());
+el._registry = { areas: [
+  { area_id: "soggiorno", name: "Soggiorno", icon: null },
+  { area_id: "bagno", name: "Bagno", icon: "mdi:toilet" },
+  { area_id: "camera_da_letto", name: "Camera da letto", icon: null }],
+  byArea: {
+    soggiorno: ["light.soggiorno", "climate.cdz_storm", "sensor.soggiorno_temp", "switch.interruttore_fem_luci_interruttore", "sensor.asciugatrice_potenza", "automation.esco_di_casa_allarme_on", "sensor.rumore_1"],
+    bagno: ["sensor.t_u_bagno_temperatura"],
+    camera_da_letto: [] } };
+states["light.soggiorno"] = S("on", { friendly_name: "Luce Soggiorno" });
+states["sensor.soggiorno_temp"] = S("26.3", { friendly_name: "Temp Soggiorno", device_class: "temperature", unit_of_measurement: "\u00b0C" });
+
+el._autoRooms();
+const rooms = el._rooms();
+ok("una stanza per area", rooms.length === 3, String(rooms.length));
+ok("stanze non sovrapposte", (() => {
+  for (let i = 0; i < rooms.length; i++) for (let j = i + 1; j < rooms.length; j++) {
+    const a = rooms[i], b = rooms[j];
+    if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) return false;
+  } return true; })());
+ok("icona dedotta dal nome area", rooms[0].icon === "mdi:sofa", rooms[0].icon);
+ok("icona dell'area HA ha precedenza", rooms[1].icon === "mdi:toilet", rooms[1].icon);
+ok("colori distinti", new Set(rooms.map(r => r.color)).size === 3);
+ok("area collegata", rooms[0].area_id === "soggiorno");
+
+const ents = el._roomEntities(rooms[0]);
+const MAXB = parseInt(/MAX_BADGES_PER_ROOM\s*=\s*(\d+)/.exec(src)[1], 10);
+ok("badge limitati a " + MAXB, ents.length <= MAXB && ents.length > 0, String(ents.length));
+ok("automation esclusa dai badge", !ents.includes("automation.esco_di_casa_allarme_on"));
+ok("unavailable escluso dai badge", !ents.includes("sensor.rumore_1"));
+ok("climate ha priorita massima", ents[0] === "climate.cdz_storm", ents.join(","));
+ok("stanza senza entita -> lista vuota", el._roomEntities(rooms[2]).length === 0);
+rooms[0].entities = ["light.soggiorno"];
+ok("override manuale rispettato", el._roomEntities(rooms[0]).join() === "light.soggiorno");
+rooms[0].entities = null;
+
+const bm = el._badgeMarkup("light.soggiorno", rooms[0]);
+ok("badge ON evidenziato", bm.includes('class="fp-badge on"'), bm.slice(0, 60));
+ok("badge senza undefined", !bm.includes("undefined"));
+ok("badge sensore con unita", el._badgeMarkup("sensor.soggiorno_temp", rooms[0]).includes("26.3 \u00b0C"));
+
+el.render();
+const fp = el.innerHTML;
+ok("render 3D contiene le stanze", (fp.match(/class="fp-room/g) || []).length === 3);
+ok("render 3D contiene 4 muri per stanza", (fp.match(/class="fp-wall/g) || []).length === 12);
+ok("controrotazione anti-camera sulle targhette", fp.includes("rotateZ(calc(var(--yaw) * -1))"));
+ok("tab pagine presenti", fp.includes("data-page-tab"));
+ok("div bilanciati (3D)", (fp.match(/<div/g) || []).length === (fp.match(/<\/div>/g) || []).length);
+ok("nessun undefined nel markup 3D", !/>undefined</.test(fp));
+
+el._page().view.show_walls = false;
+el.render();
+ok("toggle muri rimuove i muri", !el.innerHTML.includes('class="fp-wall'));
+el._page().view.show_walls = true;
+
+el._editing = true; el._selected = { kind: "room", roomId: rooms[0].id };
+el.render();
+ok("editor stanza renderizza", el.innerHTML.includes("ELIMINA STANZA") && el.innerHTML.includes("AREA HOME ASSISTANT"));
+ok("editor elenca le aree HA", el.innerHTML.includes('value="camera_da_letto"'));
+el._selected = null; el.render();
+ok("editor pagina mappa renderizza", el.innerHTML.includes("RIGENERA DALLE AREE") && el.innerHTML.includes("CAMERA"));
+
+// un-projection must invert the world transform, otherwise dragging drifts
+const cases = [[32, 56, 1], [0, 0, 1], [212, 30, 1.7], [90, 75, 0.6]];
+let unprojOK = true;
+for (const [yaw, pitch, zoom] of cases) {
+  for (const [wx, wy] of [[100, 0], [0, 100], [-40, 70]]) {
+    const y = yaw * Math.PI / 180, cP = Math.cos(pitch * Math.PI / 180);
+    const sx = zoom * (Math.cos(y) * wx - Math.sin(y) * wy);
+    const sy = zoom * (cP * Math.sin(y) * wx + cP * Math.cos(y) * wy);
+    const back = unprojectDelta(sx, sy, yaw, pitch, zoom);
+    if (Math.abs(back.dx - wx) > 0.01 || Math.abs(back.dy - wy) > 0.01) unprojOK = false;
+  }
+}
+ok("unprojectDelta inverte esattamente la trasformazione", unprojOK);
+
+wsCalls.length = 0;
+el._badgeTap("light.soggiorno");
+ok("tap badge luce -> light.toggle", wsCalls.some(c => c.service === "light.toggle"), JSON.stringify(wsCalls));
+wsCalls.length = 0;
+el._badgeTap("sensor.soggiorno_temp");
+ok("tap badge sensore non chiama servizi", wsCalls.length === 0);
+
+el._pageIndex = 0; el._editing = false; el._selected = null;
+el.render();
+ok("ritorno alla pagina sezioni", !el.innerHTML.includes(String.fromCharCode(34) + "fp-viewport"));
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

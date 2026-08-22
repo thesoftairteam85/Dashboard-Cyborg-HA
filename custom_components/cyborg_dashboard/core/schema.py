@@ -6,6 +6,8 @@ v2  pages[].items[]                      flat card list, optional free-text
                                          ``section`` string on each card
 v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
+v4  pages[].type                         a page is either a "sections" page or a
+                                         "floorplan" page (3D map with rooms[])
 
 v2 documents are migrated to v3 on load (see ``_migrate_page_v2``), so an
 existing stored dashboard keeps its cards and its section grouping without
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,
@@ -43,6 +45,66 @@ DEFAULT_SECTIONS: list[dict[str, Any]] = [
 ]
 
 
+PAGE_TYPES = ("sections", "floorplan")
+
+# Camera defaults for the CSS-3D isometric view. pitch 56deg / yaw 32deg is the
+# classic architectural-render angle: high enough to read the floor layout,
+# shallow enough that extruded walls still communicate height.
+DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
+                "show_walls": True, "show_labels": True}
+
+
+def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
+    """Normalize one floorplan room.
+
+    Geometry is stored in abstract plan units (not pixels): the renderer scales
+    the whole world to fit the viewport, so a layout authored on a desktop keeps
+    its proportions on a wall-mounted tablet.
+    """
+    result = dict(room)
+    result.setdefault("id", f"room-{index + 1}")
+    result.setdefault("area_id", None)
+    result.setdefault("title", f"Stanza {index + 1}")
+    result.setdefault("icon", "mdi:floor-plan")
+    result.setdefault("color", "#00e5ff")
+    for key, default in (("x", 0), ("y", 0), ("w", 200), ("h", 160)):
+        try:
+            result[key] = int(round(float(result.get(key, default))))
+        except (TypeError, ValueError):
+            result[key] = default
+    result["w"] = max(40, result["w"])
+    result["h"] = max(40, result["h"])
+    # entities: None/"auto" means "derive from the area registry at render time"
+    entities = result.get("entities")
+    result["entities"] = entities if isinstance(entities, list) else None
+    return result
+
+
+def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
+    result = dict(DEFAULT_VIEW)
+    if isinstance(view, dict):
+        result.update(view)
+    try:
+        result["yaw"] = float(result["yaw"]) % 360
+    except (TypeError, ValueError):
+        result["yaw"] = DEFAULT_VIEW["yaw"]
+    try:
+        result["pitch"] = max(0.0, min(85.0, float(result["pitch"])))
+    except (TypeError, ValueError):
+        result["pitch"] = DEFAULT_VIEW["pitch"]
+    try:
+        result["zoom"] = max(0.3, min(3.0, float(result["zoom"])))
+    except (TypeError, ValueError):
+        result["zoom"] = DEFAULT_VIEW["zoom"]
+    try:
+        result["wall_height"] = max(0, min(200, int(float(result["wall_height"]))))
+    except (TypeError, ValueError):
+        result["wall_height"] = DEFAULT_VIEW["wall_height"]
+    result["show_walls"] = bool(result.get("show_walls", True))
+    result["show_labels"] = bool(result.get("show_labels", True))
+    return result
+
+
 def default_dashboard() -> dict[str, Any]:
     return {
         "version": SCHEMA_VERSION,
@@ -52,7 +114,15 @@ def default_dashboard() -> dict[str, Any]:
             "title": "Cyborg",
             "icon": "mdi:hexagon-multiple-outline",
             "layout": {"type": "grid", "columns": 12, "gap": 16},
+            "type": "sections",
             "sections": [dict(s, items=[]) for s in DEFAULT_SECTIONS],
+        }, {
+            "id": "map",
+            "type": "floorplan",
+            "title": "Mappa 3D",
+            "icon": "mdi:floor-plan",
+            "view": dict(DEFAULT_VIEW),
+            "rooms": [],
         }],
         "theme": dict(DEFAULT_THEME),
     }
@@ -86,8 +156,8 @@ def normalize_section(section: dict[str, Any], index: int) -> dict[str, Any]:
     result.setdefault("collapsed", False)
     items = result.get("items")
     result["items"] = [
-        normalize_item(i, n) for n, i in enumerate(items)
-        if isinstance(i, dict)
+        normalize_item(i, n)
+        for n, i in enumerate(x for x in items if isinstance(x, dict))
     ] if isinstance(items, list) else []
     return result
 
@@ -131,14 +201,33 @@ def normalize_page(page: dict[str, Any], index: int) -> dict[str, Any]:
     result.setdefault("icon", "mdi:view-dashboard-outline")
     result.setdefault("layout", {"type": "grid", "columns": 12, "gap": 16})
 
+    # v3 pages carry no "type"; they are all sections pages by definition.
+    page_type = result.get("type")
+    result["type"] = page_type if page_type in PAGE_TYPES else "sections"
+
+    if result["type"] == "floorplan":
+        result["view"] = normalize_view(result.get("view"))
+        rooms = result.get("rooms")
+        result["rooms"] = [
+            normalize_room(r, n)
+            for n, r in enumerate(x for x in rooms if isinstance(x, dict))
+        ] if isinstance(rooms, list) else []
+        # A floorplan page has no card sections; drop them so the two page
+        # types can never both render on the same page.
+        result.pop("sections", None)
+        result.pop("items", None)
+        return result
+
+    result.pop("view", None)
+    result.pop("rooms", None)
     sections = result.get("sections")
     if not isinstance(sections, list):
         # No sections key at all -> either a v2 page with items, or brand new.
         migrated = _migrate_page_v2(result)
         sections = migrated or [dict(s, items=[]) for s in DEFAULT_SECTIONS]
     result["sections"] = [
-        normalize_section(s, n) for n, s in enumerate(sections)
-        if isinstance(s, dict)
+        normalize_section(sec, n)
+        for n, sec in enumerate(x for x in sections if isinstance(x, dict))
     ]
     # Drop the legacy flat list once migrated so cards can never render twice.
     result.pop("items", None)
@@ -167,8 +256,8 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
         result["pages"] = default_dashboard()["pages"]
     else:
         normalized = [
-            normalize_page(p, i) for i, p in enumerate(pages)
-            if isinstance(p, dict)
+            normalize_page(pg, i)
+            for i, pg in enumerate(x for x in pages if isinstance(x, dict))
         ]
         result["pages"] = normalized or default_dashboard()["pages"]
     return result

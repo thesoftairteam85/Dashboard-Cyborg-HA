@@ -1,0 +1,98 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#0b1119;color:#e8f4ff;font-family:Inter,Roboto,system-ui,sans-serif}
+:root{--primary-background-color:#0b1119;--primary-text-color:#e8f4ff;--card-background-color:#111a24;
+--divider-color:#24313f;--primary-color:#00e5ff;--accent:#00e5ff}
+</style></head><body>
+<script>
+// Minimal <ha-icon> stand-in: renders a filled rounded square sized by
+// --mdc-icon-size, so layout/spacing is representative without MDI fonts.
+class HaIcon extends HTMLElement{
+  static get observedAttributes(){return["icon"]}
+  connectedCallback(){this._p()} attributeChangedCallback(){this._p()}
+  _p(){this.style.display="inline-block";
+    this.style.width="var(--mdc-icon-size,24px)";this.style.height="var(--mdc-icon-size,24px)";
+    this.style.verticalAlign="middle";this.style.borderRadius="4px";
+    this.style.background="currentColor";this.style.opacity=this.style.opacity||"1";}
+}
+customElements.define("ha-icon",HaIcon);
+</script>
+<script type="module">
+import "./panel.js";
+
+const S=(state,attrs)=>({state,attributes:attrs||{}});
+const states={
+ "light.soggiorno_faretti":S("on",{friendly_name:"Faretti Soggiorno"}),
+ "light.soggiorno_piantana":S("off",{friendly_name:"Piantana"}),
+ "climate.cdz_storm":S("dry",{friendly_name:"CDZ Storm",current_temperature:26.1,temperature:24}),
+ "sensor.soggiorno_temp":S("26.3",{friendly_name:"Soggiorno Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.soggiorno_hum":S("47",{friendly_name:"Soggiorno Umidità",device_class:"humidity",unit_of_measurement:"%"}),
+ "switch.interruttore_fem_luci":S("on",{friendly_name:"FEM + LUCI"}),
+ "sensor.fem_potenza":S("760",{friendly_name:"Potenza Totale",device_class:"power",unit_of_measurement:"W"}),
+ "binary_sensor.porta_ingresso":S("on",{friendly_name:"Porta ingresso",device_class:"door"}),
+ "climate.thermostat":S("heat_cool",{friendly_name:"Termostato",current_temperature:22.4,temperature:21}),
+ "sensor.camera_temp":S("21.8",{friendly_name:"Camera Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "light.camera_abat":S("off",{friendly_name:"Abat-jour"}),
+ "cover.camera_tapparella":S("open",{friendly_name:"Tapparella",current_position:47}),
+ "sensor.bagno_temp":S("24.8",{friendly_name:"T&U Bagno Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.bagno_hum":S("62",{friendly_name:"T&U Bagno Umidità",device_class:"humidity",unit_of_measurement:"%"}),
+ "light.bagno_specchio":S("off",{friendly_name:"Luce specchio"}),
+ "switch.phon":S("off",{friendly_name:"Presa Phon"}),
+ "light.cucina_sottopensile":S("on",{friendly_name:"Sottopensile"}),
+ "sensor.cucina_potenza":S("23.4",{friendly_name:"Presa Cucina Potenza",device_class:"power",unit_of_measurement:"W"}),
+ "switch.piano_induzione":S("off",{friendly_name:"Piano Induzione"}),
+ "light.balcone_relay":S("off",{friendly_name:"Relè luce balcone"}),
+ "sensor.balcone_temp":S("28.9",{friendly_name:"Balcone Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+};
+const AREA=[["soggiorno","Soggiorno",null],["camera_da_letto","Camera da letto",null],
+ ["bagno","Bagno","mdi:toilet"],["cucina","Cucina",null],["balcone","Balcone","mdi:balcony"]];
+const MAP={soggiorno:["light.soggiorno_faretti","light.soggiorno_piantana","climate.cdz_storm","sensor.soggiorno_temp","sensor.soggiorno_hum","switch.interruttore_fem_luci","sensor.fem_potenza","binary_sensor.porta_ingresso"],
+ camera_da_letto:["climate.thermostat","sensor.camera_temp","light.camera_abat","cover.camera_tapparella"],
+ bagno:["sensor.bagno_temp","sensor.bagno_hum","light.bagno_specchio","switch.phon"],
+ cucina:["light.cucina_sottopensile","sensor.cucina_potenza","switch.piano_induzione"],
+ balcone:["light.balcone_relay","sensor.balcone_temp"]};
+
+const entReg=[];
+for(const [aid,ents] of Object.entries(MAP))
+  for(const e of ents) entReg.push({entity_id:e,area_id:aid,device_id:null,disabled_by:null,hidden_by:null});
+
+let saved=null;
+const hass={states,
+  callWS:async(m)=>{
+    if(m.type==="cyborg_dashboard/get") return {dashboard:window.__DASH__};
+    if(m.type==="cyborg_dashboard/save"){saved=m.dashboard;return {saved:true,revision:1}}
+    if(m.type==="config/area_registry/list") return AREA.map(([area_id,name,icon])=>({area_id,name,icon}));
+    if(m.type==="config/device_registry/list") return [];
+    if(m.type==="config/entity_registry/list") return entReg;
+    if(m.type==="history/history_during_period") return {};
+    return {};
+  },
+  callService:(d,s,data)=>{window.__CALLS__=(window.__CALLS__||[]).concat([d+"."+s+" "+JSON.stringify(data)])}};
+
+window.__mount=(dash,opts)=>{
+  window.__DASH__=dash;
+  document.body.innerHTML="";
+  const el=document.createElement("cyborg-dashboard");
+  document.body.appendChild(el);
+  el.hass=hass;
+  window.__EL__=el;
+  return new Promise(r=>{
+    const go=()=>{
+      if(opts&&opts.pageIndex!==undefined){el._pageIndex=opts.pageIndex;}
+      el._signature="";el.render();
+      // the registry loads asynchronously; wait for it before generating rooms
+      const wait=()=>{
+        if(!el._registry){setTimeout(wait,60);return;}
+        if(opts&&opts.editing){el._editing=true;}
+        if(opts&&opts.autoRooms){el._autoRooms();}
+        if(opts&&opts.view){Object.assign(el._page().view,opts.view);}
+        if(opts&&opts.selectRoom&&el._rooms().length){el._selected={kind:"room",roomId:el._rooms()[0].id};}
+        el._signature="";el.render();
+        setTimeout(()=>r(true),350);
+      };
+      wait();
+    };
+    setTimeout(go,300);
+  });
+};
+window.__ready=true;
+</script></body></html>

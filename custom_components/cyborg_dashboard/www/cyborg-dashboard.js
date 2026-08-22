@@ -150,6 +150,83 @@ const SECTION_PRESETS = [
   },
 ];
 
+
+/* ==========================================================================
+ * FLOORPLAN (mappa 3D)
+ *
+ * The 3D house is rendered with pure CSS 3D transforms — no Three.js, no
+ * Babylon.js, no WebGL, no vendored library of any kind. Rationale:
+ *  - zero third-party code means zero licensing and zero supply-chain risk on
+ *    a product that gets resold to clients;
+ *  - CSS 3D transforms are GPU-composited, so an extruded floorplan runs at
+ *    60fps even on the cheap wall tablets this is aimed at, where a WebGL
+ *    scene would drain battery and stutter;
+ *  - the geometry of a flat is boxes. A polygon renderer buys nothing here.
+ * A .glb/WebGL renderer can be added later as a second `engine` without
+ * changing the room schema.
+ * ======================================================================== */
+
+/** Which entities deserve a badge in a room, and how important each one is. */
+const BADGE_PRIORITY = [
+  { test: (d, dc) => d === "climate", score: 100, kind: "climate" },
+  { test: (d, dc) => d === "light", score: 95, kind: "toggle" },
+  { test: (d, dc) => d === "sensor" && dc === "temperature", score: 90, kind: "value" },
+  { test: (d, dc) => d === "cover", score: 82, kind: "cover" },
+  { test: (d, dc) => d === "binary_sensor" && ["door", "window", "motion", "occupancy"].includes(dc), score: 80, kind: "binary" },
+  { test: (d, dc) => d === "sensor" && dc === "humidity", score: 74, kind: "value" },
+  { test: (d, dc) => d === "sensor" && dc === "power", score: 70, kind: "value" },
+  { test: (d, dc) => d === "switch", score: 65, kind: "toggle" },
+  { test: (d, dc) => d === "fan", score: 60, kind: "toggle" },
+  { test: (d, dc) => d === "media_player", score: 52, kind: "toggle" },
+  { test: (d, dc) => d === "lock", score: 50, kind: "binary" },
+  { test: (d, dc) => d === "camera", score: 40, kind: "plain" },
+  { test: (d, dc) => d === "sensor" && dc === "illuminance", score: 34, kind: "value" },
+];
+
+const MAX_BADGES_PER_ROOM = 6;
+
+/** Palette cycled through when rooms are generated from HA areas. */
+const ROOM_COLORS = ["#00e5ff", "#c77dff", "#ffd166", "#06d6a0", "#ff8fab", "#8ecae6", "#ffb703", "#a0e7a0"];
+
+/** Icon guessed from an area name, so auto-generated rooms are not all identical. */
+const ROOM_ICON_HINTS = [
+  [/bagn|doccia|wc|toilet/i, "mdi:shower"],
+  [/cucin|kitchen/i, "mdi:silverware-fork-knife"],
+  [/soggiorn|salott|living/i, "mdi:sofa"],
+  [/camera|letto|bedroom/i, "mdi:bed"],
+  [/balcon|terrazz|giardin|balcony/i, "mdi:flower"],
+  [/garage|box|auto/i, "mdi:garage"],
+  [/studio|ufficio|office/i, "mdi:desk"],
+  [/ingress|corrido|entrata|hall/i, "mdi:door-open"],
+  [/lavander|laundry/i, "mdi:washing-machine"],
+  [/cantina|taverna|basement/i, "mdi:stairs-down"],
+  [/sala|pranzo|dining/i, "mdi:table-chair"],
+];
+
+function roomIconFor(name) {
+  for (const [re, icon] of ROOM_ICON_HINTS) if (re.test(name || "")) return icon;
+  return "mdi:floor-plan";
+}
+
+/**
+ * Screen-delta -> plan-delta for dragging a room while the world is rotated.
+ *
+ * The world is transformed as scale(zoom) rotateX(pitch) rotateZ(yaw), so a
+ * plan point p maps to screen by
+ *     M = zoom * [[cosY, -sinY], [cosP*sinY, cosP*cosY]]
+ * Dragging needs the inverse, otherwise grabbing a room and moving the mouse
+ * right would slide it diagonally. Perspective divide is deliberately ignored:
+ * it is a sub-pixel effect at these camera angles and inverting the full
+ * homography would not measurably improve the feel.
+ */
+function unprojectDelta(dx, dy, yawDeg, pitchDeg, zoom) {
+  const y = (yawDeg * Math.PI) / 180;
+  const cP = Math.max(0.08, Math.cos((pitchDeg * Math.PI) / 180));
+  const cY = Math.cos(y), sY = Math.sin(y);
+  const k = 1 / (zoom * cP);
+  return { dx: k * (cP * cY * dx + sY * dy), dy: k * (-cP * sY * dx + cY * dy) };
+}
+
 const SIZE_SPAN = { sm: 3, md: 4, lg: 6, xl: 12 };
 const SIZE_LABEL = { sm: "Piccola", md: "Media", lg: "Grande", xl: "Piena larghezza" };
 
@@ -216,6 +293,10 @@ class CyborgDashboard extends HTMLElement {
     this._history = {};
     this._pendingHistory = new Set();
     this._entityQuery = "";
+    this._pageIndex = 0;
+    this._registry = null;      // {areas, byArea} from the HA registries
+    this._registryLoading = false;
+    this._drag = null;          // active room drag
   }
 
   set hass(value) {
@@ -232,7 +313,15 @@ class CyborgDashboard extends HTMLElement {
 
   // ---------------------------------------------------------------- data ---
 
-  _page() { return this._dashboard && this._dashboard.pages[0]; }
+  _page() {
+    if (!this._dashboard) return null;
+    const pages = this._dashboard.pages;
+    if (this._pageIndex >= pages.length) this._pageIndex = 0;
+    return pages[this._pageIndex];
+  }
+  _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
+  _rooms() { const p = this._page(); return (p && p.rooms) || []; }
+  _room(id) { return this._rooms().find((r) => r.id === id) || null; }
   _sections() { const p = this._page(); return (p && p.sections) || []; }
   _section(id) { return this._sections().find((s) => s.id === id) || null; }
   _card(sectionId, itemId) {
@@ -250,9 +339,20 @@ class CyborgDashboard extends HTMLElement {
 
   _buildSignature() {
     if (!this._hass || !this._dashboard) return "";
-    const parts = [this._editing ? "e" : "v", JSON.stringify(this._selected || null)];
-    for (const s of this._sections()) {
-      for (const it of s.items) {
+    const parts = [this._editing ? "e" : "v", String(this._pageIndex),
+      JSON.stringify(this._selected || null)];
+    if (this._isFloorplan()) {
+      parts.push(this._registry ? "reg" : "noreg");
+      for (const room of this._rooms()) {
+        for (const id of this._roomEntities(room)) {
+          const st = this._hass.states[id];
+          parts.push(id + "=" + (st ? st.state : "?"));
+        }
+      }
+      return parts.join("|");
+    }
+    for (const sec of this._sections()) {
+      for (const it of sec.items) {
         const st = this._hass.states[it.entity_id];
         parts.push(it.entity_id + "=" + (st ? st.state : "?"));
       }
@@ -459,6 +559,313 @@ class CyborgDashboard extends HTMLElement {
   }
 
   // ------------------------------------------------------------ rendering --
+
+  // ----------------------------------------------------------- floorplan --
+
+  /**
+   * Load the HA area/device/entity registries.
+   *
+   * Verified against home-assistant/core 2026.8.3: the commands are
+   * config/area_registry/list, config/device_registry/list and
+   * config/entity_registry/list. An entity's effective area is its own
+   * area_id falling back to its device's area_id — that is exactly what HA
+   * core does in helpers/entity_registry.py, and skipping the device fallback
+   * would leave most entities unassigned, because in practice the area is set
+   * on the device, not on each entity.
+   */
+  async _loadRegistry() {
+    if (this._registryLoading) return;
+    this._registryLoading = true;
+    try {
+      const [areas, devices, entities] = await Promise.all([
+        this._hass.callWS({ type: "config/area_registry/list" }),
+        this._hass.callWS({ type: "config/device_registry/list" }),
+        this._hass.callWS({ type: "config/entity_registry/list" }),
+      ]);
+      const deviceArea = {};
+      for (const d of devices || []) deviceArea[d.id] = d.area_id || null;
+      const byArea = {};
+      for (const e of entities || []) {
+        if (e.disabled_by || e.hidden_by) continue;
+        const area = e.area_id || (e.device_id ? deviceArea[e.device_id] : null);
+        if (!area) continue;
+        (byArea[area] = byArea[area] || []).push(e.entity_id);
+      }
+      this._registry = { areas: areas || [], byArea };
+    } catch (err) {
+      this._registry = { areas: [], byArea: {}, error: true };
+    }
+    this._registryLoading = false;
+    this._touch();
+  }
+
+  /** Entities shown as badges in a room: explicit list, or derived from its area. */
+  _roomEntities(room) {
+    if (Array.isArray(room.entities)) return room.entities.filter((e) => this._hass.states[e]);
+    if (!room.area_id || !this._registry) return [];
+    const pool = this._registry.byArea[room.area_id] || [];
+    const scored = [];
+    for (const id of pool) {
+      const st = this._hass.states[id];
+      if (!st || st.state === "unavailable" || st.state === "unknown") continue;
+      const d = domainOf(id), dc = st.attributes.device_class;
+      const rule = BADGE_PRIORITY.find((r) => r.test(d, dc));
+      if (!rule) continue;
+      scored.push({ id, score: rule.score });
+    }
+    scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    return scored.slice(0, MAX_BADGES_PER_ROOM).map((x) => x.id);
+  }
+
+  _badgeKind(entityId) {
+    const st = this._hass.states[entityId];
+    if (!st) return "plain";
+    const rule = BADGE_PRIORITY.find((r) => r.test(domainOf(entityId), st.attributes.device_class));
+    return rule ? rule.kind : "plain";
+  }
+
+  /** Build rooms from the HA areas, packed into a tidy grid the user can then move. */
+  _autoRooms() {
+    const page = this._page();
+    if (!this._registry || !this._registry.areas.length) return;
+    const areas = this._registry.areas;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(areas.length)));
+    const W = 230, H = 180, GAP = 18;
+    page.rooms = areas.map((a, i) => ({
+      id: uid("room"),
+      area_id: a.area_id,
+      title: a.name || a.area_id,
+      icon: a.icon || roomIconFor(a.name || a.area_id),
+      color: ROOM_COLORS[i % ROOM_COLORS.length],
+      x: (i % cols) * (W + GAP),
+      y: Math.floor(i / cols) * (H + GAP),
+      w: W, h: H,
+      entities: null,
+    }));
+    this._selected = null;
+    this._touch();
+  }
+
+  _addRoom() {
+    const page = this._page();
+    const rooms = page.rooms;
+    const maxX = rooms.reduce((m, r) => Math.max(m, r.x + r.w), 0);
+    const room = { id: uid("room"), area_id: null, title: "Nuova stanza",
+      icon: "mdi:floor-plan", color: ROOM_COLORS[rooms.length % ROOM_COLORS.length],
+      x: maxX + 18, y: 0, w: 200, h: 160, entities: null };
+    rooms.push(room);
+    this._selected = { kind: "room", roomId: room.id };
+    this._touch();
+  }
+
+  _removeRoom(id) {
+    const page = this._page();
+    page.rooms = page.rooms.filter((r) => r.id !== id);
+    if (this._selected && this._selected.roomId === id) this._selected = null;
+    this._touch();
+  }
+
+  /** Plan bounds, used to size and centre the world. */
+  _planBounds() {
+    const rooms = this._rooms();
+    if (!rooms.length) return { w: 600, h: 400 };
+    let w = 0, h = 0;
+    for (const r of rooms) { w = Math.max(w, r.x + r.w); h = Math.max(h, r.y + r.h); }
+    return { w: Math.max(200, w), h: Math.max(200, h) };
+  }
+
+  _badgeMarkup(entityId, room) {
+    const st = this._hass.states[entityId];
+    if (!st) return "";
+    const kind = this._badgeKind(entityId);
+    const state = st.state;
+    const attrs = st.attributes;
+    const unit = attrs.unit_of_measurement || "";
+    const on = ON_STATES.has(state);
+    let text, cls = "", icon = autoIcon(entityId, st);
+
+    if (kind === "climate") {
+      const cur = attrs.current_temperature;
+      text = (cur !== undefined ? cur + "°" : String(state)) ;
+      cls = on ? "on" : "";
+    } else if (kind === "toggle") {
+      text = on ? "ON" : "OFF";
+      cls = on ? "on" : "off";
+    } else if (kind === "binary") {
+      text = on ? (attrs.device_class === "door" || attrs.device_class === "window" ? "APERTO" : "ON") : "OK";
+      cls = on ? "alert" : "";
+    } else if (kind === "cover") {
+      const pos = attrs.current_position;
+      text = pos !== undefined ? pos + "%" : String(state);
+      cls = on ? "on" : "";
+    } else if (kind === "value") {
+      const n = parseFloat(state);
+      text = (Number.isFinite(n) ? (Math.abs(n) >= 100 ? Math.round(n) : n.toFixed(1)) : state) + (unit ? " " + unit : "");
+    } else {
+      text = String(state).replace(/_/g, " ");
+    }
+    const title = attrs.friendly_name || entityId;
+    return `<button class="fp-badge ${cls}" data-fp-badge="${esc(entityId)}" title="${esc(title)}">
+        <ha-icon icon="${esc(icon)}"></ha-icon><span>${esc(text)}</span>
+      </button>`;
+  }
+
+  _renderRoom(room, view) {
+    const entities = this._roomEntities(room);
+    const selected = this._selected && this._selected.kind === "room" && this._selected.roomId === room.id;
+    const wallH = view.show_walls ? view.wall_height : 0;
+    const badges = entities.map((e) => this._badgeMarkup(e, room)).join("");
+
+    // Walls are extruded from each edge of the floor. transform-origin sits on
+    // the edge itself so the wall hinges up out of the floor plane instead of
+    // rotating about its own centre and ending up half-buried.
+    const walls = view.show_walls ? `
+      <div class="fp-wall" style="width:${room.w}px;height:${wallH}px;left:0;top:0;transform-origin:0 0;transform:rotateX(90deg)"></div>
+      <div class="fp-wall" style="width:${room.w}px;height:${wallH}px;left:0;top:${room.h}px;transform-origin:0 0;transform:rotateX(90deg)"></div>
+      <div class="fp-wall side" style="width:${room.h}px;height:${wallH}px;left:0;top:0;transform-origin:0 0;transform:rotateZ(90deg) rotateX(90deg)"></div>
+      <div class="fp-wall side" style="width:${room.h}px;height:${wallH}px;left:${room.w}px;top:0;transform-origin:0 0;transform:rotateZ(90deg) rotateX(90deg)"></div>` : "";
+
+    const label = view.show_labels
+      ? `<div class="fp-label"><ha-icon icon="${esc(room.icon)}"></ha-icon><span>${esc(room.title)}</span></div>`
+      : "";
+    const badgeLayer = badges ? `<div class="fp-badges">${badges}</div>` : "";
+    const tag = (label || badgeLayer) ? `
+      <div class="fp-anchor" style="transform:translateZ(${wallH + 14}px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1))">
+        <div class="fp-tag">${label}${badgeLayer}</div>
+      </div>` : "";
+
+    return `<div class="fp-room${selected ? " selected" : ""}${this._editing ? " editable" : ""}"
+        data-room="${esc(room.id)}"
+        style="--rc:${esc(room.color)};left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px">
+        <div class="fp-floor"></div>
+        ${walls}
+        ${tag}
+      </div>`;
+  }
+
+  _renderFloorplan() {
+    const page = this._page();
+    const view = page.view || {};
+    const rooms = this._rooms();
+
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+
+    if (!rooms.length) {
+      const ready = this._registry && this._registry.areas.length;
+      return `<div class="bootstrap">
+          <ha-icon icon="mdi:floor-plan"></ha-icon>
+          <h2>Mappa 3D vuota</h2>
+          <p>${ready
+            ? `Cyborg ha trovato <strong>${this._registry.areas.length} aree</strong> in Home Assistant (${esc(this._registry.areas.map((a) => a.name).join(", "))}). Genera la pianta e le stanze compariranno con le loro entità già collegate.`
+            : this._registry ? "Nessuna area configurata in Home Assistant. Crea le aree in Impostazioni → Aree, oppure aggiungi le stanze a mano." : "Lettura del registro aree di Home Assistant..."}</p>
+          ${ready ? '<button data-auto-rooms><ha-icon icon="mdi:auto-fix"></ha-icon> GENERA PIANTA DALLE AREE</button>' : ""}
+        </div>`;
+    }
+
+    const bounds = this._planBounds();
+    return `<div class="fp-viewport${this._editing ? " editing" : ""}" data-fp-viewport
+        style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${view.zoom}">
+        <div class="fp-stage">
+          <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px">
+            <div class="fp-ground" style="width:${bounds.w + 80}px;height:${bounds.h + 80}px;left:-40px;top:-40px"></div>
+            ${rooms.map((r) => this._renderRoom(r, view)).join("")}
+          </div>
+        </div>
+        <div class="fp-hud">
+          <button class="fp-hud-btn" data-view-nudge="yaw:-15" title="Ruota a sinistra"><ha-icon icon="mdi:rotate-left"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="yaw:15" title="Ruota a destra"><ha-icon icon="mdi:rotate-right"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="pitch:-6" title="Abbassa la camera"><ha-icon icon="mdi:angle-acute"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="pitch:6" title="Alza la camera"><ha-icon icon="mdi:cube-outline"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="zoom:-0.15" title="Riduci"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="zoom:0.15" title="Ingrandisci"><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></button>
+          <button class="fp-hud-btn ${view.show_walls ? "active" : ""}" data-view-toggle="show_walls" title="Mostra/nascondi muri"><ha-icon icon="mdi:wall"></ha-icon></button>
+          <button class="fp-hud-btn ${view.show_labels ? "active" : ""}" data-view-toggle="show_labels" title="Mostra/nascondi nomi stanze"><ha-icon icon="mdi:label-outline"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-flat title="Vista dall'alto (pianta)"><ha-icon icon="mdi:crop-free"></ha-icon></button>
+        </div>
+        ${this._editing ? '<div class="fp-hint">Trascina una stanza per spostarla · clicca per configurarla</div>' : ""}
+      </div>`;
+  }
+
+  _renderRoomEditor(room) {
+    const areas = (this._registry && this._registry.areas) || [];
+    const derived = this._roomEntities(room);
+    const custom = Array.isArray(room.entities);
+    return `<aside class="editor">
+      <div class="editor-title">
+        <div><small>STANZA</small><h2>${esc(room.title)}</h2></div>
+        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>
+      <div class="section">
+        <label>NOME<input data-room-prop="title" value="${esc(room.title)}"></label>
+        <label>AREA HOME ASSISTANT<select data-room-prop="area_id">
+          <option value="">— nessuna —</option>
+          ${areas.map((a) => `<option value="${esc(a.area_id)}" ${room.area_id === a.area_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select></label>
+        <span class="hint">Collegando l'area, le entità di quella stanza compaiono da sole sulla mappa. ${derived.length} entità trovate ora.</span>
+        <label>COLORE<input type="color" data-room-prop="color" value="${esc(room.color)}"></label>
+        <label>ICONA
+          <div class="icon-editor-row">
+            <ha-icon data-icon-preview icon="${esc(room.icon)}"></ha-icon>
+            <input data-room-prop="icon" data-icon-live value="${esc(room.icon)}" placeholder="mdi:...">
+          </div>
+          <div class="icon-palette">${SECTION_ICONS.map((i) =>
+            `<button type="button" class="icon-swatch" data-icon-pick="${esc(i)}" title="${esc(i)}"><ha-icon icon="${esc(i)}"></ha-icon></button>`).join("")}</div>
+        </label>
+      </div>
+      <div class="section">
+        <strong>GEOMETRIA</strong>
+        <span class="hint">Puoi anche trascinare la stanza direttamente sulla mappa.</span>
+        <div class="two">
+          <label>X<input type="number" step="10" data-room-prop="x" value="${room.x}"></label>
+          <label>Y<input type="number" step="10" data-room-prop="y" value="${room.y}"></label>
+        </div>
+        <div class="two">
+          <label>LARGHEZZA<input type="number" step="10" min="40" data-room-prop="w" value="${room.w}"></label>
+          <label>PROFONDITÀ<input type="number" step="10" min="40" data-room-prop="h" value="${room.h}"></label>
+        </div>
+      </div>
+      <div class="section">
+        <strong>ENTITÀ MOSTRATE</strong>
+        <label class="check"><input type="checkbox" data-room-auto ${custom ? "" : "checked"}> Automatiche dall'area</label>
+        <div class="room-entities">${derived.length
+          ? derived.map((e) => `<div class="room-ent"><ha-icon icon="${esc(autoIcon(e, this._hass.states[e]))}"></ha-icon>
+              <span>${esc((this._hass.states[e] && this._hass.states[e].attributes.friendly_name) || e)}</span>
+              ${custom ? `<button class="mini danger" data-room-ent-remove="${esc(e)}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}</div>`).join("")
+          : '<div class="entity-result-empty">Nessuna entità. Collega un\'area, oppure disattiva l\'automatico e aggiungile a mano.</div>'}</div>
+        ${custom ? `<label>AGGIUNGI ENTITÀ<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
+          <div class="entity-results" data-entity-results>${this._entityResults()}</div>` : ""}
+      </div>
+      <button class="delete" data-room-remove="${esc(room.id)}">ELIMINA STANZA</button>
+    </aside>`;
+  }
+
+  _renderFloorplanPageEditor() {
+    const page = this._page();
+    const view = page.view || {};
+    const areas = (this._registry && this._registry.areas) || [];
+    return `<aside class="editor">
+      <div class="editor-title"><div><small>MAPPA 3D</small><h2>${esc(page.title)}</h2></div></div>
+      <div class="section">
+        <label>TITOLO PAGINA<input data-page-prop="title" value="${esc(page.title || "")}"></label>
+        <label>ICONA${iconField("data-page-prop", "icon", page.icon || "mdi:floor-plan")}</label>
+      </div>
+      <div class="section">
+        <strong>STANZE</strong>
+        <span class="hint">${this._rooms().length} stanze sulla pianta · ${areas.length} aree disponibili in Home Assistant.</span>
+        <button class="secondary wide" data-add-room><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI STANZA</button>
+        <button class="secondary wide danger-outline" data-auto-rooms><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DALLE AREE</button>
+      </div>
+      <div class="section">
+        <strong>CAMERA</strong>
+        <label>ROTAZIONE · ${Math.round(view.yaw)}°<input type="range" min="0" max="359" step="1" data-view-prop="yaw" value="${view.yaw}"></label>
+        <label>INCLINAZIONE · ${Math.round(view.pitch)}°<input type="range" min="0" max="85" step="1" data-view-prop="pitch" value="${view.pitch}"></label>
+        <label>ZOOM · ${Number(view.zoom).toFixed(2)}×<input type="range" min="0.3" max="3" step="0.05" data-view-prop="zoom" value="${view.zoom}"></label>
+        <label>ALTEZZA MURI · ${view.wall_height}<input type="range" min="0" max="200" step="2" data-view-prop="wall_height" value="${view.wall_height}"></label>
+        <label class="check"><input type="checkbox" data-view-prop="show_walls" ${view.show_walls ? "checked" : ""}> Mostra muri</label>
+        <label class="check"><input type="checkbox" data-view-prop="show_labels" ${view.show_labels ? "checked" : ""}> Mostra nomi stanze</label>
+      </div>
+    </aside>`;
+  }
 
   _cardBody(item, st) {
     const type = item.type || "entity";
@@ -730,6 +1137,11 @@ class CyborgDashboard extends HTMLElement {
   }
 
   _renderEditor() {
+    if (this._isFloorplan()) {
+      const room = this._selected && this._selected.kind === "room"
+        ? this._room(this._selected.roomId) : null;
+      return room ? this._renderRoomEditor(room) : this._renderFloorplanPageEditor();
+    }
     const card = this._selectedCard();
     if (card) return this._renderCardEditor(card);
     const section = this._selectedSection();
@@ -751,11 +1163,23 @@ class CyborgDashboard extends HTMLElement {
     const caret = active && active.selectionStart;
 
     const p = this._page();
-    const sections = this._sections();
     const theme = this._dashboard.theme || {};
+    const floorplan = this._isFloorplan();
+    const sections = floorplan ? [] : this._sections();
     const total = sections.reduce((n, s) => n + s.items.length, 0);
+    const pages = this._dashboard.pages;
 
-    const body = sections.length
+    const tabs = pages.length > 1 ? `<nav class="page-tabs">${pages.map((pg, i) =>
+      `<button class="page-tab ${i === this._pageIndex ? "active" : ""}" data-page-tab="${i}">
+         <ha-icon icon="${esc(pg.icon || "mdi:view-dashboard-outline")}"></ha-icon>
+         <span>${esc(pg.title || "Pagina " + (i + 1))}</span>
+       </button>`).join("")}</nav>` : "";
+
+    const subtitle = floorplan
+      ? `${this._rooms().length} STANZE · ${this._editing ? "MODIFICA ATTIVA" : "MAPPA 3D"}`
+      : `${sections.length} SEZIONI · ${total} CARD · ${this._editing ? "MODIFICA ATTIVA" : "SISTEMA ONLINE"}`;
+
+    const body = floorplan ? this._renderFloorplan() : sections.length
       ? sections.map((s, i) => this._renderSection(s, i, sections.length)).join("")
       : `<div class="bootstrap">
            <ha-icon icon="mdi:view-dashboard-outline"></ha-icon>
@@ -771,13 +1195,15 @@ class CyborgDashboard extends HTMLElement {
             <ha-icon class="brand-icon" icon="${esc(p.icon || "mdi:hexagon-multiple-outline")}"></ha-icon>
             <div>
               <h1>${esc(p.title || "Cyborg")}</h1>
-              <div class="sub">${sections.length} SEZIONI · ${total} CARD · ${this._editing ? "MODIFICA ATTIVA" : "SISTEMA ONLINE"}</div>
+              <div class="sub">${subtitle}</div>
             </div>
           </div>
           <div class="tools">
             ${this._saved ? '<span class="status ok"><ha-icon icon="mdi:check"></ha-icon> SALVATO</span>' : ""}
             ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
-            ${this._editing ? `<button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>
+            ${this._editing ? `${floorplan
+                 ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
+                 : '<button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>'}
                <button data-save><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
               <ha-icon icon="${this._editing ? "mdi:eye-outline" : "mdi:pencil-outline"}"></ha-icon>
@@ -785,6 +1211,7 @@ class CyborgDashboard extends HTMLElement {
             </button>
           </div>
         </header>
+        ${tabs}
         <div class="workspace ${this._editing ? "editing" : ""}">
           <main>${body}</main>
           ${this._editing ? this._renderEditor() : ""}
@@ -881,6 +1308,19 @@ class CyborgDashboard extends HTMLElement {
       });
     }
 
+    // --- room entity search (room editor lives outside the card branch)
+    if (this._isFloorplan()) {
+      const roomSearch = q("[data-entity-search]");
+      if (roomSearch) {
+        roomSearch.oninput = () => {
+          this._entityQuery = roomSearch.value;
+          const box = q("[data-entity-results]");
+          if (box) { box.innerHTML = this._entityResults(); this._bindEntityRows(); }
+        };
+      }
+      this._bindEntityRows();
+    }
+
     // --- card props
     if (card) {
       all("[data-prop]").forEach((el) => {
@@ -909,6 +1349,107 @@ class CyborgDashboard extends HTMLElement {
       this._bindEntityRows();
     }
 
+    // --- page tabs
+    all("[data-page-tab]").forEach((el) => {
+      el.onclick = () => {
+        this._pageIndex = parseInt(el.getAttribute("data-page-tab"), 10) || 0;
+        this._selected = null;
+        this._touch();
+      };
+    });
+
+    // --- floorplan
+    all("[data-auto-rooms]").forEach((el) => { el.onclick = () => this._autoRooms(); });
+    all("[data-add-room]").forEach((el) => { el.onclick = () => this._addRoom(); });
+    all("[data-room-remove]").forEach((el) => {
+      el.onclick = () => this._removeRoom(el.getAttribute("data-room-remove"));
+    });
+    all("[data-view-nudge]").forEach((el) => {
+      el.onclick = () => {
+        const [key, raw] = el.getAttribute("data-view-nudge").split(":");
+        this._nudgeView(key, parseFloat(raw));
+      };
+    });
+    all("[data-view-toggle]").forEach((el) => {
+      el.onclick = () => {
+        const key = el.getAttribute("data-view-toggle");
+        const view = this._page().view;
+        view[key] = !view[key];
+        this._touch();
+      };
+    });
+    const flat = q("[data-view-flat]");
+    if (flat) flat.onclick = () => {
+      const view = this._page().view;
+      // Toggle between the plan view and the isometric default. The plan is
+      // drawn in the screen plane, so pitch 0 looks straight down at it and
+      // larger angles tip it away into the isometric view.
+      const isFlat = view.pitch <= 12;
+      view.pitch = isFlat ? 56 : 0;
+      view.yaw = isFlat ? 32 : 0;
+      this._touch();
+    };
+    all("[data-view-prop]").forEach((el) => {
+      const apply = () => {
+        const key = el.getAttribute("data-view-prop");
+        const view = this._page().view;
+        view[key] = el.type === "checkbox" ? el.checked : parseFloat(el.value);
+        this._touch();
+      };
+      el.onchange = apply;
+      // Sliders feel dead without live feedback, but a full re-render per
+      // input event would be wasteful: update the CSS variable directly and
+      // only commit state on change.
+      if (el.type === "range") {
+        el.oninput = () => {
+          const key = el.getAttribute("data-view-prop");
+          const vp = q("[data-fp-viewport]");
+          if (!vp) return;
+          if (key === "yaw" || key === "pitch") vp.style.setProperty("--" + key, el.value + "deg");
+          else if (key === "zoom") vp.style.setProperty("--zoom", el.value);
+          else apply();
+        };
+      }
+    });
+    all("[data-fp-badge]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        this._badgeTap(el.getAttribute("data-fp-badge"));
+      };
+    });
+    all("[data-room-prop]").forEach((el) => {
+      el.onchange = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const key = el.getAttribute("data-room-prop");
+        const numeric = ["x", "y", "w", "h"].includes(key);
+        let value = numeric ? parseInt(el.value, 10) || 0 : el.value;
+        if (key === "w" || key === "h") value = Math.max(40, value);
+        if (key === "area_id" && !value) value = null;
+        room[key] = value;
+        this._touch();
+      };
+    });
+    const roomAuto = q("[data-room-auto]");
+    if (roomAuto) roomAuto.onchange = () => {
+      const room = this._room(this._selected && this._selected.roomId);
+      if (!room) return;
+      // Switching off "automatic" freezes whatever the area currently yields,
+      // so the user starts from a populated list instead of an empty one.
+      room.entities = roomAuto.checked ? null : this._roomEntities(room).slice();
+      this._touch();
+    };
+    all("[data-room-ent-remove]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room || !Array.isArray(room.entities)) return;
+        const id = el.getAttribute("data-room-ent-remove");
+        room.entities = room.entities.filter((e) => e !== id);
+        this._touch();
+      };
+    });
+    this._bindRoomDrag();
+
     // --- live icon preview (no full re-render: keeps the field focused)
     all("[data-icon-live]").forEach((el) => {
       el.oninput = () => {
@@ -931,9 +1472,17 @@ class CyborgDashboard extends HTMLElement {
   _bindEntityRows() {
     Array.from(this.querySelectorAll("[data-pick-entity]")).forEach((row) => {
       row.onclick = () => {
+        const id = row.getAttribute("data-pick-entity");
+        if (this._isFloorplan()) {
+          const room = this._room(this._selected && this._selected.roomId);
+          if (!room || !Array.isArray(room.entities)) return;
+          if (!room.entities.includes(id)) room.entities.push(id);
+          this._entityQuery = "";
+          this._touch();
+          return;
+        }
         const c = this._selectedCard();
         if (!c) return;
-        const id = row.getAttribute("data-pick-entity");
         c.entity_id = id;
         const st = this._hass.states[id];
         if (!c.appearance.icon) c.appearance.icon = autoIcon(id, st);
@@ -941,6 +1490,76 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
+  }
+
+  _nudgeView(key, delta) {
+    const view = this._page().view;
+    if (key === "yaw") view.yaw = (((view.yaw + delta) % 360) + 360) % 360;
+    else if (key === "pitch") view.pitch = Math.max(0, Math.min(85, view.pitch + delta));
+    else if (key === "zoom") view.zoom = Math.max(0.3, Math.min(3, +(view.zoom + delta).toFixed(2)));
+    this._touch();
+  }
+
+  /**
+   * Drag a room across the plan.
+   *
+   * The pointer moves in screen space but the room lives in plan space, and the
+   * world is rotated, so the screen delta is run through unprojectDelta().
+   * Position is written straight to element style during the gesture and only
+   * committed to state on release — re-rendering on every pointermove would
+   * destroy the element being dragged mid-gesture.
+   */
+  _bindRoomDrag() {
+    if (!this._editing || !this._isFloorplan()) return;
+    const view = this._page().view;
+    Array.from(this.querySelectorAll(".fp-room.editable")).forEach((el) => {
+      el.onpointerdown = (ev) => {
+        if (ev.target.closest("[data-fp-badge]")) return;
+        const room = this._room(el.getAttribute("data-room"));
+        if (!room) return;
+        ev.preventDefault();
+        el.setPointerCapture(ev.pointerId);
+        const start = { x: ev.clientX, y: ev.clientY, rx: room.x, ry: room.y, moved: false };
+
+        el.onpointermove = (mv) => {
+          const sdx = mv.clientX - start.x, sdy = mv.clientY - start.y;
+          if (!start.moved && Math.hypot(sdx, sdy) < 4) return;
+          start.moved = true;
+          const d = unprojectDelta(sdx, sdy, view.yaw, view.pitch, view.zoom);
+          room.x = Math.round((start.rx + d.dx) / 5) * 5;
+          room.y = Math.round((start.ry + d.dy) / 5) * 5;
+          el.style.left = room.x + "px";
+          el.style.top = room.y + "px";
+        };
+
+        el.onpointerup = () => {
+          el.onpointermove = null;
+          el.onpointerup = null;
+          try { el.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+          if (start.moved) { this._touch(); return; }
+          this._selected = { kind: "room", roomId: room.id };
+          this._entityQuery = "";
+          this._touch();
+        };
+      };
+    });
+  }
+
+  _badgeTap(entityId) {
+    const st = this._hass.states[entityId];
+    if (!st) return;
+    const kind = this._badgeKind(entityId);
+    const domain = domainOf(entityId);
+    if (kind === "toggle" || (kind === "binary" && domain === "lock")) {
+      const serviceDomain = ["switch", "light", "fan", "media_player", "lock", "cover", "input_boolean"].includes(domain)
+        ? domain : "homeassistant";
+      this._hass.callService(serviceDomain, domain === "lock" ? (ON_STATES.has(st.state) ? "lock" : "unlock") : "toggle",
+        { entity_id: entityId });
+      return;
+    }
+    this.dispatchEvent(new CustomEvent("hass-more-info", {
+      detail: { entityId }, bubbles: true, composed: true,
+    }));
   }
 
   _tap(sectionId, itemId) {
@@ -1094,6 +1713,49 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
 .preset{--accent:#00e5ff;flex-direction:column;gap:5px;padding:12px 8px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);color:var(--primary-text-color);font-size:10px;letter-spacing:.06em}
 .preset ha-icon{--mdc-icon-size:20px;color:var(--accent)}
+
+
+.page-tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px}
+.page-tab{padding:9px 14px;border-radius:11px;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.55;font-size:11px}
+.page-tab ha-icon{--mdc-icon-size:16px}
+.page-tab:hover{opacity:.85}
+.page-tab.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+
+.fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:1900px;perspective-origin:50% 42%}
+.fp-stage{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d}
+.fp-world{position:absolute;transform-style:preserve-3d;transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw));transition:transform .28s cubic-bezier(.4,0,.2,1)}
+.fp-ground{position:absolute;border-radius:14px;background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),rgba(255,255,255,.02);box-shadow:0 0 70px rgba(0,0,0,.6)}
+.fp-room{position:absolute;transform-style:preserve-3d}
+.fp-room.editable{cursor:grab}
+.fp-room.editable:active{cursor:grabbing}
+.fp-floor{position:absolute;inset:0;border-radius:3px;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a));border:1px solid color-mix(in srgb,var(--rc) 55%,transparent);box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent)}
+.fp-room.selected .fp-floor{border:2px solid #fff;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 52%,#0d141d),color-mix(in srgb,var(--rc) 26%,#0b111a));box-shadow:inset 0 0 60px color-mix(in srgb,var(--rc) 45%,transparent),0 0 40px color-mix(in srgb,var(--rc) 70%,transparent)}
+.fp-room.selected .fp-wall{border-color:#fff;filter:brightness(1.35)}
+.fp-wall{position:absolute;background:linear-gradient(to top,color-mix(in srgb,var(--rc) 34%,#0a1017) 0%,color-mix(in srgb,var(--rc) 12%,#0a1017) 65%,color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0}
+.fp-wall.side{filter:brightness(.82)}
+.fp-anchor{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d;pointer-events:none}
+.fp-tag{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:5px;width:max-content}
+.fp-label{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:99px;background:rgba(6,12,20,.82);border:1px solid color-mix(in srgb,var(--rc) 50%,transparent);backdrop-filter:blur(6px);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--rc);white-space:nowrap}
+.fp-label ha-icon{--mdc-icon-size:15px}
+.fp-badges{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;max-width:186px;pointer-events:auto}
+.fp-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:99px;font-size:11px;font-weight:650;letter-spacing:.02em;white-space:nowrap;color:#e8f4ff;background:rgba(8,14,22,.86);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(6px);box-shadow:0 3px 10px rgba(0,0,0,.45);cursor:pointer;transition:transform .15s,border-color .15s}
+.fp-badge:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.4)}
+.fp-badge ha-icon{--mdc-icon-size:14px;opacity:.85}
+.fp-badge.on{color:#0a1017;background:linear-gradient(180deg,#ffd98a,#ffc247);border-color:#ffdb8f;box-shadow:0 3px 14px rgba(255,194,71,.45)}
+.fp-badge.on ha-icon{opacity:1}
+.fp-badge.off{opacity:.72}
+.fp-badge.alert{color:#0a1017;background:linear-gradient(180deg,#ff8fa3,#ff3d71);border-color:#ff8fa3;box-shadow:0 3px 14px rgba(255,61,113,.45)}
+.fp-hud{position:absolute;left:14px;bottom:14px;display:flex;gap:5px;flex-wrap:wrap;padding:6px;border-radius:13px;background:rgba(8,14,22,.8);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(8px)}
+.fp-hud-btn{padding:7px;border-radius:9px;background:transparent;border:1px solid transparent;color:#cfe6f5;opacity:.7}
+.fp-hud-btn:hover{opacity:1;background:rgba(255,255,255,.08)}
+.fp-hud-btn.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
+.fp-hud-btn ha-icon{--mdc-icon-size:17px;display:block}
+.fp-hint{position:absolute;right:14px;bottom:18px;font:10px ui-monospace,monospace;letter-spacing:1.4px;opacity:.4;pointer-events:none}
+.room-entities{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+.room-ent{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;background:color-mix(in srgb,var(--accent) 7%,transparent);border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);font-size:11.5px}
+.room-ent ha-icon{--mdc-icon-size:16px;color:var(--accent);flex-shrink:0}
+.room-ent span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.editor input[type=range]{padding:0;height:26px;background:transparent;border:0;accent-color:var(--accent)}
 
 @media(max-width:1200px){.workspace.editing{grid-template-columns:minmax(0,1fr)}.editor{position:relative;top:0;max-height:none}}
 @media(max-width:820px){.shell{padding:14px 14px 40px}.grid{grid-template-columns:repeat(6,minmax(0,1fr))}.item{grid-column:span 6!important}.top{align-items:flex-start}}

@@ -4,6 +4,57 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.6.0] - 2026-08-22
+
+Mappa 3D della casa, costruita dentro Cyborg senza alcuna dipendenza esterna.
+
+### Novità
+- **Pagine multiple con tab.** Una pagina ora dichiara un `type`: `sections`
+  (la dashboard a card) oppure `floorplan` (la mappa 3D). L'installazione
+  standard ne monta due, navigabili dai tab in testata.
+- **Mappa 3D isometrica in CSS 3D puro.** Niente Three.js, niente Babylon.js,
+  niente WebGL, niente libreria vendorizzata: le stanze sono volumi estrusi
+  con pavimento e quattro muri, resi con `transform: rotateX()/rotateZ()` e
+  composti dalla GPU. Motivazione: zero codice di terzi significa zero rischio
+  di licenza e di supply-chain su un prodotto destinato alla rivendita, e un
+  tablet economico da parete regge 60fps dove una scena WebGL scalderebbe e
+  scatterebbe. La geometria di un appartamento sono scatole: un renderer
+  poligonale qui non aggiunge nulla.
+- **Generazione della pianta dalle aree di Home Assistant.** Un pulsante legge
+  il registro aree e crea una stanza per area, con nome, icona dedotta dal
+  nome (Soggiorno -> divano, Bagno -> doccia, ...) e colore distinto.
+- **Entità collegate da sole.** Le targhette di una stanza escono dal registro
+  entità: l'area effettiva di un'entità è il suo `area_id` con fallback su
+  quello del dispositivo — la stessa logica di HA core
+  (`helpers/entity_registry.py`), senza la quale la maggior parte delle entità
+  resterebbe non assegnata, perché in pratica l'area si imposta sul
+  dispositivo. Le entità sono ordinate per rilevanza (clima, luci,
+  temperatura, tapparelle, aperture, ...) e limitate a 6 per stanza.
+- **Targhette leggibili sempre.** Ogni stanza ha un unico cartellino
+  controruotato rispetto alla camera, quindi resta frontale a qualsiasi
+  rotazione. Le luci e gli interruttori si accendono toccandoli.
+- **Trascinamento delle stanze.** Il delta del puntatore viene riportato in
+  coordinate di pianta invertendo la trasformazione del mondo, altrimenti
+  trascinando verso destra con la vista ruotata la stanza scivolerebbe in
+  diagonale.
+- **Controlli camera:** rotazione, inclinazione, zoom, altezza muri, muri e
+  nomi on/off, e passaggio immediato tra vista isometrica e pianta dall'alto.
+
+### Correzioni
+- Gli id generati di default per stanze, sezioni e card venivano numerati
+  sull'indice della lista grezza: elementi malformati scartati lasciavano
+  buchi (`room-1`, `room-4`). Ora la numerazione segue la lista filtrata.
+
+### Verifica
+- `tests/frontend.test.js`: 102 asserzioni (30 nuove sulla mappa 3D, incluso
+  il controllo che `unprojectDelta` inverta esattamente la trasformazione del
+  mondo su quattro configurazioni di camera).
+- `tests/visual/`: la pagina viene renderizzata in Chromium headless e
+  misurata — 9 asserzioni geometriche verificano che in pianta non ci sia
+  deformazione prospettica, che in isometrica il pavimento sia schiacciato,
+  che i muri salgano sopra il pavimento invece di penderci sotto, e che le
+  targhette prendano nome ed entità dal registro aree.
+
 ## [0.5.0] - 2026-08-22
 
 Riscrittura dell'architettura della dashboard: le sezioni diventano oggetti di

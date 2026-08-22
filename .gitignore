@@ -1,2 +1,5 @@
 custom_components/cyborg_dashboard/__pycache__/
 custom_components/cyborg_dashboard/core/__pycache__/
+tests/visual/panel.js
+tests/visual/*.png
+cyborg-changes.tgz
