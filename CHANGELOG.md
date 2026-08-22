@@ -4,6 +4,28 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.4.1] - 2026-08-22
+
+Fix di caching del pannello: dopo un aggiornamento via HACS, il browser
+poteva continuare a eseguire la versione JS precedente del pannello anche
+a distanza di ore, dando l'impressione che le modifiche non fossero mai
+arrivate mentre lato server erano già installate correttamente.
+
+### Fix
+- **Il modulo JS del pannello non veniva ricaricato dal browser dopo un
+  aggiornamento.** `panel_custom.async_register_panel` carica
+  `cyborg-dashboard.js` come modulo ES tramite `import()` dinamico. Un
+  browser non ridefinisce mai un custom element già registrato in un
+  documento, quindi se il tab della dashboard restava aperto (o veniva solo
+  navigato via SPA, senza reload completo) da prima dell'update, l'utente
+  continuava a vedere il componente vecchio in memoria — indipendentemente
+  dal fatto che HACS avesse già scritto il file nuovo su disco e
+  dall'header `cache_headers=False` già presente sulla static path. Ora
+  `module_url` include `?v=<versione da manifest.json>`: ogni bump di
+  versione produce un URL diverso, quindi il browser è costretto a
+  scaricare e rivalutare il modulo nuovo al prossimo caricamento del
+  pannello, senza dover contare su un hard refresh manuale dell'utente.
+
 ## [0.4.0] - 2026-08-22
 
 Questa versione è quella che fa funzionare per la prima volta il salvataggio
