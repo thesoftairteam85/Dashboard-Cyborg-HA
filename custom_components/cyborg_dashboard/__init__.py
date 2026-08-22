@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .core.storage import DashboardStorage
-from .panel import async_register_panel
+from .panel import async_register_panel, async_unregister_panel
 from .websocket import async_register_websocket
 
 DOMAIN = "cyborg_dashboard"
@@ -35,5 +35,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload Cyborg Dashboard."""
+    async_unregister_panel(hass)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     return True
