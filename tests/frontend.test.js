@@ -286,6 +286,86 @@ el._pageIndex = 0; el._editing = false; el._selected = null;
 el.render();
 ok("ritorno alla pagina sezioni", !el.innerHTML.includes(String.fromCharCode(34) + "fp-viewport"));
 
+console.log("\n== 10b. WIZARD MAPPA 3D ==");
+el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+    view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true },
+    rooms: [] }]};
+el._pageIndex = 0; el._editing = true; el._selected = null; el._mapWizard = null;
+el._registry = { areas: [
+  { area_id: "soggiorno", name: "Soggiorno", icon: null },
+  { area_id: "bagno", name: "Bagno", icon: "mdi:toilet" },
+  { area_id: "camera_da_letto", name: "Camera da letto", icon: null }],
+  byArea: {
+    soggiorno: ["light.soggiorno", "climate.cdz_storm", "sensor.soggiorno_temp"],
+    bagno: ["sensor.t_u_bagno_temperatura"],
+    camera_da_letto: [] } };
+
+el.render();
+ok("mappa vuota offre la procedura guidata", el.innerHTML.includes("data-mw-start"));
+
+el._startMapWizard();
+ok("wizard mappa: una voce per area HA", el._mapWizard.rooms.length === 3, String(el._mapWizard.rooms.length));
+ok("wizard mappa: tutte selezionate all'inizio", el._mapWizardRooms().length === 3);
+el.render();
+ok("passo 1 chiede quante stanze", el.innerHTML.includes("Quante stanze"));
+ok("passo 1 elenca le aree", el.innerHTML.includes("Soggiorno") && el.innerHTML.includes("Bagno"));
+ok("passo 1 permette di aggiungerne a mano", el.innerHTML.includes("data-mw-addroom"));
+ok("progressione: 3 stanze + 2 = 5 passi", el.innerHTML.includes("PASSO 1 DI 5"), "atteso 5");
+
+// deselecting a room must shorten the wizard
+el._mapWizard.rooms[1].on = false;
+el.render();
+ok("deselezionare una stanza accorcia la procedura", el.innerHTML.includes("PASSO 1 DI 4"));
+el._mapWizard.rooms[1].on = true;
+
+// a room typed by hand, for homes with no areas configured
+el._mapWizard.newRoom = "Taverna";
+el._mapWizard.rooms.push({ area_id: null, title: "Taverna", icon: roomIconFor("Taverna"),
+  color: "#fff", on: true, entities: [] });
+ok("stanza manuale accettata", el._mapWizardRooms().length === 4);
+ok("icona dedotta dal nome della stanza manuale", roomIconFor("Taverna") === "mdi:stairs-down", roomIconFor("Taverna"));
+
+el._mapWizard.step = 1;
+el.render();
+ok("passo stanza chiede cosa c'e' dentro", el.innerHTML.includes("Cosa c'\u00e8 in Soggiorno"));
+ok("stanza con area: automatico proposto", el.innerHTML.includes("data-mw-auto"));
+ok("automatico elenca le entita' dell'area", el.innerHTML.includes("light.soggiorno"));
+
+// the hand-made room has no area, so entities must be pickable
+el._mapWizard.step = 4;
+el.render();
+ok("stanza manuale: scelta entita' a mano", el.innerHTML.includes("data-mw-ent"));
+ok("stanza manuale: nessun automatico", !el.innerHTML.includes("data-mw-auto"));
+
+el._mapWizard.step = 5;
+el.render();
+ok("ultimo passo riepiloga", el.innerHTML.includes("Tutto pronto"));
+ok("ultimo passo conclude", el.innerHTML.includes("CREA LA MAPPA"));
+
+el._mapWizard.rooms = el._mapWizard.rooms.slice(0, 3);
+el._mapWizard.step = 4;
+let saved = null;
+el._hass.callWS = async (m) => { if (m.type === "cyborg_dashboard/save") { saved = m.dashboard; return { saved: true, revision: 1 }; } return {}; };
+el._finishMapWizard();
+const mr = el._rooms();
+ok("fine wizard: una stanza per selezione", mr.length === 3, String(mr.length));
+ok("fine wizard: stanze non sovrapposte", (() => {
+  for (let i = 0; i < mr.length; i++) for (let j = i + 1; j < mr.length; j++) {
+    const a = mr[i], b = mr[j];
+    if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) return false;
+  } return true; })());
+ok("fine wizard: area collegata", mr[0].area_id === "soggiorno");
+ok("fine wizard: entita' automatiche (null, non lista vuota)", mr[0].entities === null);
+ok("fine wizard: icona area rispettata", mr[1].icon === "mdi:toilet");
+ok("fine wizard: il wizard si chiude", el._mapWizard === null);
+// restore a sections-type dashboard: the following sections exercise the card
+// editor, which is only reachable when the current page is not a floorplan
+el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" },
+  pages: [{ id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }] };
+el._pageIndex = 0; el._editing = false; el._selected = null; el._mapWizard = null;
+ok("stato di test ripristinato su pagina a sezioni", !el._isFloorplan());
+
 console.log("\n== 11. FLUSSO ENERGETICO ==");
 el._pageIndex = 0; el._editing = false; el._selected = null;
 states["sensor.pv"]   = S("2840", { friendly_name: "Fotovoltaico", device_class: "power", unit_of_measurement: "W" });

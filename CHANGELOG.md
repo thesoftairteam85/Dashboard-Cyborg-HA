@@ -4,6 +4,38 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.11.0] - 2026-08-22
+
+Configurazione guidata anche per la mappa 3D.
+
+### Novità
+- **La mappa 3D chiede quante stanze ci sono e cosa c'è dentro.** Stessa
+  procedura passo passo del flusso energetico: prima quali stanze esistono,
+  poi una schermata per stanza con le entità che ci compaiono, infine il
+  riepilogo e la creazione della pianta.
+- **Le stanze non sono più vincolate alle aree di Home Assistant.** Le aree
+  vengono proposte già spuntate, ma se ne possono togliere e soprattutto se ne
+  possono scrivere di nuove: una casa senza aree configurate deve comunque
+  poter disegnare la sua pianta. Una stanza scritta a mano prende l'icona dal
+  nome (Taverna -> scale, Garage -> box) e le sue entità si scelgono
+  singolarmente, dato che non ha un'area da cui dedurle.
+- **La lunghezza della procedura segue le tue risposte:** togliendo una
+  stanza al primo passo, la barra di avanzamento si accorcia.
+- Per le stanze collegate a un'area, l'automatico resta consigliato: la
+  stanza mostra sempre le entità più utili e si aggiorna da sola quando
+  aggiungi dispositivi in Home Assistant. Disattivandolo, la lista parte già
+  popolata con quello che l'area produce ora, invece che da zero.
+- La mappa vuota apre sulla procedura guidata; "Genera e basta" resta lì per
+  chi vuole la scorciatoia.
+
+### Verifica
+- `tests/frontend.test.js`: 233 asserzioni (24 nuove sul wizard della mappa,
+  incluse la stanza scritta a mano senza area, l'accorciamento della
+  procedura e il fatto che l'automatico venga salvato come "automatico" e non
+  come una lista congelata).
+- Verifica a 390 px in Chromium: la procedura si apre nel pannello a
+  scomparsa e avanza correttamente da un passo all'altro.
+
 ## [0.10.0] - 2026-08-22
 
 Editor usabile da telefono e configurazione guidata del flusso energetico.

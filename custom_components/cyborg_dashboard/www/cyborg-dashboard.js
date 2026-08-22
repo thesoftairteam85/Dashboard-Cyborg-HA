@@ -491,6 +491,7 @@ class CyborgDashboard extends HTMLElement {
     this._flowSlot = null;      // which energy-flow slot the picker is filling
     this._flowOpen = {};        // per-card: is the load sub-tree expanded?
     this._wizard = null;        // {cardId, step} guided energy setup
+    this._mapWizard = null;     // {step, rooms[]} guided 3D map setup
   }
 
   set hass(value) {
@@ -981,7 +982,10 @@ class CyborgDashboard extends HTMLElement {
           <p>${ready
             ? `Cyborg ha trovato <strong>${this._registry.areas.length} aree</strong> in Home Assistant (${esc(this._registry.areas.map((a) => a.name).join(", "))}). Genera la pianta e le stanze compariranno con le loro entità già collegate.`
             : this._registry ? "Nessuna area configurata in Home Assistant. Crea le aree in Impostazioni → Aree, oppure aggiungi le stanze a mano." : "Lettura del registro aree di Home Assistant..."}</p>
-          ${ready ? '<button data-auto-rooms><ha-icon icon="mdi:auto-fix"></ha-icon> GENERA PIANTA DALLE AREE</button>' : ""}
+          ${this._registry ? `<div class="bootstrap-actions">
+            <button data-mw-start><ha-icon icon="mdi:wizard-hat"></ha-icon> CONFIGURAZIONE GUIDATA</button>
+            ${ready ? '<button class="secondary" data-auto-rooms><ha-icon icon="mdi:auto-fix"></ha-icon> GENERA E BASTA</button>' : ""}
+          </div>` : ""}
         </div>`;
     }
 
@@ -1007,6 +1011,164 @@ class CyborgDashboard extends HTMLElement {
         </div>
         ${this._editing ? '<div class="fp-hint">Trascina una stanza per spostarla · clicca per configurarla</div>' : ""}
       </div>`;
+  }
+
+  /**
+   * Guided 3D map setup.
+   *
+   * Step 0 asks which rooms exist, seeded from the Home Assistant areas but
+   * not bound to them: a flat with no areas configured must still be able to
+   * draw a plan, so rooms can be typed by hand. One step per room then
+   * confirms what appears inside it, and the last step builds the plan.
+   */
+  _startMapWizard() {
+    const areas = (this._registry && this._registry.areas) || [];
+    const existing = this._rooms();
+    const rooms = areas.map((a, i) => {
+      const prev = existing.find((r) => r.area_id === a.area_id);
+      return {
+        area_id: a.area_id,
+        title: (prev && prev.title) || a.name || a.area_id,
+        icon: (prev && prev.icon) || a.icon || roomIconFor(a.name || a.area_id),
+        color: (prev && prev.color) || ROOM_COLORS[i % ROOM_COLORS.length],
+        on: true,
+        entities: null,          // null = automatic from the area
+      };
+    });
+    // rooms the user created by hand survive a re-run of the wizard
+    for (const r of existing) {
+      if (r.area_id && areas.some((a) => a.area_id === r.area_id)) continue;
+      rooms.push({ area_id: null, title: r.title, icon: r.icon, color: r.color,
+        on: true, entities: Array.isArray(r.entities) ? r.entities.slice() : [] });
+    }
+    this._mapWizard = { step: 0, rooms, newRoom: "" };
+    this._entityQuery = "";
+    this._touch();
+  }
+
+  _mapWizardRooms() { return this._mapWizard.rooms.filter((r) => r.on); }
+
+  _mapWizardBody() {
+    const w = this._mapWizard;
+
+    if (w.step === 0) {
+      const areas = (this._registry && this._registry.areas) || [];
+      const count = this._mapWizardRooms().length;
+      return `<div class="wiz-step">
+          <div class="wiz-q">Quante stanze ha la casa?</div>
+          <div class="wiz-hint">${areas.length
+            ? `Cyborg ha trovato <strong>${areas.length} aree</strong> in Home Assistant. Togli la spunta a quelle che non vuoi sulla mappa, e aggiungi le stanze che in Home Assistant non esistono.`
+            : "In Home Assistant non ci sono aree configurate. Scrivi qui i nomi delle stanze: potrai collegarle alle aree più avanti, oppure scegliere le entità a mano."}</div>
+          <div class="wiz-list">${w.rooms.map((r, i) => `
+            <button type="button" class="wiz-opt ${r.on ? "sel" : ""}" data-mw-room="${i}">
+              <ha-icon icon="${esc(r.on ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
+              <div><strong>${esc(r.title)}</strong><small>${esc(r.area_id ? "area di Home Assistant" : "stanza aggiunta a mano")}</small></div>
+              ${r.area_id ? "" : `<em class="wiz-tip" style="background:#c77dff">manuale</em>`}
+            </button>`).join("")}</div>
+          <div class="mw-add">
+            <input type="text" data-mw-newroom value="${esc(w.newRoom || "")}" placeholder="Nome di una stanza da aggiungere...">
+            <button class="secondary" data-mw-addroom><ha-icon icon="mdi:plus"></ha-icon></button>
+          </div>
+          <div class="wiz-hint"><strong>${count}</strong> stanz${count === 1 ? "a" : "e"} finiranno sulla mappa.</div>
+        </div>`;
+    }
+
+    const rooms = this._mapWizardRooms();
+    if (w.step <= rooms.length) {
+      const room = rooms[w.step - 1];
+      const pool = room.area_id && this._registry
+        ? (this._registry.byArea[room.area_id] || []) : [];
+      const auto = room.entities === null;
+      const chosen = new Set(auto
+        ? this._roomEntities({ area_id: room.area_id, entities: null })
+        : room.entities);
+      const q = (this._entityQuery || "").trim().toLowerCase();
+      let rows = (pool.length ? pool : Object.keys(this._hass.states))
+        .filter((id) => { const st = this._hass.states[id];
+          return st && ACTIVE_DOMAINS[domainOf(id)] !== undefined || (st && BADGE_PRIORITY.some((r) => r.test(domainOf(id), st.attributes.device_class))); })
+        .filter((id) => !q || ((this._hass.states[id].attributes.friendly_name || "") + " " + id).toLowerCase().includes(q));
+      if (!pool.length && !q) rows = rows.slice(0, 30);
+
+      return `<div class="wiz-step">
+          <div class="wiz-q">Cosa c'è in ${esc(room.title)}?</div>
+          <div class="wiz-hint">${room.area_id
+            ? `Queste sono le entità dell'area <strong>${esc(room.title)}</strong>. Lasciando l'automatico, la stanza mostra sempre le più utili e si aggiorna da sola quando aggiungi dispositivi in Home Assistant.`
+            : "Questa stanza non è collegata a un'area, quindi le entità vanno scelte a mano."}</div>
+          ${room.area_id ? `<label class="check"><input type="checkbox" data-mw-auto ${auto ? "checked" : ""}> Automatico dall'area (consigliato)</label>` : ""}
+          ${auto && room.area_id ? `<div class="wiz-list">${[...chosen].map((id) => {
+            const st = this._hass.states[id];
+            return `<div class="wiz-opt sel" style="pointer-events:none">
+              <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+              <div><strong>${esc((st && st.attributes.friendly_name) || id)}</strong><small>${esc(id)}</small></div></div>`;
+          }).join("") || '<div class="entity-result-empty">Nessuna entità utile trovata in quest\'area.</div>'}</div>`
+          : `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra le entità..." autocomplete="off">
+             <div class="wiz-list">${rows.slice(0, 40).map((id) => {
+               const st = this._hass.states[id];
+               return `<button type="button" class="wiz-opt ${chosen.has(id) ? "sel" : ""}" data-mw-ent="${esc(id)}">
+                 <ha-icon icon="${esc(chosen.has(id) ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
+                 <div><strong>${esc((st && st.attributes.friendly_name) || id)}</strong><small>${esc(id)}</small></div>
+               </button>`;
+             }).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`}
+        </div>`;
+    }
+
+    const rr = this._mapWizardRooms();
+    return `<div class="wiz-step">
+        <div class="wiz-q">Tutto pronto</div>
+        <div class="wiz-hint">Cyborg disporrà le ${rr.length} stanze su una griglia ordinata. Da lì le <strong>trascini</strong> sulla mappa per farle somigliare alla pianta vera, e dai controlli in basso ruoti la vista o passi alla pianta dall'alto.</div>
+        <div class="wiz-list">${rr.map((r) => `<div class="wiz-opt sel" style="pointer-events:none;--nc:${esc(r.color)}">
+            <ha-icon icon="${esc(r.icon)}"></ha-icon>
+            <div><strong>${esc(r.title)}</strong><small>${esc(r.entities === null
+              ? this._roomEntities({ area_id: r.area_id, entities: null }).length + " entità automatiche"
+              : r.entities.length + " entità scelte")}</small></div>
+          </div>`).join("")}</div>
+      </div>`;
+  }
+
+  _mapWizardEditor() {
+    const w = this._mapWizard;
+    const rooms = this._mapWizardRooms();
+    const total = rooms.length + 2;
+    const last = w.step >= total - 1;
+    const label = w.step === 0 ? "Stanze"
+      : w.step <= rooms.length ? rooms[w.step - 1].title : "Riepilogo";
+    return `<div class="wiz">
+        <div class="wiz-bar">${Array.from({ length: total }, (_, i) =>
+          `<i class="${i < w.step ? "done" : i === w.step ? "now" : ""}"></i>`).join("")}</div>
+        <div class="wiz-head">
+          <span>PASSO ${w.step + 1} DI ${total}</span>
+          <strong>${esc(label)}</strong>
+        </div>
+        ${this._mapWizardBody()}
+        <div class="wiz-nav">
+          ${w.step > 0 ? '<button class="secondary" data-mw-back><ha-icon icon="mdi:chevron-left"></ha-icon> INDIETRO</button>' : ""}
+          <button data-mw-next ${w.step === 0 && !rooms.length ? "disabled" : ""}>${last ? "CREA LA MAPPA" : "AVANTI"} <ha-icon icon="${last ? "mdi:check" : "mdi:chevron-right"}"></ha-icon></button>
+        </div>
+        <button class="wiz-advanced" data-mw-exit>Annulla</button>
+      </div>`;
+  }
+
+  /** Commit the wizard answers into real rooms laid out on a grid. */
+  _finishMapWizard() {
+    const page = this._page();
+    const rooms = this._mapWizardRooms();
+    const cols = Math.max(1, Math.ceil(Math.sqrt(rooms.length)));
+    const W = 230, H = 180, GAP = 18;
+    page.rooms = rooms.map((r, i) => ({
+      id: uid("room"),
+      area_id: r.area_id,
+      title: r.title,
+      icon: r.icon,
+      color: r.color,
+      x: (i % cols) * (W + GAP),
+      y: Math.floor(i / cols) * (H + GAP),
+      w: W, h: H,
+      entities: r.entities,
+    }));
+    this._mapWizard = null;
+    this._selected = null;
+    this._entityQuery = "";
+    this._save();
   }
 
   _renderRoomEditor(room) {
@@ -1068,6 +1230,11 @@ class CyborgDashboard extends HTMLElement {
       <div class="section">
         <label>TITOLO PAGINA<input data-page-prop="title" value="${esc(page.title || "")}"></label>
         <label>ICONA${iconField("data-page-prop", "icon", page.icon || "mdi:floor-plan")}</label>
+      </div>
+      <div class="section">
+        <strong>CONFIGURAZIONE GUIDATA</strong>
+        <span class="hint">Ti chiede quali stanze ci sono e cosa c'è dentro ciascuna, una domanda alla volta.</span>
+        <button class="wide" data-mw-start><ha-icon icon="mdi:wizard-hat"></ha-icon> ${this._rooms().length ? "RIFAI LA PROCEDURA" : "AVVIA CONFIGURAZIONE GUIDATA"}</button>
       </div>
       <div class="section">
         <strong>STANZE</strong>
@@ -2065,6 +2232,9 @@ class CyborgDashboard extends HTMLElement {
 
   _renderEditor() {
     if (this._isFloorplan()) {
+      if (this._mapWizard) {
+        return `<aside class="editor">${this._editorHead("MAPPA 3D", "Configurazione guidata")}${this._mapWizardEditor()}</aside>`;
+      }
       const room = this._selected && this._selected.kind === "room"
         ? this._room(this._selected.roomId) : null;
       return room ? this._renderRoomEditor(room) : this._renderFloorplanPageEditor();
@@ -2443,6 +2613,71 @@ class CyborgDashboard extends HTMLElement {
     });
     const overview = q("[data-compose-overview]");
     if (overview) overview.onclick = () => this._composeOverview();
+
+    // --- guided 3D map wizard
+    all("[data-mw-start]").forEach((el) => { el.onclick = () => this._startMapWizard(); });
+    const mwExit = q("[data-mw-exit]");
+    if (mwExit) mwExit.onclick = () => { this._mapWizard = null; this._entityQuery = ""; this._touch(); };
+    const mwBack = q("[data-mw-back]");
+    if (mwBack) mwBack.onclick = () => {
+      this._mapWizard.step = Math.max(0, this._mapWizard.step - 1);
+      this._entityQuery = "";
+      this._touch();
+    };
+    const mwNext = q("[data-mw-next]");
+    if (mwNext) mwNext.onclick = () => {
+      const total = this._mapWizardRooms().length + 2;
+      if (this._mapWizard.step >= total - 1) { this._finishMapWizard(); return; }
+      this._mapWizard.step += 1;
+      this._entityQuery = "";
+      this._touch();
+    };
+    all("[data-mw-room]").forEach((el) => {
+      el.onclick = () => {
+        const r = this._mapWizard.rooms[parseInt(el.getAttribute("data-mw-room"), 10)];
+        if (r) r.on = !r.on;
+        this._touch();
+      };
+    });
+    const mwNew = q("[data-mw-newroom]");
+    if (mwNew) mwNew.oninput = () => { this._mapWizard.newRoom = mwNew.value; };
+    const mwAdd = q("[data-mw-addroom]");
+    if (mwAdd) mwAdd.onclick = () => {
+      const name = (this._mapWizard.newRoom || "").trim();
+      if (!name) return;
+      this._mapWizard.rooms.push({
+        area_id: null, title: name, icon: roomIconFor(name),
+        color: ROOM_COLORS[this._mapWizard.rooms.length % ROOM_COLORS.length],
+        on: true, entities: [],
+      });
+      this._mapWizard.newRoom = "";
+      this._touch();
+    };
+    const mwAuto = q("[data-mw-auto]");
+    if (mwAuto) mwAuto.onchange = () => {
+      const room = this._mapWizardRooms()[this._mapWizard.step - 1];
+      if (!room) return;
+      // turning automatic off freezes what the area yields right now, so the
+      // user edits a populated list instead of starting from nothing
+      room.entities = mwAuto.checked ? null
+        : this._roomEntities({ area_id: room.area_id, entities: null }).slice();
+      this._touch();
+    };
+    all("[data-mw-ent]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._mapWizardRooms()[this._mapWizard.step - 1];
+        if (!room) return;
+        if (room.entities === null) room.entities = this._roomEntities({ area_id: room.area_id, entities: null }).slice();
+        const id = el.getAttribute("data-mw-ent");
+        const i = room.entities.indexOf(id);
+        if (i >= 0) room.entities.splice(i, 1); else room.entities.push(id);
+        this._touch();
+      };
+    });
+    if (this._mapWizard) {
+      const ms = q("[data-entity-search]");
+      if (ms) ms.oninput = () => { this._entityQuery = ms.value; this._touch(); };
+    }
 
     // --- guided energy wizard
     const wizStart = q("[data-wiz-start]");
@@ -2983,6 +3218,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .wiz-val{flex-shrink:0;font:750 13px Inter,system-ui,sans-serif;color:var(--accent)}
 .wiz-val i{font-style:normal;font-size:9px;opacity:.55;margin-left:2px}
 .wiz-tip{position:absolute;top:4px;right:8px;font-style:normal;font:700 8px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;padding:2px 6px;border-radius:99px;background:var(--accent);color:#03131a}
+.mw-add{display:flex;gap:7px;align-items:center;margin-top:4px}
+.mw-add input{flex:1;min-width:0;box-sizing:border-box;padding:10px;border-radius:9px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000);color:var(--primary-text-color);font:inherit;font-size:13px}
+.mw-add input:focus{outline:0;border-color:var(--accent)}
+.mw-add button{flex-shrink:0;padding:10px 12px}
 .wiz-parent{display:block;margin-top:11px;font-size:12px;font-weight:600}
 .wiz-parent select{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:9px;border-radius:9px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000);color:var(--primary-text-color);font:inherit;font-size:12.5px}
 .wiz-nav{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
