@@ -13,7 +13,7 @@ DEFAULT_THEME = {
 
 def default_dashboard() -> dict[str, Any]:
     return {"version": 2, "revision": 0, "pages": [{
-        "id": "home", "title": "Home", "icon": "mdi:home",
+        "id": "home", "title": "Cyborg", "icon": "mdi:hexagon-multiple-outline",
         "layout": {"type": "grid", "columns": 12, "gap": 16}, "items": [],
     }], "theme": dict(DEFAULT_THEME)}
 
