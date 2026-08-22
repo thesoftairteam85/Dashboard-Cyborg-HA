@@ -1,37 +1,1106 @@
-const DEFAULT_DASHBOARD={version:5,pages:[{id:"home",title:"Cyborg",icon:"mdi:hexagon-multiple-outline",layout:{type:"grid",columns:12,gap:16},items:[]}],theme:{mode:"dark",density:"comfortable",radius:16,gap:16,surface:"card",accent:"#00e5ff",background:"#02050a",animations:true}};
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
-const coerceNumber=v=>{if(typeof v==="boolean")return null;const n=Number(v);return Number.isFinite(n)?n:null};
-const evaluateRule=(rule,state,attrs)=>{const raw=rule.source==="attribute"?attrs?.[rule.attribute]:state;const op=rule.operator;
- if(op==="eq"||op==="neq"){const m=String(raw)===String(rule.value);return op==="eq"?m:!m}
- const cur=coerceNumber(raw);if(cur===null)return false;const target=coerceNumber(rule.value);
- if(op==="gt")return cur>target;if(op==="gte")return cur>=target;if(op==="lt")return cur<target;if(op==="lte")return cur<=target;
- if(op==="between"){const t2=coerceNumber(rule.value2);const[lo,hi]=[target,t2].sort((a,b)=>a-b);return cur>=lo&&cur<=hi}
- return false};
-const resolveRuleStyle=(rules,state,attrs)=>{for(const r of rules||[])if(evaluateRule(r,state,attrs))return r.style||{};return null};
-const DOMAIN_ICONS={light:"mdi:lightbulb",switch:"mdi:toggle-switch",sensor:"mdi:eye-outline",binary_sensor:"mdi:radiobox-marked",climate:"mdi:thermostat",cover:"mdi:window-shutter",alarm_control_panel:"mdi:shield-home",camera:"mdi:cctv",person:"mdi:account",device_tracker:"mdi:crosshairs-gps",automation:"mdi:robot",scene:"mdi:palette-outline",script:"mdi:script-text-outline",input_boolean:"mdi:toggle-switch-outline",input_number:"mdi:ray-vertex",input_select:"mdi:form-select",input_text:"mdi:form-textbox",media_player:"mdi:speaker",fan:"mdi:fan",lock:"mdi:lock",vacuum:"mdi:robot-vacuum",water_heater:"mdi:water-boiler",weather:"mdi:weather-partly-cloudy",sun:"mdi:white-balance-sunny",number:"mdi:ray-vertex",select:"mdi:form-select",update:"mdi:package-up",zone:"mdi:map-marker-radius",timer:"mdi:timer-outline",counter:"mdi:counter",button:"mdi:gesture-tap-button"};
-const domainIcon=id=>DOMAIN_ICONS[String(id||"").split(".")[0]]||"mdi:shape-outline";
-const ICON_PALETTE=["mdi:home","mdi:hexagon-multiple-outline","mdi:lightbulb","mdi:ceiling-light","mdi:power-socket-eu","mdi:door","mdi:garage-variant","mdi:gate","mdi:window-shutter","mdi:motion-sensor","mdi:thermometer","mdi:water-percent","mdi:lightning-bolt","mdi:solar-power-variant","mdi:battery-high","mdi:cctv","mdi:shield-alert","mdi:smoke-detector","mdi:alarm-light","mdi:account","mdi:speaker","mdi:television","mdi:fan","mdi:air-conditioner","mdi:washing-machine","mdi:chart-box-outline","mdi:view-dashboard","mdi:cog","mdi:map-marker","mdi:weather-partly-cloudy"];
-const iconField=(attr,key,val)=>`<div class="icon-editor"><div class="icon-editor-row"><ha-icon icon="${esc(val||"mdi:help-circle-outline")}" data-icon-preview></ha-icon><input ${attr}="${key}" value="${esc(val||"")}" placeholder="mdi:nome-icona" data-icon-live></div><div class="icon-palette">${ICON_PALETTE.map(i=>`<button type="button" class="icon-swatch" data-icon-pick="${i}" title="${i}"><ha-icon icon="${i}"></ha-icon></button>`).join("")}</div></div>`;
-class CyborgDashboard extends HTMLElement{
- set hass(v){this._hass=v;if(!this._loaded)this._load();else if(!this._editing)this.render()}
- connectedCallback(){this._load()}
- async _load(){if(!this._hass||this._loading)return;this._loading=true;try{const r=await this._hass.callWS({type:"cyborg_dashboard/get"});this._dashboard=r.dashboard||structuredClone(DEFAULT_DASHBOARD)}catch(e){this._dashboard=structuredClone(DEFAULT_DASHBOARD);this._error="Impossibile caricare la dashboard"}this._loaded=true;this._loading=false;this.render()}
- async _save(){this._saving=true;this.render();try{const r=await this._hass.callWS({type:"cyborg_dashboard/save",dashboard:this._dashboard,expected_revision:this._dashboard.revision});this._dashboard.revision=r.revision;this._saved=true;this._editing=false}catch(e){console.error(e);if(e&&e.code==="revision_conflict"){this._error="Modificato altrove, ricarico i dati aggiornati";try{const r=await this._hass.callWS({type:"cyborg_dashboard/get"});this._dashboard=r.dashboard||this._dashboard}catch(e2){console.error(e2)}}else{this._error="Impossibile salvare"}}this._saving=false;this.render();setTimeout(()=>{this._saved=false;this._error="";this.render()},1800)}
- _edit(){this._editing=!this._editing;this._selected=null;this.render()}
- _add(type="entity"){const ids=Object.keys(this._hass.states||{}),id=ids.find(x=>x.startsWith("sensor."))||ids[0];if(!id)return;const n=this._dashboard.pages[0].items.length;const item={id:"item-"+Date.now(),type,entity_id:id,position:{x:(n%4)*3,y:Math.floor(n/4)*2,w:3,h:2},show_name:true,show_state:true,show_icon:true,appearance:{template:"neo",radius:16,glow:true,icon:"mdi:chart-box-outline",accent:"#00e5ff"},states:{},actions:{tap:{action:"more-info"}}};this._dashboard.pages[0].items.push(item);this._selected=item.id;this.render()}
- _item(id){return this._dashboard.pages[0].items.find(i=>i.id===id)}
- _remove(id){this._dashboard.pages[0].items=this._dashboard.pages[0].items.filter(x=>x.id!==id);if(this._selected===id)this._selected=null;this.render()}
- _set(id,key,value){const x=this._item(id);if(!x)return;const parts=key.split(".");let o=x;for(let i=0;i<parts.length-1;i++)o=o[parts[i]]||(o[parts[i]]={});o[parts.at(-1)]=value;this.render()}
- _perform(item){const action=item?.actions?.tap?.action||"more-info",entity=item?.entity_id;if(!entity||action==="none")return;if(action==="toggle"||action==="turn_on"||action==="turn_off")return this._hass.callService("homeassistant",action,{entity_id:entity});if(action==="more-info")return this.dispatchEvent(new CustomEvent("hass-more-info",{detail:{entityId:entity},bubbles:true,composed:true}))}
-_stateStyle(item,state,attrs){const ruleStyle=resolveRuleStyle(item.rules,state,attrs);const base=ruleStyle||item?.states?.[state]||item?.states?.default||{},a=item?.appearance||{};return{accent:base.accent||a.accent||"#00e5ff",glow:base.glow!==false,animate:base.animate||false,icon:base.icon||a.icon||"mdi:chart-box-outline",label:base.label||state}}
- _renderSections(items){if(!items.length)return "";const groups=new Map();for(const it of items){const raw=(it.section||"").trim()||"Generale",key=raw.toLowerCase();if(!groups.has(key))groups.set(key,{name:raw,its:[]});groups.get(key).its.push(it)}return[...groups.values()].map(g=>`<section class="dash-section"><h3>⬢ ${esc(g.name.toUpperCase())}</h3><div class="grid">${g.its.map(x=>this._renderItem(x)).join("")}</div></section>`).join("")}
- _renderItem(item){const s=this._hass.states[item.entity_id],name=s?.attributes?.friendly_name||item.entity_id||"Entity",pos=item.position||{x:0,y:0,w:3,h:2},state=s?.state||"unknown",st=this._stateStyle(item,state,s?.attributes||{}),a=item.appearance||{},type=item.type||"entity",isOn=state==="on"||state==="true",unit=s?.attributes?.unit_of_measurement,headIcon=item.show_icon!==false&&type!=="control"&&type!=="status"?`<ha-icon class="card-icon" icon="${esc(st.icon)}"></ha-icon>`:"";let body;if(type==="control"){body=`<div class="control-row">${item.show_icon!==false?`<ha-icon class="card-icon control-icon" icon="${esc(st.icon)}"></ha-icon>`:"<span></span>"}<div class="switch ${isOn?"on":""}"><span class="knob"></span></div></div>${item.show_state!==false?`<div class="state-label">${esc(st.label)}</div>`:""}`}else if(type==="status"){body=`<div class="status-badge">${item.show_icon!==false?`<ha-icon icon="${esc(st.icon)}"></ha-icon>`:""}<span>${esc(st.label)}</span></div>`}else{body=`${item.show_state!==false?`<div class="value">${esc(state)}${unit?`<span class="unit-inline">${esc(unit)}</span>`:""}</div>`:""}${st.label!==state?`<div class="state-label">${esc(st.label)}</div>`:""}`}
-if(this._editing)return `<article class="item type-${esc(type)} editor-item ${this._selected===item.id?"selected":""}" style="grid-column:span ${pos.w};grid-row:span ${pos.h};--accent:${esc(st.accent)}" data-item="${esc(item.id)}"><div class="head"><b>${esc(item.name||name)}</b>${headIcon}<button class="icon" data-remove="${esc(item.id)}">×</button></div>${body}<button class="edit-open" data-select-item="${esc(item.id)}">CONFIGURA CARD</button></article>`;
-return `<article class="item type-${esc(type)} ${st.animate?"pulse":""}" data-action-item="${esc(item.id)}" style="grid-column:span ${pos.w};grid-row:span ${pos.h};--accent:${esc(st.accent)};border-color:${esc(st.accent)};border-radius:${a.radius??16}px;box-shadow:${st.glow?`0 0 20px ${esc(st.accent)}66,inset 0 0 18px ${esc(st.accent)}18`:"none"}"><div class="head"><b>${esc(item.name||name)}</b>${headIcon}</div>${body}</article>`}
- _renderEditor(){const x=this._item(this._selected);if(!x){const pg=this._dashboard.pages[0];return `<aside class="editor"><div class="editor-title"><div><small>PROPERTY EDITOR</small><h2>Impostazioni pagina</h2></div></div><label>TITOLO PAGINA<input data-page-prop="title" value="${esc(pg.title||"")}" placeholder="Cyborg"></label><label>ICONA PAGINA${iconField("data-page-prop","icon",pg.icon||"mdi:hexagon-multiple-outline")}</label><span>Seleziona una card per configurarla, oppure premi + CARD per aggiungerne una.</span></aside>`}const a=x.appearance||{},current=this._hass.states[x.entity_id]?.state||"unknown";return `<aside class="editor"><div class="editor-title"><div><small>PROPERTY EDITOR</small><h2>${esc(x.name||this._hass.states[x.entity_id]?.attributes?.friendly_name||x.entity_id)}</h2></div><button class="icon" data-close-editor>×</button></div><label>TIPO CARD<select data-prop="type"><option value="entity">ENTITY</option><option value="sensor">SENSOR</option><option value="control">CONTROL</option><option value="status">STATUS</option><option value="chart">CHART</option></select></label><label>ENTITÀ SELEZIONATA<div class="entity-current"><ha-icon icon="${esc(domainIcon(x.entity_id))}"></ha-icon><div><strong>${esc(this._hass.states[x.entity_id]?.attributes?.friendly_name||x.entity_id||"—")}</strong><small>${esc(x.entity_id||"")}</small></div></div></label><label>CAMBIA ENTITÀ<input type="text" data-entity-search placeholder="Cerca per nome o entity_id..." autocomplete="off"></label><div class="entity-results" data-entity-results></div><label>NOME<input data-prop="name" value="${esc(x.name||"")}" placeholder="Nome automatico"></label><label>SEZIONE<input data-prop="section" list="cy-sections" value="${esc(x.section||"")}" placeholder="Generale"><datalist id="cy-sections">${[...new Set(this._dashboard.pages[0].items.map(i=>i.section).filter(Boolean))].map(s=>`<option value="${esc(s)}">`).join("")}</datalist></label><label>ICONA${iconField("data-prop","appearance.icon",a.icon||"mdi:chart-box-outline")}</label><div class="section"><strong>LAYOUT</strong><div class="four"><label>X<input type="number" data-pos="x" value="${x.position?.x||0}"></label><label>Y<input type="number" data-pos="y" value="${x.position?.y||0}"></label><label>W<input type="number" min="1" max="12" data-pos="w" value="${x.position?.w||3}"></label><label>H<input type="number" min="1" max="12" data-pos="h" value="${x.position?.h||2}"></label></div></div><div class="section"><strong>STILE BASE</strong><div class="two"><label>ACCENTO<input type="color" data-prop="appearance.accent" value="${esc(a.accent||"#00e5ff")}"></label><label>RAGGIO<input type="number" min="0" max="40" data-prop="appearance.radius" value="${a.radius??16}"></label></div><label class="check"><input type="checkbox" data-prop="appearance.glow" ${a.glow!==false?"checked":""}> GLOW / NEON</label><label class="check"><input type="checkbox" data-prop="show_state" ${x.show_state!==false?"checked":""}> MOSTRA STATO</label><label class="check"><input type="checkbox" data-prop="show_icon" ${x.show_icon!==false?"checked":""}> MOSTRA ICONA</label></div><div class="section"><strong>STATO: ${esc(current.toUpperCase())}</strong><div class="two"><label>COLORE<input type="color" data-state-prop="${esc(current)}.accent" value="${esc(x.states?.[current]?.accent||a.accent||"#00e5ff")}"></label><label>ICONA<input data-state-prop="${esc(current)}.icon" value="${esc(x.states?.[current]?.icon||a.icon||"mdi:chart-box-outline")}"></label></div><label>ETICHETTA<input data-state-prop="${esc(current)}.label" value="${esc(x.states?.[current]?.label||current)}"></label><label class="check"><input type="checkbox" data-state-prop="${esc(current)}.animate" ${x.states?.[current]?.animate?"checked":""}> ANIMAZIONE PULSE</label><button class="secondary" data-copy-state>COPIA STATO SU DEFAULT</button></div><div class="section"><strong>AZIONE TAP</strong><select data-prop="actions.tap.action"><option value="more-info">Apri dettagli</option><option value="toggle">Toggle</option><option value="turn_on">Accendi</option><option value="turn_off">Spegni</option><option value="none">Nessuna</option></select></div><button class="delete" data-delete-selected>ELIMINA CARD</button></aside>`}
- render(){if(!this._hass||!this._dashboard)return;const p=this._dashboard.pages[0],items=this._renderSections(p.items),count=Object.keys(this._hass.states||{}).length;this.innerHTML=`<style>:host{display:block;min-height:100vh;padding:22px;box-sizing:border-box;background:${this._dashboard.theme?.background||"var(--primary-background-color)"};color:var(--primary-text-color);font-family:Arial,sans-serif}.shell{max-width:1800px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:20px}h1{margin:0;font-size:34px;letter-spacing:-.04em}.sub{opacity:.55;margin-top:5px;font-family:monospace;font-size:12px}.tools{display:flex;gap:9px;align-items:center;flex-wrap:wrap}button{border:0;border-radius:11px;padding:10px 14px;background:${this._dashboard.theme?.accent||"var(--primary-color)"};color:#fff;cursor:pointer;font:inherit}.secondary,.icon{background:var(--card-background-color);color:var(--primary-text-color)}.workspace{display:grid;grid-template-columns:minmax(0,1fr) ${this._editing?"360px":"0px"};gap:18px;align-items:start}.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));grid-auto-rows:58px;gap:${this._dashboard.theme?.gap||16}px}.sections{display:flex;flex-direction:column;gap:28px;min-width:0}.dash-section h3{margin:0 0 12px;font:11px monospace;letter-spacing:3px;color:var(--accent);opacity:.75;text-transform:uppercase}.item{min-height:100%;padding:18px;border-radius:16px;background:linear-gradient(160deg,rgba(5,11,19,.97),rgba(7,16,26,.97));border:1px solid rgba(0,229,255,.18);box-sizing:border-box;overflow:hidden;transition:.2s;cursor:pointer}.item.pulse{animation:cyPulse 1.7s ease-in-out infinite}.editor-item{outline:1px dashed var(--accent);cursor:default}.editor-item.selected{outline:2px solid var(--accent)}.head{display:flex;justify-content:space-between;gap:8px}.icon{padding:2px 8px;font-size:20px}.card-icon{color:var(--accent);text-shadow:0 0 10px var(--accent)}.value{font-size:34px;font-weight:750;margin-top:24px;color:var(--accent);text-shadow:0 0 16px color-mix(in srgb,var(--accent) 55%,transparent)}.preview-value{font-size:25px;margin:22px 0;color:var(--accent)}.unit,.state-label{opacity:.55;margin-top:3px}.state-label{font:10px monospace;letter-spacing:2px}.edit-open{background:transparent;border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);font-size:11px;padding:7px}.editor{background:linear-gradient(160deg,#07101a,#050b13);border:1px solid rgba(0,229,255,.2);border-radius:18px;padding:18px;position:sticky;top:18px;box-shadow:0 0 30px rgba(0,229,255,.08)}.empty-editor{min-height:120px;display:flex;flex-direction:column;gap:8px;opacity:.65}main.sections .empty-editor{padding:40px;text-align:center;border:1px dashed var(--divider-color);border-radius:16px}.editor-title{display:flex;justify-content:space-between;margin-bottom:18px}.editor-title small,.section>strong{font:10px monospace;letter-spacing:2px;color:#00e5ff}h2{font-size:20px;margin:5px 0 0}.editor label{display:block;font-size:11px;letter-spacing:1px;opacity:.8;margin:12px 0}.editor input,.editor select{display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:9px;border-radius:9px;border:1px solid var(--divider-color);background:#02050a;color:var(--primary-text-color)}.editor input[type=color]{padding:2px;height:38px}.two,.four{display:flex;gap:9px;align-items:center}.two>*{flex:1;min-width:0}.four>*{width:calc(25% - 7px)}.section{border-top:1px solid rgba(255,255,255,.07);margin-top:17px;padding-top:15px}.check{display:flex!important;align-items:center;gap:7px}.check input{width:auto!important;margin:0!important}.delete{width:100%;margin-top:18px;background:#351019;color:#ff8091}.status{font-size:13px;opacity:.7}@keyframes cyPulse{0%,100%{filter:brightness(1);transform:translateY(0)}50%{filter:brightness(1.25);transform:translateY(-1px)}}@media(max-width:1100px){.workspace{grid-template-columns:1fr}.editor{position:relative;top:0}}@media(max-width:700px){:host{padding:12px}.grid{grid-template-columns:repeat(6,minmax(0,1fr))}.item{grid-column:span 6!important}.top{flex-direction:column;align-items:flex-start}}
-.entity-current{display:flex;gap:10px;align-items:center;margin-top:6px;padding:9px;border-radius:9px;background:#02050a;border:1px solid var(--divider-color)}.entity-current ha-icon{color:var(--accent)}.entity-current small{display:block;opacity:.5;font-family:monospace}.entity-results{max-height:260px;overflow-y:auto;margin-top:6px;border-radius:9px;background:#02050a;border:1px solid var(--divider-color)}.entity-results:empty{display:none;border:0}.entity-result-row{display:flex;gap:10px;align-items:center;padding:8px 9px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.05)}.entity-result-row:last-child{border-bottom:0}.entity-result-row:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}.entity-result-row ha-icon{color:var(--accent);flex-shrink:0}.entity-result-row small{display:block;opacity:.5;font-family:monospace}.entity-result-empty{padding:9px;opacity:.5;font-size:12px}.icon-editor-row{display:flex;gap:9px;align-items:center;margin-top:6px}.icon-editor-row ha-icon{flex-shrink:0;width:34px;height:34px;padding:6px;box-sizing:border-box;border-radius:9px;background:#02050a;border:1px solid var(--divider-color);color:var(--accent)}.icon-editor-row input{margin-top:0}.icon-palette{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.icon-swatch{padding:7px;border-radius:8px;background:#02050a;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.7}.icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}.icon-swatch ha-icon{display:block;width:18px;height:18px}.card-icon{color:var(--accent);--mdc-icon-size:22px}.control-row{display:flex;align-items:center;justify-content:space-between;margin-top:22px}.control-icon{--mdc-icon-size:26px}.switch{width:46px;height:26px;border-radius:13px;background:rgba(255,255,255,.14);position:relative;transition:background .2s;flex-shrink:0}.switch .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.4)}.switch.on{background:var(--accent)}.switch.on .knob{left:23px}.status-badge{display:flex;align-items:center;gap:8px;margin-top:20px;padding:8px 14px;border-radius:999px;background:color-mix(in srgb,var(--accent) 16%,transparent);border:1px solid var(--accent);width:fit-content}.status-badge ha-icon{color:var(--accent);--mdc-icon-size:18px}.status-badge span{font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:1.5px;color:var(--accent)}.unit-inline{font-size:15px;opacity:.6;margin-left:5px;font-weight:400}</style><div class="shell"><header class="top"><div><h1>⬢ ${esc(p.title||"Cyborg")}</h1><div class="sub">HOME OS · ${count} ENTITÀ · ${this._editing?"PROPERTY EDITOR ATTIVO":"SISTEMA ONLINE"}</div></div><div class="tools">${this._saved?'<span class="status">SALVATO ✓</span>':this._error?`<span class="status">${esc(this._error)}</span>`:""}<button class="secondary" id="edit">${this._editing?"Esci editor":"MODIFICA"}</button>${this._editing?'<button id="add">+ CARD</button><button id="save">SALVA</button>':""}</div></header><div class="workspace"><main class="sections">${items||'<div class="empty-editor">NESSUNA CARD · PREMI MODIFICA</div>'}</main>${this._editing?this._renderEditor():""}</div></div>`;this._bind()}
- _bind(){this.querySelector("#edit")?.addEventListener("click",()=>this._edit());this.querySelector("#add")?.addEventListener("click",()=>this._add());this.querySelector("#save")?.addEventListener("click",()=>this._save());this.querySelectorAll("[data-action-item]").forEach(e=>e.addEventListener("click",()=>this._perform(this._item(e.dataset.actionItem))));this.querySelectorAll("[data-remove]").forEach(b=>b.addEventListener("click",()=>this._remove(b.dataset.remove)));this.querySelectorAll("[data-select-item]").forEach(b=>b.addEventListener("click",()=>{this._selected=b.dataset.selectItem;this.render()}));this.querySelector("[data-close-editor]")?.addEventListener("click",()=>{this._selected=null;this.render()});this.querySelector("[data-delete-selected]")?.addEventListener("click",()=>this._remove(this._selected));this.querySelector("[data-copy-state]")?.addEventListener("click",()=>{const x=this._item(this._selected),s=this._hass.states[x.entity_id]?.state||"unknown";x.states=x.states||{};x.states.default=structuredClone(x.states[s]||{});this.render()});this.querySelectorAll("[data-prop]").forEach(e=>e.addEventListener("change",()=>{let v=e.type==="checkbox"?e.checked:e.value;if(e.type==="number")v=Number(v);this._set(this._selected,e.dataset.prop,v)}));this.querySelectorAll("[data-state-prop]").forEach(e=>e.addEventListener("change",()=>{let [state,...path]=e.dataset.stateProp.split(".");let v=e.type==="checkbox"?e.checked:e.value;const x=this._item(this._selected);x.states=x.states||{};x.states[state]=x.states[state]||{};let o=x.states[state];for(let i=0;i<path.length-1;i++)o=o[path[i]]||(o[path[i]]={});if(path.length)o[path.at(-1)]=v;this.render()}));this.querySelectorAll("[data-pos]").forEach(e=>e.addEventListener("change",()=>{const x=this._item(this._selected);if(x){x.position=x.position||{};x.position[e.dataset.pos]=Number(e.value);this.render()}}));this.querySelectorAll("[data-page-prop]").forEach(e=>e.addEventListener("change",()=>{this._dashboard.pages[0][e.dataset.pageProp]=e.value;this.render()}));this.querySelectorAll("[data-icon-live]").forEach(inp=>inp.addEventListener("input",()=>{const prev=inp.closest(".icon-editor")?.querySelector("[data-icon-preview]");if(prev)prev.setAttribute("icon",inp.value||"mdi:help-circle-outline")}));this.querySelectorAll("[data-icon-pick]").forEach(b=>b.addEventListener("click",()=>{const inp=b.closest(".icon-editor")?.querySelector("input");if(inp){inp.value=b.dataset.iconPick;inp.dispatchEvent(new Event("change",{bubbles:true}))}}));this.querySelector("[data-entity-search]")?.addEventListener("input",e=>{const term=e.target.value.trim().toLowerCase();const box=this.querySelector("[data-entity-results]");if(!box)return;if(!term){box.innerHTML="";return}const matches=Object.values(this._hass.states||{}).map(s=>({id:s.entity_id,name:s.attributes.friendly_name||s.entity_id})).filter(s=>s.id.toLowerCase().includes(term)||s.name.toLowerCase().includes(term)).sort((p,q)=>{const pn=p.name.toLowerCase().startsWith(term)?0:1,qn=q.name.toLowerCase().startsWith(term)?0:1;return pn-qn||p.name.localeCompare(q.name)}).slice(0,8);box.innerHTML=matches.map(s=>`<div class="entity-result-row" data-select-entity="${esc(s.id)}"><ha-icon icon="${esc(domainIcon(s.id))}"></ha-icon><div><strong>${esc(s.name)}</strong><small>${esc(s.id)}</small></div></div>`).join("")||'<div class="entity-result-empty">Nessun risultato</div>'});this.querySelector("[data-entity-results]")?.addEventListener("click",e=>{const row=e.target.closest("[data-select-entity]");if(row)this._set(this._selected,"entity_id",row.dataset.selectEntity)})}
+/**
+ * Cyborg Dashboard — frontend panel.
+ *
+ * Architecture notes
+ * ------------------
+ * Sections are first-class objects (schema v3): a page owns an ordered list of
+ * sections, each section owns an ordered list of cards. Cards no longer carry
+ * x/y/w/h grid coordinates — they flow in array order inside their section and
+ * only declare a `size` span. Manual coordinates were the main source of
+ * overlapping/invisible cards and forced the user to think in grid maths just
+ * to move one tile.
+ *
+ * Rendering is innerHTML-based and re-runs on state change, but guarded by a
+ * signature of only the entities actually placed on the dashboard, so an
+ * unrelated sensor updating 6x/second does not thrash the DOM or steal focus
+ * from the editor while typing.
+ */
+
+const DOMAIN_ICONS = {
+  alarm_control_panel: "mdi:shield-home", automation: "mdi:robot",
+  binary_sensor: "mdi:radiobox-marked", button: "mdi:gesture-tap-button",
+  calendar: "mdi:calendar", camera: "mdi:cctv", climate: "mdi:thermostat",
+  cover: "mdi:window-shutter", device_tracker: "mdi:cellphone-marker",
+  fan: "mdi:fan", humidifier: "mdi:air-humidifier",
+  input_boolean: "mdi:toggle-switch-outline", input_datetime: "mdi:clock-outline",
+  input_number: "mdi:ray-vertex", input_select: "mdi:format-list-bulleted",
+  input_text: "mdi:form-textbox", light: "mdi:lightbulb", lock: "mdi:lock",
+  media_player: "mdi:cast", number: "mdi:ray-vertex", person: "mdi:account",
+  scene: "mdi:palette", script: "mdi:script-text",
+  select: "mdi:format-list-bulleted", sensor: "mdi:gauge", siren: "mdi:bullhorn",
+  sun: "mdi:white-balance-sunny", switch: "mdi:toggle-switch",
+  todo: "mdi:format-list-checks", update: "mdi:package-up",
+  vacuum: "mdi:robot-vacuum", valve: "mdi:pipe-valve",
+  water_heater: "mdi:water-boiler", weather: "mdi:weather-partly-cloudy",
+  zone: "mdi:map-marker-radius", event: "mdi:calendar-star",
+};
+
+const DEVICE_CLASS_ICONS = {
+  power: "mdi:flash", energy: "mdi:lightning-bolt", current: "mdi:current-ac",
+  voltage: "mdi:sine-wave", temperature: "mdi:thermometer",
+  humidity: "mdi:water-percent", pressure: "mdi:gauge", battery: "mdi:battery",
+  illuminance: "mdi:brightness-5", door: "mdi:door-open",
+  window: "mdi:window-open", motion: "mdi:motion-sensor",
+  smoke: "mdi:smoke-detector", gas: "mdi:gas-cylinder",
+  moisture: "mdi:water-alert", occupancy: "mdi:home-account",
+  presence: "mdi:home-account", connectivity: "mdi:lan-connect",
+  problem: "mdi:alert-circle-outline", lock: "mdi:lock",
+};
+
+const ICON_PALETTE = [
+  "mdi:lightbulb", "mdi:lightbulb-group", "mdi:ceiling-light", "mdi:lamp",
+  "mdi:power-plug", "mdi:flash", "mdi:lightning-bolt", "mdi:solar-power",
+  "mdi:home-battery", "mdi:transmission-tower", "mdi:thermometer",
+  "mdi:snowflake", "mdi:fire", "mdi:air-conditioner", "mdi:fan",
+  "mdi:water-percent", "mdi:weather-partly-cloudy", "mdi:shield-home",
+  "mdi:shield-lock", "mdi:cctv", "mdi:door-open", "mdi:window-open",
+  "mdi:motion-sensor", "mdi:bullhorn", "mdi:lock", "mdi:account",
+  "mdi:account-group", "mdi:washing-machine", "mdi:tumble-dryer",
+  "mdi:fridge", "mdi:stove", "mdi:coffee-maker", "mdi:television",
+  "mdi:speaker", "mdi:router-wireless", "mdi:chip", "mdi:harddisk",
+  "mdi:gauge", "mdi:chart-line", "mdi:hexagon-multiple-outline",
+];
+
+const SECTION_ICONS = [
+  "mdi:shield-home", "mdi:flash", "mdi:thermostat", "mdi:lightbulb-group",
+  "mdi:account-group", "mdi:chip", "mdi:sofa", "mdi:bed", "mdi:silverware-fork-knife",
+  "mdi:shower", "mdi:balcony", "mdi:garage", "mdi:washing-machine",
+  "mdi:television-classic", "mdi:water", "mdi:leaf", "mdi:car", "mdi:map-marker",
+  "mdi:solar-power", "mdi:shape-outline",
+];
+
+/**
+ * Blueprints used by "componi automaticamente".
+ *
+ * Each entry scores a candidate entity; the highest-scoring section wins, so
+ * an entity lands in exactly one place instead of being duplicated across
+ * every section that vaguely matches it. Score 0 = not a match.
+ */
+const SECTION_PRESETS = [
+  {
+    id: "sicurezza", title: "Sicurezza", icon: "mdi:shield-home", accent: "#ff3d71", limit: 10,
+    score(id, st) {
+      const d = domainOf(id), dc = st.attributes.device_class;
+      if (d === "alarm_control_panel") return 100;
+      if (d === "siren" || d === "lock") return 88;
+      if (d === "binary_sensor" && ["door", "window", "motion", "smoke", "gas", "moisture", "tamper", "safety"].includes(dc)) return 85;
+      if (d === "camera") return 70;
+      return 0;
+    },
+    cardType: (id) => (domainOf(id) === "lock" || domainOf(id) === "siren" ? "control" : "status"),
+  },
+  {
+    id: "energia", title: "Energia", icon: "mdi:flash", accent: "#ffd166", limit: 10,
+    score(id, st) {
+      const d = domainOf(id), dc = st.attributes.device_class;
+      if (d !== "sensor") return 0;
+      if (dc === "power") return 95;
+      if (dc === "energy") return 90;
+      if (dc === "current" || dc === "voltage") return 60;
+      return 0;
+    },
+    cardType: () => "sensor",
+  },
+  {
+    id: "clima", title: "Clima", icon: "mdi:thermostat", accent: "#00e5ff", limit: 10,
+    score(id, st) {
+      const d = domainOf(id), dc = st.attributes.device_class;
+      if (d === "climate") return 100;
+      if (d === "weather") return 80;
+      if (d === "sensor" && (dc === "temperature" || dc === "humidity")) return 75;
+      if (d === "humidifier" || d === "fan") return 65;
+      return 0;
+    },
+    cardType: (id) => (domainOf(id) === "climate" ? "climate" : domainOf(id) === "sensor" ? "sensor" : "control"),
+  },
+  {
+    id: "illuminazione", title: "Illuminazione", icon: "mdi:lightbulb-group", accent: "#c77dff", limit: 12,
+    score(id, st) {
+      const d = domainOf(id);
+      const name = (st.attributes.friendly_name || id).toLowerCase();
+      if (d === "light") return 100;
+      if (d === "switch" && /luc|light|lamp|faretti|plafo/.test(name)) return 80;
+      if (d === "scene" && /luc|light|lamp/.test(name)) return 55;
+      return 0;
+    },
+    cardType: () => "control",
+  },
+  {
+    id: "presenza", title: "Presenza", icon: "mdi:account-group", accent: "#06d6a0", limit: 8,
+    score(id, st) {
+      const d = domainOf(id);
+      if (d === "person") return 100;
+      if (d === "device_tracker") return 55;
+      if (d === "binary_sensor" && ["occupancy", "presence"].includes(st.attributes.device_class)) return 70;
+      return 0;
+    },
+    cardType: () => "status",
+  },
+  {
+    id: "sistema", title: "Sistema", icon: "mdi:chip", accent: "#8d99ae", limit: 8,
+    score(id, st) {
+      const d = domainOf(id);
+      const name = (st.attributes.friendly_name || id).toLowerCase();
+      if (d === "sensor" && /processor|cpu|memory|memoria|disk|disco|uptime|temperatura del processore/.test(name)) return 85;
+      if (d === "update") return 40;
+      if (d === "binary_sensor" && st.attributes.device_class === "connectivity") return 60;
+      return 0;
+    },
+    cardType: () => "sensor",
+  },
+];
+
+const SIZE_SPAN = { sm: 3, md: 4, lg: 6, xl: 12 };
+const SIZE_LABEL = { sm: "Piccola", md: "Media", lg: "Grande", xl: "Piena larghezza" };
+
+const CARD_TYPES = [
+  ["entity", "Entità — icona, nome e stato"],
+  ["sensor", "Sensore — valore grande con unità"],
+  ["control", "Controllo — interruttore on/off"],
+  ["status", "Stato — badge colorato"],
+  ["climate", "Clima — temperatura e modalità"],
+  ["gauge", "Gauge — indicatore percentuale"],
+  ["chart", "Grafico — andamento 24h"],
+];
+
+const ON_STATES = new Set(["on", "open", "unlocked", "home", "playing", "cleaning", "heat", "cool", "heat_cool", "dry", "fan_only", "auto"]);
+const ALERT_STATES = new Set(["armed_away", "armed_home", "armed_night", "armed_vacation", "triggered", "unlocked", "open", "on"]);
+
+function esc(v) {
+  return String(v === undefined || v === null ? "" : v)
+    .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-if(!customElements.get("cyborg-dashboard"))customElements.define("cyborg-dashboard",CyborgDashboard);
+function domainOf(entityId) { return String(entityId || "").split(".")[0]; }
+function uid(prefix) { return prefix + "-" + Math.random().toString(36).slice(2, 9); }
+
+function autoIcon(entityId, st) {
+  const dc = st && st.attributes && st.attributes.device_class;
+  if (dc && DEVICE_CLASS_ICONS[dc]) return DEVICE_CLASS_ICONS[dc];
+  return DOMAIN_ICONS[domainOf(entityId)] || "mdi:shape-outline";
+}
+
+function iconField(attr, key, value) {
+  return `<div class="icon-editor-row">
+      <ha-icon data-icon-preview icon="${esc(value)}"></ha-icon>
+      <input ${attr}="${esc(key)}" data-icon-live value="${esc(value)}" placeholder="mdi:...">
+    </div>
+    <div class="icon-palette">${ICON_PALETTE.map((i) =>
+      `<button type="button" class="icon-swatch" data-icon-pick="${esc(i)}" title="${esc(i)}"><ha-icon icon="${esc(i)}"></ha-icon></button>`
+    ).join("")}</div>`;
+}
+
+/** Build an SVG sparkline path from numeric history points. */
+function sparkline(points, w, h) {
+  if (!points || points.length < 2) return "";
+  let min = Math.min(...points), max = Math.max(...points);
+  if (max === min) { max = min + 1; }
+  const step = w / (points.length - 1);
+  const y = (v) => h - ((v - min) / (max - min)) * h;
+  const line = points.map((v, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L${w},${h} L0,${h} Z`;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <path class="spark-area" d="${area}"></path>
+      <path class="spark-line" d="${line}"></path>
+    </svg>`;
+}
+
+class CyborgDashboard extends HTMLElement {
+  constructor() {
+    super();
+    this._dashboard = null;
+    this._editing = false;
+    this._selected = null;      // {kind:'card'|'section', sectionId, itemId?}
+    this._saved = false;
+    this._error = "";
+    this._signature = "";
+    this._history = {};
+    this._pendingHistory = new Set();
+    this._entityQuery = "";
+  }
+
+  set hass(value) {
+    this._hass = value;
+    if (!this._dashboard) { this._load(); return; }
+    // Only repaint when something we actually display has changed. Without
+    // this guard every unrelated state update in a 380-entity install would
+    // rebuild the whole DOM and yank focus out of the editor mid-typing.
+    const sig = this._buildSignature();
+    if (sig !== this._signature) this.render();
+  }
+
+  connectedCallback() { if (this._hass && !this._dashboard) this._load(); }
+
+  // ---------------------------------------------------------------- data ---
+
+  _page() { return this._dashboard && this._dashboard.pages[0]; }
+  _sections() { const p = this._page(); return (p && p.sections) || []; }
+  _section(id) { return this._sections().find((s) => s.id === id) || null; }
+  _card(sectionId, itemId) {
+    const s = this._section(sectionId);
+    return s ? s.items.find((i) => i.id === itemId) || null : null;
+  }
+  _selectedCard() {
+    return this._selected && this._selected.kind === "card"
+      ? this._card(this._selected.sectionId, this._selected.itemId) : null;
+  }
+  _selectedSection() {
+    return this._selected && this._selected.kind === "section"
+      ? this._section(this._selected.sectionId) : null;
+  }
+
+  _buildSignature() {
+    if (!this._hass || !this._dashboard) return "";
+    const parts = [this._editing ? "e" : "v", JSON.stringify(this._selected || null)];
+    for (const s of this._sections()) {
+      for (const it of s.items) {
+        const st = this._hass.states[it.entity_id];
+        parts.push(it.entity_id + "=" + (st ? st.state : "?"));
+      }
+    }
+    return parts.join("|");
+  }
+
+  async _load() {
+    try {
+      const res = await this._hass.callWS({ type: "cyborg_dashboard/get" });
+      this._dashboard = res.dashboard;
+      this._error = "";
+    } catch (err) {
+      this._error = "Impossibile caricare la dashboard";
+      this._dashboard = { version: 3, revision: 0, theme: { accent: "#00e5ff" },
+        pages: [{ id: "home", title: "Cyborg", icon: "mdi:hexagon-multiple-outline", sections: [] }] };
+    }
+    this.render();
+  }
+
+  async _save() {
+    try {
+      const res = await this._hass.callWS({
+        type: "cyborg_dashboard/save",
+        dashboard: this._dashboard,
+        expected_revision: this._dashboard.revision,
+      });
+      this._dashboard.revision = res.revision;
+      this._error = "";
+      this._saved = true;
+      this.render();
+      setTimeout(() => { this._saved = false; this.render(); }, 2200);
+    } catch (err) {
+      this._error = (err && err.message) || "Salvataggio non riuscito";
+      this.render();
+    }
+  }
+
+  _touch() { this._signature = ""; this.render(); }
+
+  // ------------------------------------------------------------- mutation --
+
+  _addSection(preset) {
+    const base = preset || { title: "Nuova sezione", icon: "mdi:shape-outline", accent: null };
+    const section = { id: uid("sec"), title: base.title, icon: base.icon,
+      accent: base.accent || null, collapsed: false, items: [] };
+    this._page().sections.push(section);
+    this._selected = { kind: "section", sectionId: section.id };
+    this._touch();
+  }
+
+  _removeSection(id) {
+    const p = this._page();
+    p.sections = p.sections.filter((s) => s.id !== id);
+    if (this._selected && this._selected.sectionId === id) this._selected = null;
+    this._touch();
+  }
+
+  _moveSection(id, delta) {
+    const list = this._page().sections;
+    const i = list.findIndex((s) => s.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    this._touch();
+  }
+
+  _addCard(sectionId) {
+    const section = this._section(sectionId);
+    if (!section) return;
+    const card = { id: uid("card"), type: "entity", entity_id: "", name: "",
+      size: "md", appearance: {}, states: {}, actions: { tap: { action: "more-info" } } };
+    section.items.push(card);
+    this._selected = { kind: "card", sectionId, itemId: card.id };
+    this._entityQuery = "";
+    this._touch();
+  }
+
+  _removeCard(sectionId, itemId) {
+    const section = this._section(sectionId);
+    if (!section) return;
+    section.items = section.items.filter((i) => i.id !== itemId);
+    if (this._selected && this._selected.itemId === itemId) this._selected = null;
+    this._touch();
+  }
+
+  _moveCard(sectionId, itemId, delta) {
+    const section = this._section(sectionId);
+    if (!section) return;
+    const i = section.items.findIndex((x) => x.id === itemId);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= section.items.length) return;
+    [section.items[i], section.items[j]] = [section.items[j], section.items[i]];
+    this._touch();
+  }
+
+  _reassignCard(fromId, itemId, toId) {
+    if (fromId === toId) return;
+    const from = this._section(fromId), to = this._section(toId);
+    if (!from || !to) return;
+    const i = from.items.findIndex((x) => x.id === itemId);
+    if (i < 0) return;
+    const [card] = from.items.splice(i, 1);
+    to.items.push(card);
+    this._selected = { kind: "card", sectionId: toId, itemId };
+    this._touch();
+  }
+
+  /** Set a dotted path on the selected card / section. */
+  _set(target, path, value) {
+    const keys = path.split(".");
+    let node = target;
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (typeof node[keys[i]] !== "object" || node[keys[i]] === null) node[keys[i]] = {};
+      node = node[keys[i]];
+    }
+    node[keys[keys.length - 1]] = value;
+    this._touch();
+  }
+
+  /**
+   * Build a full dashboard from the live entity registry.
+   *
+   * Every candidate entity is scored against every preset and assigned to the
+   * single best match, so nothing is duplicated. Unavailable/unknown entities
+   * are skipped: seeding a brand-new dashboard with 62 "unavailable" tiles
+   * would look broken even though it is technically accurate.
+   */
+  _autoCompose(replace) {
+    const states = this._hass.states || {};
+    const buckets = {};
+    for (const preset of SECTION_PRESETS) buckets[preset.id] = [];
+
+    for (const entityId of Object.keys(states)) {
+      const st = states[entityId];
+      if (!st || st.state === "unavailable" || st.state === "unknown") continue;
+      if (st.attributes && st.attributes.hidden_by) continue;
+      let best = null, bestScore = 0;
+      for (const preset of SECTION_PRESETS) {
+        const score = preset.score(entityId, st);
+        if (score > bestScore) { bestScore = score; best = preset; }
+      }
+      if (best) buckets[best.id].push({ entityId, st, score: bestScore });
+    }
+
+    const page = this._page();
+    const built = [];
+    for (const preset of SECTION_PRESETS) {
+      const chosen = buckets[preset.id]
+        .sort((a, b) => b.score - a.score ||
+          String(a.st.attributes.friendly_name || a.entityId)
+            .localeCompare(String(b.st.attributes.friendly_name || b.entityId)))
+        .slice(0, preset.limit);
+      if (!chosen.length) continue;
+      built.push({
+        id: uid("sec"), title: preset.title, icon: preset.icon,
+        accent: preset.accent, collapsed: false,
+        items: chosen.map((c) => ({
+          id: uid("card"),
+          type: preset.cardType(c.entityId, c.st),
+          entity_id: c.entityId,
+          name: "",
+          size: preset.cardType(c.entityId, c.st) === "climate" ? "lg" : "md",
+          appearance: { icon: autoIcon(c.entityId, c.st) },
+          states: {},
+          actions: { tap: { action: domainOf(c.entityId) === "sensor" ? "more-info" : "toggle" } },
+        })),
+      });
+    }
+
+    page.sections = replace ? built : page.sections.concat(built);
+    this._selected = null;
+    this._touch();
+  }
+
+  // -------------------------------------------------------------- history --
+
+  _requestHistory(entityId) {
+    if (!entityId) return;
+    const cached = this._history[entityId];
+    if (cached && Date.now() - cached.ts < 300000) return;
+    if (this._pendingHistory.has(entityId)) return;
+    this._pendingHistory.add(entityId);
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 3600 * 1000);
+    this._hass.callWS({
+      type: "history/history_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      entity_ids: [entityId],
+      minimal_response: true,
+      no_attributes: true,
+    }).then((res) => {
+      const raw = (res && res[entityId]) || [];
+      const points = raw.map((p) => parseFloat(p.s !== undefined ? p.s : p.state))
+        .filter((n) => Number.isFinite(n));
+      this._history[entityId] = { ts: Date.now(), points };
+    }).catch(() => {
+      this._history[entityId] = { ts: Date.now(), points: [] };
+    }).then(() => {
+      this._pendingHistory.delete(entityId);
+      this._touch();
+    });
+  }
+
+  // ------------------------------------------------------------ rendering --
+
+  _cardBody(item, st) {
+    const type = item.type || "entity";
+    const attrs = (st && st.attributes) || {};
+    const state = st ? st.state : "unavailable";
+    const unit = attrs.unit_of_measurement || "";
+    const isOn = ON_STATES.has(state);
+
+    if (type === "control") {
+      return `<div class="control-row">
+          <span class="control-state">${esc(isOn ? "ACCESO" : "SPENTO")}</span>
+          <span class="switch ${isOn ? "on" : ""}"><span class="knob"></span></span>
+        </div>`;
+    }
+    if (type === "status") {
+      const alert = ALERT_STATES.has(state);
+      return `<div class="status-badge ${alert ? "alert" : ""}">
+          <ha-icon icon="${esc(alert ? "mdi:alert-circle" : "mdi:check-circle")}"></ha-icon>
+          <span>${esc(state.replace(/_/g, " "))}</span>
+        </div>`;
+    }
+    if (type === "climate") {
+      const cur = attrs.current_temperature, target = attrs.temperature;
+      return `<div class="climate-body">
+          <div class="value">${esc(cur !== undefined ? cur : state)}<span class="unit-inline">°C</span></div>
+          <div class="climate-meta">
+            <span><ha-icon icon="mdi:target"></ha-icon> ${esc(target !== undefined ? target + "°" : "—")}</span>
+            <span><ha-icon icon="mdi:tune-variant"></ha-icon> ${esc(String(state).replace(/_/g, " "))}</span>
+          </div>
+        </div>`;
+    }
+    if (type === "gauge") {
+      const num = parseFloat(state);
+      const pct = Number.isFinite(num) ? Math.max(0, Math.min(100, num)) : 0;
+      return `<div class="gauge">
+          <div class="gauge-track"><div class="gauge-fill" style="width:${pct}%"></div></div>
+          <div class="value gauge-value">${esc(Number.isFinite(num) ? num : state)}<span class="unit-inline">${esc(unit || "%")}</span></div>
+        </div>`;
+    }
+    if (type === "chart") {
+      this._requestHistory(item.entity_id);
+      const hist = this._history[item.entity_id];
+      const chart = hist && hist.points.length > 1
+        ? sparkline(hist.points, 220, 54)
+        : `<div class="chart-empty">${hist ? "STORICO NON DISPONIBILE" : "CARICAMENTO STORICO..."}</div>`;
+      return `<div class="chart-body">
+          <div class="value">${esc(state)}<span class="unit-inline">${esc(unit)}</span></div>
+          ${chart}
+        </div>`;
+    }
+    if (type === "sensor") {
+      return `<div class="value">${esc(state)}<span class="unit-inline">${esc(unit)}</span></div>`;
+    }
+    return `<div class="value entity-value">${esc(String(state).replace(/_/g, " "))}${unit ? `<span class="unit-inline">${esc(unit)}</span>` : ""}</div>`;
+  }
+
+  _renderCard(item, section) {
+    const st = this._hass.states[item.entity_id];
+    const attrs = (st && st.attributes) || {};
+    const state = st ? st.state : "unavailable";
+    const name = item.name || attrs.friendly_name || item.entity_id || "Card non configurata";
+    const app = item.appearance || {};
+    const stateStyle = (item.states && (item.states[state] || item.states.default)) || {};
+    const accent = stateStyle.accent || app.accent || section.accent || (this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff";
+    const icon = stateStyle.icon || app.icon || autoIcon(item.entity_id, st || { attributes: {} });
+    const span = SIZE_SPAN[item.size] || SIZE_SPAN.md;
+    const glow = app.glow !== false;
+    const pulse = stateStyle.animate ? " pulse" : "";
+    const missing = !item.entity_id ? " missing" : "";
+    const style = `--accent:${esc(accent)};grid-column:span ${span}`;
+    const body = this._cardBody(item, st);
+    const head = `<div class="head">
+        ${item.show_icon === false ? "" : `<ha-icon class="card-icon" icon="${esc(icon)}"></ha-icon>`}
+        <div class="head-text"><strong>${esc(name)}</strong>${
+          item.show_state === false ? "" : `<small>${esc(stateStyle.label || String(state).replace(/_/g, " "))}</small>`}</div>
+      </div>`;
+
+    if (this._editing) {
+      const selected = this._selected && this._selected.kind === "card" && this._selected.itemId === item.id;
+      return `<article class="item editor-item${selected ? " selected" : ""}${missing}" style="${style}">
+          ${head}${body}
+          <div class="card-tools">
+            <button class="mini" data-card-move="-1" data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Sposta indietro"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+            <button class="mini" data-card-move="1" data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Sposta avanti"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+            <button class="mini grow" data-select-card data-sec="${esc(section.id)}" data-item="${esc(item.id)}"><ha-icon icon="mdi:tune"></ha-icon> CONFIGURA</button>
+            <button class="mini danger" data-card-remove data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Elimina"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+          </div>
+        </article>`;
+    }
+    return `<article class="item${pulse}${missing}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+        data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}">${head}${body}</article>`;
+  }
+
+  _renderSection(section, index, total) {
+    const accent = section.accent || (this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff";
+    const count = section.items.length;
+    const selected = this._selected && this._selected.kind === "section" && this._selected.sectionId === section.id;
+    const cards = section.items.map((i) => this._renderCard(i, section)).join("");
+
+    const tools = this._editing ? `<div class="sec-tools">
+        <button class="mini" data-sec-move="-1" data-sec="${esc(section.id)}" ${index === 0 ? "disabled" : ""} title="Sposta su"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+        <button class="mini" data-sec-move="1" data-sec="${esc(section.id)}" ${index === total - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+        <button class="mini" data-sec-config data-sec="${esc(section.id)}"><ha-icon icon="mdi:cog-outline"></ha-icon> SEZIONE</button>
+        <button class="mini accentbtn" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus"></ha-icon> CARD</button>
+        <button class="mini danger" data-sec-remove data-sec="${esc(section.id)}" title="Elimina sezione"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+      </div>` : "";
+
+    const empty = this._editing
+      ? `<button class="section-empty" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus-circle-outline"></ha-icon> Aggiungi la prima entità a “${esc(section.title)}”</button>`
+      : "";
+
+    return `<section class="dash-section${selected ? " sec-selected" : ""}" style="--accent:${esc(accent)}">
+        <header class="sec-head">
+          <button class="sec-toggle" data-sec-collapse data-sec="${esc(section.id)}" title="${section.collapsed ? "Espandi" : "Comprimi"}">
+            <ha-icon icon="${section.collapsed ? "mdi:chevron-right" : "mdi:chevron-down"}"></ha-icon>
+          </button>
+          <ha-icon class="sec-icon" icon="${esc(section.icon || "mdi:shape-outline")}"></ha-icon>
+          <h3>${esc(section.title)}</h3>
+          <span class="sec-count">${count}</span>
+          <span class="sec-rule"></span>
+          ${tools}
+        </header>
+        ${section.collapsed ? "" : (count ? `<div class="grid">${cards}</div>` : empty)}
+      </section>`;
+  }
+
+  // -------------------------------------------------------------- editor ---
+
+  _entityResults() {
+    const q = (this._entityQuery || "").trim().toLowerCase();
+    if (!q) return `<div class="entity-result-empty">Digita almeno due caratteri per cercare tra le ${Object.keys(this._hass.states).length} entità.</div>`;
+    if (q.length < 2) return `<div class="entity-result-empty">Continua a digitare...</div>`;
+    const rows = [];
+    for (const id of Object.keys(this._hass.states)) {
+      const st = this._hass.states[id];
+      const fn = String(st.attributes.friendly_name || "");
+      const hay = (fn + " " + id).toLowerCase();
+      const at = hay.indexOf(q);
+      if (at < 0) continue;
+      rows.push({ id, fn: fn || id, st, rank: (fn.toLowerCase().startsWith(q) ? 0 : id.toLowerCase().startsWith(q) ? 1 : 2) * 1000 + at });
+      if (rows.length > 400) break;
+    }
+    rows.sort((a, b) => a.rank - b.rank || a.fn.localeCompare(b.fn));
+    if (!rows.length) return `<div class="entity-result-empty">Nessun risultato per “${esc(q)}”.</div>`;
+    return rows.slice(0, 12).map((r) => `<div class="entity-result-row" data-pick-entity="${esc(r.id)}">
+        <ha-icon icon="${esc(autoIcon(r.id, r.st))}"></ha-icon>
+        <div class="err-text"><strong>${esc(r.fn)}</strong><small>${esc(r.id)}</small></div>
+        <span class="err-state">${esc(r.st.state)}</span>
+      </div>`).join("");
+  }
+
+  _renderCardEditor(card) {
+    const st = this._hass.states[card.entity_id];
+    const app = card.appearance || {};
+    const state = st ? st.state : "unknown";
+    const sections = this._sections();
+    const currentIcon = app.icon || autoIcon(card.entity_id, st || { attributes: {} });
+    const tap = (card.actions && card.actions.tap && card.actions.tap.action) || "more-info";
+
+    return `<aside class="editor">
+      <div class="editor-title">
+        <div><small>CARD</small><h2>${esc(card.name || (st && st.attributes.friendly_name) || card.entity_id || "Nuova card")}</h2></div>
+        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>
+
+      <div class="section">
+        <strong>ENTITÀ</strong>
+        ${card.entity_id ? `<div class="entity-current">
+            <ha-icon icon="${esc(autoIcon(card.entity_id, st || { attributes: {} }))}"></ha-icon>
+            <div><strong>${esc((st && st.attributes.friendly_name) || card.entity_id)}</strong><small>${esc(card.entity_id)}</small></div>
+            <span class="err-state">${esc(state)}</span>
+          </div>` : `<div class="warn">Nessuna entità collegata — la card resterà vuota.</div>`}
+        <label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
+        <div class="entity-results" data-entity-results>${this._entityResults()}</div>
+      </div>
+
+      <div class="section">
+        <strong>PRESENTAZIONE</strong>
+        <label>TIPO<select data-prop="type">${CARD_TYPES.map(([v, l]) =>
+          `<option value="${v}" ${card.type === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <label>DIMENSIONE<select data-prop="size">${Object.keys(SIZE_LABEL).map((v) =>
+          `<option value="${v}" ${(card.size || "md") === v ? "selected" : ""}>${esc(SIZE_LABEL[v])}</option>`).join("")}</select></label>
+        <label>NOME<input data-prop="name" value="${esc(card.name || "")}" placeholder="${esc((st && st.attributes.friendly_name) || "Nome automatico")}"></label>
+        <label>SEZIONE<select data-move-section>${sections.map((s) =>
+          `<option value="${esc(s.id)}" ${s.id === this._selected.sectionId ? "selected" : ""}>${esc(s.title)}</option>`).join("")}</select></label>
+        <label>ICONA${iconField("data-prop", "appearance.icon", currentIcon)}</label>
+      </div>
+
+      <div class="section">
+        <strong>STILE</strong>
+        <label>COLORE ACCENTO<input type="color" data-prop="appearance.accent" value="${esc(app.accent || (this._section(this._selected.sectionId) || {}).accent || "#00e5ff")}"></label>
+        <label class="check"><input type="checkbox" data-prop="appearance.glow" ${app.glow !== false ? "checked" : ""}> Bagliore neon</label>
+        <label class="check"><input type="checkbox" data-prop="show_icon" ${card.show_icon !== false ? "checked" : ""}> Mostra icona</label>
+        <label class="check"><input type="checkbox" data-prop="show_state" ${card.show_state !== false ? "checked" : ""}> Mostra stato sotto il nome</label>
+      </div>
+
+      <div class="section">
+        <strong>STATO CORRENTE · ${esc(String(state).toUpperCase())}</strong>
+        <span class="hint">Queste impostazioni si applicano solo quando l'entità è in questo stato.</span>
+        <label>COLORE<input type="color" data-state-prop="${esc(state)}.accent" value="${esc((card.states[state] && card.states[state].accent) || app.accent || "#00e5ff")}"></label>
+        <label>ETICHETTA<input data-state-prop="${esc(state)}.label" value="${esc((card.states[state] && card.states[state].label) || "")}" placeholder="${esc(state)}"></label>
+        <label class="check"><input type="checkbox" data-state-prop="${esc(state)}.animate" ${(card.states[state] && card.states[state].animate) ? "checked" : ""}> Animazione pulsante</label>
+      </div>
+
+      <div class="section">
+        <strong>AZIONE AL TOCCO</strong>
+        <select data-prop="actions.tap.action">
+          ${[["more-info", "Apri dettagli"], ["toggle", "Accendi/Spegni"], ["turn_on", "Accendi"], ["turn_off", "Spegni"], ["none", "Nessuna"]]
+            .map(([v, l]) => `<option value="${v}" ${tap === v ? "selected" : ""}>${esc(l)}</option>`).join("")}
+        </select>
+      </div>
+
+      <button class="delete" data-card-remove data-sec="${esc(this._selected.sectionId)}" data-item="${esc(card.id)}">ELIMINA CARD</button>
+    </aside>`;
+  }
+
+  _renderSectionEditor(section) {
+    return `<aside class="editor">
+      <div class="editor-title">
+        <div><small>SEZIONE</small><h2>${esc(section.title)}</h2></div>
+        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>
+      <div class="section">
+        <label>TITOLO<input data-sec-prop="title" value="${esc(section.title)}"></label>
+        <label>COLORE ACCENTO<input type="color" data-sec-prop="accent" value="${esc(section.accent || "#00e5ff")}"></label>
+        <label>ICONA
+          <div class="icon-editor-row">
+            <ha-icon data-icon-preview icon="${esc(section.icon)}"></ha-icon>
+            <input data-sec-prop="icon" data-icon-live value="${esc(section.icon)}" placeholder="mdi:...">
+          </div>
+          <div class="icon-palette">${SECTION_ICONS.map((i) =>
+            `<button type="button" class="icon-swatch" data-icon-pick="${esc(i)}" title="${esc(i)}"><ha-icon icon="${esc(i)}"></ha-icon></button>`).join("")}</div>
+        </label>
+      </div>
+      <div class="section">
+        <strong>CONTENUTO</strong>
+        <span class="hint">${section.items.length} card in questa sezione.</span>
+        <button class="secondary wide" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARD</button>
+      </div>
+      <button class="delete" data-sec-remove data-sec="${esc(section.id)}">ELIMINA SEZIONE</button>
+    </aside>`;
+  }
+
+  _renderPageEditor() {
+    const p = this._page();
+    return `<aside class="editor">
+      <div class="editor-title"><div><small>PAGINA</small><h2>Struttura</h2></div></div>
+      <div class="section">
+        <label>TITOLO<input data-page-prop="title" value="${esc(p.title || "")}" placeholder="Cyborg"></label>
+        <label>ICONA${iconField("data-page-prop", "icon", p.icon || "mdi:hexagon-multiple-outline")}</label>
+        <label>COLORE TEMA<input type="color" data-theme-prop="accent" value="${esc((this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff")}"></label>
+      </div>
+      <div class="section">
+        <strong>SEZIONI</strong>
+        <span class="hint">Clicca “SEZIONE” su un blocco per configurarlo, oppure aggiungine uno nuovo.</span>
+        <div class="preset-grid">${SECTION_PRESETS.map((pr) =>
+          `<button type="button" class="preset" data-add-preset="${esc(pr.id)}" style="--accent:${esc(pr.accent)}">
+             <ha-icon icon="${esc(pr.icon)}"></ha-icon><span>${esc(pr.title)}</span></button>`).join("")}
+          <button type="button" class="preset" data-add-preset="__blank"><ha-icon icon="mdi:plus"></ha-icon><span>Vuota</span></button>
+        </div>
+      </div>
+      <div class="section">
+        <strong>COMPOSIZIONE AUTOMATICA</strong>
+        <span class="hint">Analizza le ${Object.keys(this._hass.states).length} entità di Home Assistant e costruisce le sezioni con le entità più rilevanti già collegate.</span>
+        <button class="secondary wide" data-autocompose="add"><ha-icon icon="mdi:auto-fix"></ha-icon> AGGIUNGI SEZIONI COMPOSTE</button>
+        <button class="secondary wide danger-outline" data-autocompose="replace"><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DA ZERO</button>
+      </div>
+    </aside>`;
+  }
+
+  _renderEditor() {
+    const card = this._selectedCard();
+    if (card) return this._renderCardEditor(card);
+    const section = this._selectedSection();
+    if (section) return this._renderSectionEditor(section);
+    return this._renderPageEditor();
+  }
+
+  // -------------------------------------------------------------- render ---
+
+  render() {
+    if (!this._hass || !this._dashboard) return;
+    this._signature = this._buildSignature();
+
+    // Preserve editor focus + caret across the innerHTML swap, otherwise
+    // typing in a text field is interrupted every time a state arrives.
+    const active = this.querySelector(":focus");
+    const focusKey = active && (active.getAttribute("data-prop") || active.getAttribute("data-sec-prop")
+      || active.getAttribute("data-page-prop") || (active.hasAttribute("data-entity-search") ? "__search" : null));
+    const caret = active && active.selectionStart;
+
+    const p = this._page();
+    const sections = this._sections();
+    const theme = this._dashboard.theme || {};
+    const total = sections.reduce((n, s) => n + s.items.length, 0);
+
+    const body = sections.length
+      ? sections.map((s, i) => this._renderSection(s, i, sections.length)).join("")
+      : `<div class="bootstrap">
+           <ha-icon icon="mdi:view-dashboard-outline"></ha-icon>
+           <h2>Dashboard vuota</h2>
+           <p>Costruisci la struttura in un click: Cyborg analizza le tue entità e crea le sezioni Sicurezza, Energia, Clima, Illuminazione, Presenza e Sistema già popolate.</p>
+           <button data-autocompose="replace"><ha-icon icon="mdi:auto-fix"></ha-icon> COMPONI AUTOMATICAMENTE</button>
+         </div>`;
+
+    this.innerHTML = `<style>${this._css()}</style>
+      <div class="shell" style="--accent:${esc(theme.accent || "#00e5ff")}">
+        <header class="top">
+          <div class="brand">
+            <ha-icon class="brand-icon" icon="${esc(p.icon || "mdi:hexagon-multiple-outline")}"></ha-icon>
+            <div>
+              <h1>${esc(p.title || "Cyborg")}</h1>
+              <div class="sub">${sections.length} SEZIONI · ${total} CARD · ${this._editing ? "MODIFICA ATTIVA" : "SISTEMA ONLINE"}</div>
+            </div>
+          </div>
+          <div class="tools">
+            ${this._saved ? '<span class="status ok"><ha-icon icon="mdi:check"></ha-icon> SALVATO</span>' : ""}
+            ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
+            ${this._editing ? `<button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>
+               <button data-save><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
+            <button class="secondary" data-toggle-edit>
+              <ha-icon icon="${this._editing ? "mdi:eye-outline" : "mdi:pencil-outline"}"></ha-icon>
+              ${this._editing ? "ESCI" : "MODIFICA"}
+            </button>
+          </div>
+        </header>
+        <div class="workspace ${this._editing ? "editing" : ""}">
+          <main>${body}</main>
+          ${this._editing ? this._renderEditor() : ""}
+        </div>
+      </div>`;
+
+    this._bind();
+    if (focusKey) {
+      const sel = focusKey === "__search" ? "[data-entity-search]"
+        : `[data-prop="${focusKey}"],[data-sec-prop="${focusKey}"],[data-page-prop="${focusKey}"]`;
+      const el = this.querySelector(sel);
+      if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch (e) { /* non-text input */ } }
+    }
+  }
+
+  // ---------------------------------------------------------------- bind ---
+
+  _bind() {
+    const q = (s) => this.querySelector(s);
+    const all = (s) => Array.from(this.querySelectorAll(s));
+    const card = this._selectedCard();
+    const section = this._selectedSection();
+
+    const btn = q("[data-toggle-edit]");
+    if (btn) btn.onclick = () => { this._editing = !this._editing; this._selected = null; this._touch(); };
+    const save = q("[data-save]");
+    if (save) save.onclick = () => this._save();
+    const addSec = q("[data-add-section]");
+    if (addSec) addSec.onclick = () => this._addSection(null);
+
+    all("[data-autocompose]").forEach((el) => {
+      el.onclick = () => this._autoCompose(el.getAttribute("data-autocompose") === "replace");
+    });
+    all("[data-add-preset]").forEach((el) => {
+      el.onclick = () => {
+        const key = el.getAttribute("data-add-preset");
+        this._addSection(key === "__blank" ? null : SECTION_PRESETS.find((p) => p.id === key));
+      };
+    });
+
+    // --- section controls
+    all("[data-sec-move]").forEach((el) => {
+      el.onclick = () => this._moveSection(el.getAttribute("data-sec"), parseInt(el.getAttribute("data-sec-move"), 10));
+    });
+    all("[data-sec-remove]").forEach((el) => {
+      el.onclick = () => this._removeSection(el.getAttribute("data-sec"));
+    });
+    all("[data-sec-config]").forEach((el) => {
+      el.onclick = () => { this._selected = { kind: "section", sectionId: el.getAttribute("data-sec") }; this._touch(); };
+    });
+    all("[data-sec-addcard]").forEach((el) => {
+      el.onclick = () => this._addCard(el.getAttribute("data-sec"));
+    });
+    all("[data-sec-collapse]").forEach((el) => {
+      el.onclick = () => {
+        const s = this._section(el.getAttribute("data-sec"));
+        if (s) { s.collapsed = !s.collapsed; this._touch(); }
+      };
+    });
+
+    // --- card controls
+    all("[data-select-card]").forEach((el) => {
+      el.onclick = () => {
+        this._selected = { kind: "card", sectionId: el.getAttribute("data-sec"), itemId: el.getAttribute("data-item") };
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+    all("[data-card-remove]").forEach((el) => {
+      el.onclick = () => this._removeCard(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+    });
+    all("[data-card-move]").forEach((el) => {
+      el.onclick = () => this._moveCard(el.getAttribute("data-sec"), el.getAttribute("data-item"), parseInt(el.getAttribute("data-card-move"), 10));
+    });
+    all("[data-tap]").forEach((el) => {
+      el.onclick = () => this._tap(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+    });
+
+    const close = q("[data-close-editor]");
+    if (close) close.onclick = () => { this._selected = null; this._touch(); };
+
+    // --- page + theme
+    all("[data-page-prop]").forEach((el) => {
+      el.onchange = () => this._set(this._page(), el.getAttribute("data-page-prop"), el.value);
+    });
+    all("[data-theme-prop]").forEach((el) => {
+      el.onchange = () => this._set(this._dashboard.theme, el.getAttribute("data-theme-prop"), el.value);
+    });
+
+    // --- section props
+    if (section) {
+      all("[data-sec-prop]").forEach((el) => {
+        el.onchange = () => this._set(section, el.getAttribute("data-sec-prop"), el.value);
+      });
+    }
+
+    // --- card props
+    if (card) {
+      all("[data-prop]").forEach((el) => {
+        el.onchange = () => {
+          const path = el.getAttribute("data-prop");
+          this._set(card, path, el.type === "checkbox" ? el.checked : el.value);
+        };
+      });
+      all("[data-state-prop]").forEach((el) => {
+        el.onchange = () => {
+          const path = el.getAttribute("data-state-prop");
+          this._set(card.states, path, el.type === "checkbox" ? el.checked : el.value);
+        };
+      });
+      const move = q("[data-move-section]");
+      if (move) move.onchange = () => this._reassignCard(this._selected.sectionId, card.id, move.value);
+
+      const search = q("[data-entity-search]");
+      if (search) {
+        search.oninput = () => {
+          this._entityQuery = search.value;
+          const box = q("[data-entity-results]");
+          if (box) { box.innerHTML = this._entityResults(); this._bindEntityRows(); }
+        };
+      }
+      this._bindEntityRows();
+    }
+
+    // --- live icon preview (no full re-render: keeps the field focused)
+    all("[data-icon-live]").forEach((el) => {
+      el.oninput = () => {
+        const preview = el.parentElement.querySelector("[data-icon-preview]");
+        if (preview) preview.setAttribute("icon", el.value);
+      };
+    });
+    all("[data-icon-pick]").forEach((el) => {
+      el.onclick = () => {
+        const wrap = el.closest("label") || el.parentElement.parentElement;
+        const input = wrap && wrap.querySelector("[data-icon-live]");
+        if (!input) return;
+        input.value = el.getAttribute("data-icon-pick");
+        input.dispatchEvent(new Event("input"));
+        input.dispatchEvent(new Event("change"));
+      };
+    });
+  }
+
+  _bindEntityRows() {
+    Array.from(this.querySelectorAll("[data-pick-entity]")).forEach((row) => {
+      row.onclick = () => {
+        const c = this._selectedCard();
+        if (!c) return;
+        const id = row.getAttribute("data-pick-entity");
+        c.entity_id = id;
+        const st = this._hass.states[id];
+        if (!c.appearance.icon) c.appearance.icon = autoIcon(id, st);
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+  }
+
+  _tap(sectionId, itemId) {
+    const card = this._card(sectionId, itemId);
+    if (!card || !card.entity_id) return;
+    const action = (card.actions && card.actions.tap && card.actions.tap.action) || "more-info";
+    if (action === "none") return;
+    if (action === "more-info") {
+      this.dispatchEvent(new CustomEvent("hass-more-info", {
+        detail: { entityId: card.entity_id }, bubbles: true, composed: true,
+      }));
+      return;
+    }
+    const domain = domainOf(card.entity_id);
+    const serviceDomain = ["switch", "light", "fan", "input_boolean", "siren", "automation", "script", "climate", "cover", "lock", "media_player"].includes(domain)
+      ? domain : "homeassistant";
+    this._hass.callService(serviceDomain, action, { entity_id: card.entity_id });
+  }
+
+  // ----------------------------------------------------------------- css ---
+
+  _css() {
+    const theme = this._dashboard.theme || {};
+    return `
+:host{display:block;min-height:100vh;background:${theme.background || "var(--primary-background-color)"};color:var(--primary-text-color);font-family:var(--paper-font-body1_-_font-family,Inter,Roboto,system-ui,sans-serif)}
+.shell{max-width:1780px;margin:0 auto;padding:22px 22px 60px;box-sizing:border-box}
+*,*::before,*::after{box-sizing:border-box}
+.top{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:26px;padding-bottom:18px;border-bottom:1px solid color-mix(in srgb,var(--accent) 22%,transparent)}
+.brand{display:flex;align-items:center;gap:14px}
+.brand-icon{--mdc-icon-size:32px;color:var(--accent);filter:drop-shadow(0 0 12px color-mix(in srgb,var(--accent) 60%,transparent))}
+h1{margin:0;font-size:clamp(22px,3vw,32px);letter-spacing:-.03em;font-weight:750}
+.sub{margin-top:4px;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:2px;opacity:.5}
+.tools{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+button{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:11px;padding:10px 15px;background:var(--accent);color:#03131a;cursor:pointer;font:inherit;font-size:12px;font-weight:700;letter-spacing:.08em;transition:filter .18s,transform .18s}
+button:hover{filter:brightness(1.12)}
+button:active{transform:translateY(1px)}
+button ha-icon{--mdc-icon-size:17px}
+button.secondary{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--primary-text-color);border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
+button.icon{background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);padding:7px}
+button:disabled{opacity:.28;cursor:default}
+.status{display:inline-flex;align-items:center;gap:5px;font:11px ui-monospace,monospace;letter-spacing:1.5px;padding:7px 11px;border-radius:9px}
+.status.ok{color:#06d6a0;background:rgba(6,214,160,.12)}
+.status.err{color:#ff8091;background:rgba(255,61,113,.12)}
+.status ha-icon{--mdc-icon-size:15px}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;align-items:start}
+.workspace.editing{grid-template-columns:minmax(0,1fr) 380px}
+main{display:flex;flex-direction:column;gap:30px;min-width:0}
+
+.dash-section{--accent:#00e5ff}
+.sec-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.sec-toggle{background:transparent;border:0;padding:2px;color:var(--accent);cursor:pointer}
+.sec-toggle ha-icon{--mdc-icon-size:20px}
+.sec-icon{--mdc-icon-size:20px;color:var(--accent);filter:drop-shadow(0 0 8px color-mix(in srgb,var(--accent) 55%,transparent))}
+.sec-head h3{margin:0;font-size:13px;font-weight:750;letter-spacing:.22em;text-transform:uppercase;color:var(--accent)}
+.sec-count{font:10px ui-monospace,monospace;padding:2px 8px;border-radius:99px;background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+.sec-rule{flex:1;height:1px;background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 40%,transparent),transparent)}
+.sec-tools{display:flex;gap:6px;flex-wrap:wrap}
+.sec-selected .sec-head h3::after{content:" ◂ IN MODIFICA";font-size:9px;opacity:.6;letter-spacing:.1em}
+button.mini{padding:6px 9px;font-size:10px;letter-spacing:.06em;border-radius:8px;background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--primary-text-color);border:1px solid color-mix(in srgb,var(--accent) 26%,transparent)}
+button.mini ha-icon{--mdc-icon-size:14px}
+button.mini.accentbtn{background:var(--accent);color:#03131a;border-color:transparent}
+button.mini.danger{color:#ff8091;border-color:rgba(255,61,113,.4);background:rgba(255,61,113,.1)}
+button.mini.grow{flex:1;justify-content:center}
+
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:${theme.gap || 16}px}
+.item{--accent:#00e5ff;position:relative;display:flex;flex-direction:column;min-height:118px;padding:16px 17px;border-radius:${theme.radius || 16}px;background:linear-gradient(158deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);overflow:hidden;transition:transform .18s,border-color .18s}
+.item::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);opacity:.85}
+.item[data-tap]{cursor:pointer}
+.item[data-tap]:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.item.missing{border-style:dashed;opacity:.7}
+.item.pulse{animation:cyPulse 1.9s ease-in-out infinite}
+@keyframes cyPulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.28)}}
+.head{display:flex;align-items:flex-start;gap:11px}
+.card-icon{--mdc-icon-size:22px;color:var(--accent);flex-shrink:0;margin-top:1px}
+.head-text{min-width:0}
+.head-text strong{display:block;font-size:13px;font-weight:650;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.head-text small{display:block;margin-top:2px;font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.45;text-transform:uppercase}
+.value{margin-top:auto;padding-top:14px;font-size:30px;font-weight:750;line-height:1;color:var(--accent);letter-spacing:-.03em}
+.entity-value{font-size:20px;text-transform:capitalize}
+.unit-inline{font-size:14px;font-weight:500;opacity:.55;margin-left:5px}
+.control-row{margin-top:auto;padding-top:16px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.control-state{font:10px ui-monospace,monospace;letter-spacing:2px;opacity:.6}
+.switch{width:46px;height:26px;border-radius:13px;background:rgba(255,255,255,.14);position:relative;flex-shrink:0;transition:background .22s}
+.switch .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .22s;box-shadow:0 1px 3px rgba(0,0,0,.45)}
+.switch.on{background:var(--accent)}
+.switch.on .knob{left:23px}
+.status-badge{margin-top:auto;padding-top:16px;display:flex;align-items:center;gap:7px}
+.status-badge ha-icon{--mdc-icon-size:17px;color:#06d6a0}
+.status-badge span{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#06d6a0}
+.status-badge.alert ha-icon,.status-badge.alert span{color:var(--accent)}
+.climate-body{margin-top:auto;padding-top:12px}
+.climate-body .value{margin-top:0;padding-top:0}
+.climate-meta{display:flex;gap:14px;margin-top:8px;font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.55}
+.climate-meta ha-icon{--mdc-icon-size:13px;vertical-align:-2px}
+.gauge{margin-top:auto;padding-top:14px}
+.gauge-track{height:6px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden}
+.gauge-fill{height:100%;background:var(--accent);border-radius:99px;transition:width .5s ease}
+.gauge-value{margin-top:10px;padding-top:0;font-size:24px}
+.chart-body{margin-top:auto;padding-top:10px}
+.chart-body .value{margin-top:0;padding-top:0;font-size:24px}
+.spark{width:100%;height:52px;margin-top:6px;display:block;overflow:visible}
+.spark-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.spark-area{fill:color-mix(in srgb,var(--accent) 16%,transparent);stroke:none}
+.chart-empty{margin-top:12px;font:9px ui-monospace,monospace;letter-spacing:1.5px;opacity:.35}
+.card-tools{display:flex;gap:5px;margin-top:12px;padding-top:11px;border-top:1px solid color-mix(in srgb,var(--accent) 18%,transparent)}
+.editor-item{outline:1px dashed color-mix(in srgb,var(--accent) 40%,transparent);outline-offset:-1px}
+.editor-item.selected{outline:2px solid var(--accent)}
+.section-empty{width:100%;justify-content:center;padding:24px;border-radius:14px;border:1px dashed color-mix(in srgb,var(--accent) 34%,transparent);background:color-mix(in srgb,var(--accent) 5%,transparent);color:var(--primary-text-color);font-size:12px;letter-spacing:.04em}
+.bootstrap{text-align:center;padding:70px 24px;border:1px dashed color-mix(in srgb,var(--accent) 34%,transparent);border-radius:20px;background:color-mix(in srgb,var(--accent) 4%,transparent)}
+.bootstrap ha-icon{--mdc-icon-size:46px;color:var(--accent);opacity:.75}
+.bootstrap h2{margin:14px 0 8px;font-size:20px}
+.bootstrap p{margin:0 auto 22px;max-width:520px;opacity:.6;font-size:13px;line-height:1.6}
+
+.editor{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto;padding:18px;border-radius:18px;background:linear-gradient(168deg,color-mix(in srgb,var(--accent) 6%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);box-shadow:0 18px 50px rgba(0,0,0,.35)}
+.editor-title{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px}
+.editor-title small,.editor .section>strong{display:block;font:10px ui-monospace,monospace;letter-spacing:.22em;color:var(--accent)}
+.editor-title h2{margin:6px 0 0;font-size:17px;line-height:1.3}
+.editor .section{border-top:1px solid color-mix(in srgb,var(--accent) 16%,transparent);margin-top:16px;padding-top:15px}
+.editor label{display:block;margin:12px 0 0;font:10px ui-monospace,monospace;letter-spacing:.14em;opacity:.65;text-transform:uppercase}
+.editor input,.editor select{display:block;width:100%;margin-top:6px;padding:10px;border-radius:9px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000);color:var(--primary-text-color);font:inherit;font-size:13px}
+.editor input:focus,.editor select:focus{outline:0;border-color:var(--accent)}
+.editor input[type=color]{padding:2px;height:38px;cursor:pointer}
+.editor label.check{display:flex;align-items:center;gap:9px;text-transform:none;letter-spacing:0;font-size:12px;font-family:inherit;opacity:.85}
+.editor label.check input{width:auto;margin:0}
+.hint{display:block;margin-top:7px;font-size:11px;line-height:1.5;opacity:.45}
+.warn{margin-top:8px;padding:9px 11px;border-radius:9px;font-size:11.5px;background:rgba(255,209,102,.12);color:#ffd166;border:1px solid rgba(255,209,102,.3)}
+button.wide{width:100%;justify-content:center;margin-top:10px}
+button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4);color:#ff8091}
+.delete{width:100%;justify-content:center;margin-top:20px;background:rgba(255,61,113,.14);color:#ff8091;border:1px solid rgba(255,61,113,.32)}
+.entity-current{display:flex;align-items:center;gap:10px;margin-top:8px;padding:10px;border-radius:10px;background:color-mix(in srgb,var(--accent) 8%,transparent);border:1px solid color-mix(in srgb,var(--accent) 24%,transparent)}
+.entity-current ha-icon{--mdc-icon-size:20px;color:var(--accent);flex-shrink:0}
+.entity-current strong{display:block;font-size:12.5px}
+.entity-current small{display:block;opacity:.45;font:10px ui-monospace,monospace}
+.err-state{margin-left:auto;font:10px ui-monospace,monospace;padding:3px 7px;border-radius:6px;background:rgba(255,255,255,.07);opacity:.7;flex-shrink:0}
+.entity-results{margin-top:8px;max-height:300px;overflow-y:auto;border-radius:10px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000)}
+.entity-result-row{display:flex;align-items:center;gap:10px;padding:9px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.05)}
+.entity-result-row:last-child{border-bottom:0}
+.entity-result-row:hover{background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.entity-result-row ha-icon{--mdc-icon-size:18px;color:var(--accent);flex-shrink:0}
+.err-text{min-width:0;flex:1}
+.err-text strong{display:block;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.err-text small{display:block;opacity:.45;font:10px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.entity-result-empty{padding:12px;font-size:11.5px;opacity:.45;line-height:1.5}
+.icon-editor-row{display:flex;gap:9px;align-items:center;margin-top:6px}
+.icon-editor-row ha-icon{--mdc-icon-size:20px;flex-shrink:0;width:38px;height:38px;padding:9px;border-radius:9px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);color:var(--accent)}
+.icon-editor-row input{margin-top:0}
+.icon-palette{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.icon-swatch{padding:7px;border-radius:8px;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.55}
+.icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
+.icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
+.preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+.preset{--accent:#00e5ff;flex-direction:column;gap:5px;padding:12px 8px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);color:var(--primary-text-color);font-size:10px;letter-spacing:.06em}
+.preset ha-icon{--mdc-icon-size:20px;color:var(--accent)}
+
+@media(max-width:1200px){.workspace.editing{grid-template-columns:minmax(0,1fr)}.editor{position:relative;top:0;max-height:none}}
+@media(max-width:820px){.shell{padding:14px 14px 40px}.grid{grid-template-columns:repeat(6,minmax(0,1fr))}.item{grid-column:span 6!important}.top{align-items:flex-start}}
+`;
+  }
+}
+
+if (!customElements.get("cyborg-dashboard")) {
+  customElements.define("cyborg-dashboard", CyborgDashboard);
+}

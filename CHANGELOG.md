@@ -4,6 +4,52 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.5.0] - 2026-08-22
+
+Riscrittura dell'architettura della dashboard: le sezioni diventano oggetti di
+primo livello. È la versione che rende Cyborg una dashboard domotica vera e
+non un elenco piatto di card scollegate.
+
+### Novità
+- **Sezioni di primo livello (schema v3).** Prima una card portava una stringa
+  `section` libera e il raggruppamento veniva ricostruito a ogni render: due
+  refusi ("Energia"/"energia") producevano due blocchi distinti e una sezione
+  non poteva esistere senza card dentro. Ora la pagina possiede
+  `sections[]`, ogni sezione ha id stabile, titolo, icona, colore accento e
+  stato compresso/espanso, e possiede il proprio elenco ordinato di card.
+- **Migrazione automatica v2 -> v3.** Le dashboard esistenti vengono convertite
+  al caricamento raggruppando le card per il vecchio campo `section` (merge
+  case-insensitive, vince la prima grafia vista). Nessuna riconfigurazione
+  manuale, nessuna card persa.
+- **Composizione automatica.** Un pulsante analizza il registro entità di Home
+  Assistant e costruisce Sicurezza / Energia / Clima / Illuminazione /
+  Presenza / Sistema già popolate. Ogni entità viene assegnata a una sola
+  sezione (assegnazione per punteggio, vince il match più alto) e le entità
+  `unavailable`/`unknown` sono escluse.
+- **Gestione completa delle sezioni dall'editor:** crea da preset o vuota,
+  rinomina, cambia icona e colore, riordina su/giù, comprimi, elimina.
+- **Le card si spostano tra sezioni** da una tendina nell'editor della card.
+- **Nuovi tipi di card:** `climate` (temperatura attuale + target + modalità),
+  `gauge` (barra percentuale) e `chart` (sparkline reale delle ultime 24h via
+  il comando core `history/history_during_period` — nessuna dipendenza
+  esterna).
+- **Dimensione al posto delle coordinate.** Le card dichiarano solo
+  Piccola/Media/Grande/Piena e fluiscono nell'ordine dell'elenco; si riordinano
+  con le frecce. Le vecchie coordinate x/y/w/h obbligavano a ragionare in
+  matematica di griglia e producevano card sovrapposte o invisibili.
+
+### Prestazioni e affidabilità
+- **Re-render mirato.** `set hass` ora confronta una firma calcolata solo sulle
+  entità effettivamente presenti in dashboard. Con 380 entità il pannello non
+  ricostruisce più il DOM a ogni aggiornamento di un sensore che non stai
+  nemmeno mostrando.
+- **Il focus non si perde più mentre scrivi** nell'editor: posizione del cursore
+  e campo attivo vengono ripristinati dopo il repaint.
+- **Suite di test.** `tests/schema.test.py` (migrazione, idempotenza, input
+  malformati) e `tests/frontend.test.js` (72 asserzioni: composizione
+  automatica, rendering di ogni tipo di card, escaping XSS, mutazioni,
+  firma anti-rerender, bilanciamento dei tag, ricerca, tap action, sparkline).
+
 ## [0.4.2] - 2026-08-22
 
 Fix del fix precedente (0.4.1), individuato subito dopo il deploy leggendo
