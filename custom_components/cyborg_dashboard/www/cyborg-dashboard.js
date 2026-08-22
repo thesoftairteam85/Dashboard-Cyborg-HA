@@ -2,6 +2,14 @@ const DEFAULT_DASHBOARD={version:5,pages:[{id:"home",title:"NEXUS",icon:"mdi:hex
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 const DEFAULT_STATES=["default","on","off","home","not_home","open","closed","playing","paused","locked","unlocked","unavailable"];
+const coerceNumber=v=>{if(typeof v==="boolean")return null;const n=Number(v);return Number.isFinite(n)?n:null};
+const evaluateRule=(rule,state,attrs)=>{const raw=rule.source==="attribute"?attrs?.[rule.attribute]:state;const op=rule.operator;
+ if(op==="eq"||op==="neq"){const m=String(raw)===String(rule.value);return op==="eq"?m:!m}
+ const cur=coerceNumber(raw);if(cur===null)return false;const target=coerceNumber(rule.value);
+ if(op==="gt")return cur>target;if(op==="gte")return cur>=target;if(op==="lt")return cur<target;if(op==="lte")return cur<=target;
+ if(op==="between"){const t2=coerceNumber(rule.value2);const[lo,hi]=[target,t2].sort((a,b)=>a-b);return cur>=lo&&cur<=hi}
+ return false};
+const resolveRuleStyle=(rules,state,attrs)=>{for(const r of rules||[])if(evaluateRule(r,state,attrs))return r.style||{};return null};
 class CyborgDashboard extends HTMLElement{
  set hass(v){this._hass=v;if(!this._loaded)this._load();else if(!this._editing)this.render()}
  connectedCallback(){this._load()}
