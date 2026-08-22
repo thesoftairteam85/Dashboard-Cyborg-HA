@@ -25,6 +25,6 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         sidebar_title="Cyborg Dashboard",
         sidebar_icon="mdi:view-dashboard-edit",
         module_url=f"{STATIC_PATH}/cyborg-dashboard.js",
-        config={"version": "0.1.6"},
+        config={"version": "0.3.1"},
         require_admin=False,
     )
