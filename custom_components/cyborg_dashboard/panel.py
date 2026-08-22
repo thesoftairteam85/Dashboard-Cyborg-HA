@@ -6,10 +6,28 @@ from pathlib import Path
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant, callback
+import json
 
 PANEL_PATH = "cyborg-dashboard"
 WEB_COMPONENT = "cyborg-dashboard"
 STATIC_PATH = "/cyborg_dashboard/static"
+
+def _integration_version() -> str:
+    """Read the version from manifest.json for cache-busting the JS module URL.
+
+    panel_custom loads cyborg-dashboard.js as an ES module via dynamic import().
+    Browsers/Chromium keep an ES module already imported in a tab in memory for
+    the lifetime of that document, regardless of server-side cache headers or
+    HACS having already written the new file to disk. Appending ?v=<version> to
+    the module URL means a version bump produces a new URL, which forces the
+    browser to fetch (and the JS engine to re-evaluate) the updated module on
+    the next panel load, without depending on the user doing a hard refresh.
+    """
+    manifest_path = Path(__file__).parent / "manifest.json"
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))["version"]
+    except (OSError, KeyError, ValueError):
+        return "0"
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
@@ -36,8 +54,8 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         webcomponent_name=WEB_COMPONENT,
         sidebar_title="Cyborg Dashboard",
         sidebar_icon="mdi:view-dashboard-edit",
-        module_url=f"{STATIC_PATH}/cyborg-dashboard.js",
-        config={"version": "0.4.0"},
+        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={_integration_version()}",
+        config={"version": _integration_version()},
         require_admin=False,
     )
 
