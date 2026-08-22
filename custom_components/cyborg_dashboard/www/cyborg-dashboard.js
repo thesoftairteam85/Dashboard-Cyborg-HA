@@ -335,6 +335,34 @@ const ACTIVE_DOMAINS = {
   humidifier: (st) => st.state === "on",
 };
 
+/* ==========================================================================
+ * MONITORAGGIO — diagnostica d'impianto
+ *
+ * Thresholds are not decoration: EN 50160 fixes the supply voltage at 230 V
+ * +/-10% (207-253 V) and the frequency at 50 Hz +/-1%, so a reading can be
+ * called out as out of tolerance against a standard instead of a guess. The
+ * grid gauge is measured against the contractual limit because that is what
+ * actually trips the meter.
+ * ======================================================================== */
+
+const MONITOR_GROUPS = [
+  { key: "voltage",      label: "Tensioni",   icon: "mdi:sine-wave",        unit: "V",
+    warn: (v) => v < 207 || v > 253, hint: "EN 50160: 230 V ±10%" },
+  { key: "current",      label: "Correnti",   icon: "mdi:current-ac",       unit: "A",
+    warn: () => false },
+  { key: "temperature",  label: "Temperature", icon: "mdi:thermometer",     unit: "°C",
+    warn: (v) => v > 70, alarm: (v) => v > 85, hint: "soglia 70 °C" },
+  { key: "frequency",    label: "Frequenza",  icon: "mdi:sine-wave",        unit: "Hz",
+    warn: (v) => v < 49.5 || v > 50.5, hint: "EN 50160: 50 Hz ±1%" },
+  { key: "power_factor", label: "Fattore di potenza", icon: "mdi:angle-acute", unit: "",
+    warn: (v) => Math.abs(v) < 0.9, hint: "sotto 0,90 è penalizzabile" },
+  { key: "battery",      label: "Batterie",   icon: "mdi:battery",          unit: "%",
+    warn: (v) => v < 20, alarm: (v) => v < 10 },
+];
+
+/** Contractual draw limits commonly found on Italian domestic meters. */
+const GRID_LIMIT_PRESETS = [3000, 3300, 4500, 6000, 10000, 15000];
+
 const SIZE_SPAN = { sm: 3, md: 4, lg: 6, xl: 12 };
 const SIZE_LABEL = { sm: "Piccola", md: "Media", lg: "Grande", xl: "Piena larghezza" };
 
@@ -353,8 +381,34 @@ const FLOW_SLOTS = [
   { key: "solar",   label: "Solare",   icon: "mdi:solar-power-variant", color: "#ffd166" },
   { key: "grid",    label: "Rete",     icon: "mdi:transmission-tower",  color: "#8ecae6" },
   { key: "battery", label: "Batteria", icon: "mdi:home-battery",        color: "#06d6a0" },
-  { key: "home",    label: "Casa",     icon: "mdi:home-lightning-bolt", color: "#00e5ff" },
+  { key: "home",    label: "Casa",     icon: "mdi:home",                color: "#00e5ff" },
 ];
+
+/**
+ * Every power reading normalised to watts.
+ *
+ * Sensors in one house mix units freely: an inverter reports kW while a smart
+ * plug reports W. Reading the raw state and treating it all as watts made a
+ * 0.2 kW house look like 0.2 W and turned load shares into 136556%. The unit
+ * is part of the value, never an afterthought.
+ */
+const POWER_UNIT_FACTOR = {
+  W: 1, w: 1, watt: 1, watts: 1,
+  kW: 1000, kw: 1000, KW: 1000, Kw: 1000,
+  MW: 1e6, mW: 0.001,
+  VA: 1, kVA: 1000, kva: 1000,
+  var: 1, VAr: 1, kvar: 1000, kVAr: 1000,
+};
+
+function powerWatts(st) {
+  if (!st) return null;
+  const n = parseFloat(st.state);
+  if (!Number.isFinite(n)) return null;
+  const unit = String(st.attributes.unit_of_measurement || "W").trim();
+  const factor = Object.prototype.hasOwnProperty.call(POWER_UNIT_FACTOR, unit)
+    ? POWER_UNIT_FACTOR[unit] : 1;
+  return n * factor;
+}
 
 /** Format watts for display, switching to kW once the number gets long. */
 function fmtPower(w) {
@@ -377,16 +431,47 @@ const CARD_TYPES = [
   ["active", "Attivi ora — cosa è acceso"],
   ["notifications", "Notifiche — avvisi e aggiornamenti"],
   ["people", "Presenze — chi è in casa"],
+  ["monitor", "Monitoraggio — diagnostica d'impianto"],
+  ["camera", "Videocamere — anteprime e live"],
 ];
 
+/* ==========================================================================
+ * CAMERAS
+ *
+ * Verified against core 2026.8.3 (components/camera/__init__.py):
+ *   /api/camera_proxy/{entity_id}?token=…         single frame
+ *   /api/camera_proxy_stream/{entity_id}?token=…  MJPEG, plays inside <img>
+ * The token lives in the camera's own state attributes and is rotated by HA,
+ * so it is read at render time and never cached.
+ *
+ * Thumbnails are still frames and only the camera you open becomes a live
+ * stream: eight simultaneous MJPEG connections would saturate a wall tablet
+ * and the upstream cameras for a wall of images nobody is looking at.
+ * ======================================================================== */
+
+function cameraStill(entityId, st) {
+  if (!st) return null;
+  if (st.attributes.entity_picture) return st.attributes.entity_picture;
+  const token = st.attributes.access_token;
+  return token ? `/api/camera_proxy/${entityId}?token=${token}` : null;
+}
+
+function cameraStream(entityId, st) {
+  if (!st) return null;
+  const token = st.attributes.access_token;
+  return token ? `/api/camera_proxy_stream/${entityId}?token=${token}` : null;
+}
+
 /** Card types that stand on their own instead of displaying one entity. */
-const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people"]);
+const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people", "monitor", "camera"]);
 
 const COMPOSITE_META = {
   energyflow:    ["Flusso energetico", "Potenza in tempo reale", "mdi:transit-connection-variant", "lg"],
   active:        ["Attivi ora", "Dispositivi accesi", "mdi:flash-alert-outline", "md"],
   notifications: ["Notifiche", "Avvisi di sistema", "mdi:bell-outline", "md"],
   people:        ["Presenze", "Chi è in casa", "mdi:account-group", "sm"],
+  monitor:       ["Monitoraggio", "Diagnostica impianto", "mdi:gauge-full", "lg"],
+  camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
 };
 
 const BINARY_WORDS = {
@@ -439,6 +524,14 @@ function esc(v) {
     .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function domainOf(entityId) { return String(entityId || "").split(".")[0]; }
+
+const WIND_ROSE = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                   "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"];
+function windRose(deg) {
+  const n = parseFloat(deg);
+  if (!Number.isFinite(n)) return String(deg);
+  return WIND_ROSE[Math.round(((n % 360) + 360) % 360 / 22.5) % 16] + " · " + Math.round(n) + "°";
+}
 function uid(prefix) { return prefix + "-" + Math.random().toString(36).slice(2, 9); }
 
 function autoIcon(entityId, st) {
@@ -506,7 +599,22 @@ class CyborgDashboard extends HTMLElement {
 
   connectedCallback() { if (this._hass && !this._dashboard) this._load(); }
 
-  disconnectedCallback() { this._unsubscribeAll(); }
+  /** Nearest scrollable ancestor: inside HA the panel itself is not what scrolls. */
+  _scrollParent() {
+    if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return null;
+    let node = this.parentElement;
+    while (node) {
+      const oy = getComputedStyle(node).overflowY;
+      if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) return node;
+      node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  disconnectedCallback() {
+    this._unsubscribeAll();
+    if (this._camTimer) { clearInterval(this._camTimer); this._camTimer = null; }
+  }
 
   // ---------------------------------------------------------------- data ---
 
@@ -730,6 +838,21 @@ class CyborgDashboard extends HTMLElement {
           actions: { tap: { action: domainOf(c.entityId) === "sensor" ? "more-info" : "toggle" } },
         })),
       });
+    }
+
+    // A wall of one-camera status tiles is useless; a single camera card with
+    // thumbnails is what a security section actually wants.
+    const sicurezza = built.find((sec) => sec.title === "Sicurezza");
+    if (sicurezza) {
+      const cams = sicurezza.items.filter((i) => domainOf(i.entity_id) === "camera").map((i) => i.entity_id);
+      if (cams.length) {
+        sicurezza.items = sicurezza.items.filter((i) => domainOf(i.entity_id) !== "camera");
+        sicurezza.items.unshift({
+          id: uid("card"), type: "camera", entity_id: "", name: "", size: "lg",
+          appearance: { icon: "mdi:cctv" }, states: {}, actions: {},
+          cameras: cams, refresh: 10,
+        });
+      }
     }
 
     // Lead the Energia section with a flow diagram and try to wire it up from
@@ -1263,11 +1386,9 @@ class CyborgDashboard extends HTMLElement {
    */
   _flowValues(flow) {
     const raw = (id, invert) => {
-      const st = id && this._hass.states[id];
-      if (!st) return null;
-      const n = parseFloat(st.state);
-      if (!Number.isFinite(n)) return null;
-      return invert ? -n : n;
+      const w = powerWatts(id && this._hass.states[id]);
+      if (w === null) return null;
+      return invert ? -w : w;
     };
     const solar = Math.max(0, raw(flow.solar, flow.invert_solar) || 0);
     const grid = raw(flow.grid, flow.invert_grid);          // + import, - export
@@ -1284,20 +1405,41 @@ class CyborgDashboard extends HTMLElement {
       hasSolar: !!flow.solar, hasGrid: !!flow.grid, hasBattery: !!flow.battery };
   }
 
-  _flowNode(x, y, slot, value, sub, labelBelow) {
-    const f = fmtPower(value);
-    // labelBelow is used for the house: its title would otherwise sit exactly
-    // where the grid and battery curves arrive at the node.
-    const labelY = labelBelow ? 50 : -46;
-    const subY = labelBelow ? 64 : 52;
-    return `<g class="ef-node" transform="translate(${x},${y})">
-        <circle r="34" class="ef-node-bg" style="--nc:${slot.color}"/>
-        <circle r="34" class="ef-node-ring" style="--nc:${slot.color}"/>
-        <text class="ef-node-label" y="${labelY}">${esc(slot.label.toUpperCase())}</text>
-        <text class="ef-node-val" y="2" style="--nc:${slot.color}">${esc(f.v)}</text>
-        <text class="ef-node-unit" y="17">${esc(f.u)}</text>
-        ${sub ? `<text class="ef-node-sub" y="${subY}">${esc(sub)}</text>` : ""}
-      </g>`;
+  /**
+   * Disc radius from power, in diagram units.
+   *
+   * Area — not radius — is proportional to the value, which is how a circle is
+   * read: doubling the power doubles the ink. A floor keeps a 5 W standby load
+   * from collapsing into an unreadable dot.
+   */
+  _flowRadius(watts, reference, min, max) {
+    const ref = Math.max(reference, 1);
+    const w = Math.max(0, watts || 0);
+    return Math.round(Math.min(max, min + (max - min) * Math.sqrt(w / ref)));
+  }
+
+  /**
+   * A node is HTML positioned over the SVG, not an SVG group.
+   *
+   * SVG cannot host <ha-icon>, and the whole point of this pass is real icons —
+   * a pylon for the grid, a house for the house — instead of a bare number in a
+   * ring. The SVG layer keeps only the paths and their particles.
+   */
+  _flowNodeHtml(x, y, slot, watts, sub, opts) {
+    const o = opts || {};
+    const f = fmtPower(watts);
+    const r = o.radius || 34;
+    const inside = !o.outside;
+    return `<div class="ef-n ${o.cls || ""}${inside ? " inside" : ""}" style="--nc:${slot.color};--r:${r * 2}px;left:${(x / 600) * 100}%;top:${(y / o.vb) * 100}%"
+        ${o.attrs || ""}>
+        <span class="ef-n-lab">${esc(slot.label)}</span>
+        <span class="ef-n-disc">
+          <ha-icon icon="${esc(slot.icon)}"></ha-icon>
+          ${inside ? `<span class="ef-n-in">${esc(f.v)}<i>${esc(f.u)}</i></span>` : ""}
+        </span>
+        ${inside ? "" : `<span class="ef-n-val">${esc(f.v)}<i>${esc(f.u)}</i></span>`}
+        ${sub ? `<span class="ef-n-sub">${esc(sub)}</span>` : ""}
+      </div>`;
   }
 
   /**
@@ -1309,6 +1451,7 @@ class CyborgDashboard extends HTMLElement {
     if (!watts || watts < 1) return `<path class="ef-path idle" d="${d}"/>`;
     const dur = Math.max(0.9, Math.min(4.5, 2600 / Math.max(watts, 60)));
     const n = watts > 2000 ? 4 : watts > 500 ? 3 : 2;
+    const w = Math.min(6, 1.6 + Math.sqrt(watts / 300));
     const dots = [];
     for (let i = 0; i < n; i++) {
       dots.push(`<circle r="4" class="ef-dot" style="--nc:${color}">
@@ -1317,7 +1460,7 @@ class CyborgDashboard extends HTMLElement {
           keyPoints="${reverse ? "1;0" : "0;1"}" keyTimes="0;1" calcMode="linear">
           <mpath href="#${id}"/></animateMotion></circle>`);
     }
-    return `<path id="${id}" class="ef-path active" style="--nc:${color}" d="${d}"/>${dots.join("")}`;
+    return `<path id="${id}" class="ef-path active" style="--nc:${color};stroke-width:${w.toFixed(1)}" d="${d}"/>${dots.join("")}`;
   }
 
   /**
@@ -1333,8 +1476,8 @@ class CyborgDashboard extends HTMLElement {
     for (const d of (flow.devices || [])) {
       const st = this._hass.states[d.entity];
       if (!st) continue;
-      const n = parseFloat(st.state);
-      if (!Number.isFinite(n) || n < 1) continue;
+      const n = powerWatts(st);
+      if (n === null || n < 1) continue;
       all.push({
         entity: d.entity,
         name: d.name || st.attributes.friendly_name || d.entity,
@@ -1369,55 +1512,56 @@ class CyborgDashboard extends HTMLElement {
     return loads;
   }
 
-  _flowSubtree(item, flow, homeWatts) {
-    const loads = this._flowLoads(flow, homeWatts);
+  _flowSubtree(item, flow, homeWatts, precomputed, homeR) {
+    const loads = precomputed || this._flowLoads(flow, homeWatts);
     if (!loads.length) {
-      return { extra: 120, svg: `<text class="ef-subhint" x="300" y="430">${
+      return { extra: 130, html: "", svg: `<text class="ef-subhint" x="300" y="440">${
         esc((flow.devices || []).length
           ? "Nessun carico sta assorbendo potenza in questo momento"
           : "Nessun carico monitorato — aggiungili nell'editor della card")}</text>` };
     }
     const n = loads.length;
-    const spacing = Math.min(118, 560 / n);
-    const y = 470;
-    const childY = 604;
+    const spacing = Math.min(120, 560 / n);
+    const y = 476;
+    const childY = 616;
     const hasChildren = loads.some((l) => l.children.length);
-    const parts = [];
+    const vb = 366 + (hasChildren ? 340 : 200);
 
-    const leaf = (l, x, yy, r, share, cls) => {
-      const f = fmtPower(l.watts);
-      const max = r >= 26 ? 13 : 11;
-      return `<g class="ef-leaf ${cls}" style="--nc:${l.other ? "#8d99ae" : "#00e5ff"}"
-          ${l.entity ? `data-fp-badge="${esc(l.entity)}"` : ""} transform="translate(${x},${yy})">
-          <circle r="${r}" class="ef-node-bg"/>
-          <circle r="${r}" class="ef-node-ring"/>
-          <text class="ef-leaf-val" y="-1">${esc(f.v)}</text>
-          <text class="ef-leaf-unit" y="11">${esc(f.u)}</text>
-          <text class="ef-leaf-name" y="${r + 18}">${esc(l.name.length > max ? l.name.slice(0, max - 1) + "\u2026" : l.name)}</text>
-          <text class="ef-leaf-share" y="${r + 31}">${esc(share >= 1 ? Math.round(share) + "%" : "<1%")}</text>
-        </g>`;
-    };
+    // sizes are comparable within a level, so the biggest load is visibly the
+    // biggest; percentages are gone because the geometry already says it
+    const refRoot = Math.max(...loads.map((l) => l.watts), 1);
+    const svg = [];
+    const html = [];
 
     loads.forEach((l, i) => {
       const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
       const color = l.other ? "#8d99ae" : "#00e5ff";
-      parts.push(this._flowPath("ef-l" + i, `M300,322 C300,392 ${x},396 ${x},${y - 26}`,
+      const r = this._flowRadius(l.watts, refRoot, 20, 38);
+      svg.push(this._flowPath("ef-l" + i,
+        `M300,${322 + (homeR || 0)} C300,${390 + (homeR || 0)} ${x},${y - 74} ${x},${y - r - 5}`,
         l.watts, color, false));
-      parts.push(leaf(l, x, y, 26, homeWatts > 0 ? (l.watts / homeWatts) * 100 : 0,
-        l.other ? "other" : ""));
+      html.push(this._flowNodeHtml(x, y,
+        { label: l.name, icon: l.icon, color },
+        l.watts, null,
+        { vb, radius: r, outside: true, cls: "leaf" + (l.other ? " other" : ""),
+          attrs: l.entity ? `data-fp-badge="${esc(l.entity)}"` : "" }));
 
-      // children hang under their parent, sharing the parent's column width
       const cn = l.children.length;
+      if (!cn) return;
+      const refChild = Math.max(...l.children.map((c) => c.watts), 1);
       l.children.forEach((c, j) => {
-        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(86, spacing));
-        parts.push(this._flowPath("ef-c" + i + "-" + j,
-          `M${x},${y + 26} C${x},${y + 74} ${cx},${childY - 74} ${cx},${childY - 20}`,
+        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(88, spacing));
+        svg.push(this._flowPath("ef-c" + i + "-" + j,
+          `M${x},${y + r + 4} C${x},${y + 84} ${cx},${childY - 84} ${cx},${childY - 32}`,
           c.watts, "#7de2ff", false));
-        parts.push(leaf(c, cx, childY, 20,
-          l.watts > 0 ? (c.watts / l.watts) * 100 : 0, "child"));
+        html.push(this._flowNodeHtml(cx, childY,
+          { label: c.name, icon: c.icon, color: "#7de2ff" },
+          c.watts, null,
+          { vb, radius: this._flowRadius(c.watts, refChild, 16, 28), outside: true, cls: "leaf child",
+            attrs: c.entity ? `data-fp-badge="${esc(c.entity)}"` : "" }));
       });
     });
-    return { extra: hasChildren ? 330 : 200, svg: parts.join("") };
+    return { extra: hasChildren ? 340 : 200, svg: svg.join(""), html: html.join("") };
   }
 
   _energyFlowBody(item) {
@@ -1434,35 +1578,60 @@ class CyborgDashboard extends HTMLElement {
     const S = FLOW_SLOTS.reduce((m, s) => (m[s.key] = s, m), {});
 
     // Layout: solar above, grid left, battery right, house below-centre.
-    const solarNode = v.hasSolar ? this._flowNode(300, 62, S.solar, v.solar) : "";
-    const gridNode = v.hasGrid ? this._flowNode(74, 176, S.grid,
-      Math.abs(v.grid || 0), v.gridOut > 0 ? "IMMISSIONE" : "PRELIEVO") : "";
-    const battNode = v.hasBattery ? this._flowNode(526, 176, S.battery,
-      Math.abs(v.batt || 0), v.battIn > 0 ? "IN CARICA" : "IN SCARICA") : "";
     const open = !!this._flowOpen[item.id];
-    const loadCount = this._flowLoads(flow, v.home).length;
-    const homeNode = `<g class="ef-home-hit" data-flow-toggle="${esc(item.id)}">
-        ${this._flowNode(300, 286, S.home, v.home, null, true)}
-        <g transform="translate(300,286)">
-          <circle r="34" class="ef-home-ring ${open ? "open" : ""}"/>
-          <text class="ef-home-hint" y="64">${esc(open ? "CHIUDI" : loadCount ? loadCount + " CARICHI" : "DETTAGLIO")}</text>
-        </g>
-      </g>`;
-    const sub = open ? this._flowSubtree(item, flow, v.home) : { extra: 0, svg: "" };
+    const loads = this._flowLoads(flow, v.home);
+    const sub = open ? this._flowSubtree(item, flow, v.home, loads,
+      this._flowRadius(v.home, Math.max(v.solar, Math.abs(v.grid || 0), Math.abs(v.batt || 0), v.home, 1), 30, 52) - 34)
+      : { extra: 0, svg: "", html: "" };
+    const vb = 366 + sub.extra;
 
+    // one reference for every main node, so their sizes are comparable
+    const ref = Math.max(v.solar, Math.abs(v.grid || 0), Math.abs(v.batt || 0), v.home, 1);
+    const R = (w) => this._flowRadius(w, ref, 30, 52);
+
+    const solarNode = v.hasSolar
+      ? this._flowNodeHtml(300, 62, S.solar, v.solar, null, { vb, radius: R(v.solar) }) : "";
+    const gridNode = v.hasGrid
+      ? this._flowNodeHtml(78, 182, S.grid, Math.abs(v.grid || 0),
+          v.gridOut > 0 ? "immissione" : "prelievo",
+          { vb, radius: R(Math.abs(v.grid || 0)), cls: v.gridOut > 0 ? "export" : "" }) : "";
+    const battNode = v.hasBattery
+      ? this._flowNodeHtml(522, 182, S.battery, Math.abs(v.batt || 0),
+          v.battIn > 0 ? "in carica" : "in scarica",
+          { vb, radius: R(Math.abs(v.batt || 0)) }) : "";
+    const homeNode = this._flowNodeHtml(300, 286, S.home, v.home,
+      open ? "chiudi" : loads.length ? loads.length + " carichi" : "dettaglio",
+      { vb, radius: R(v.home), cls: "home" + (open ? " open" : ""),
+        attrs: `data-flow-toggle="${esc(item.id)}" role="button" tabindex="0"` });
+
+    // Paths stop at the discs instead of running to their centres, so a
+    // connection never crosses the label or the reading of the node it joins.
+    const rSolar = R(v.solar), rGrid = R(Math.abs(v.grid || 0)),
+          rBatt = R(Math.abs(v.batt || 0)), rHome = R(v.home);
+    const link = (ax, ay, ra, bx, by, rb, bend) => {
+      const dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len, uy = dy / len;
+      const x1 = ax + ux * (ra + 5), y1 = ay + uy * (ra + 5);
+      const x2 = bx - ux * (rb + 5), y2 = by - uy * (rb + 5);
+      if (!bend) return `M${x1.toFixed(1)},${y1.toFixed(1)} L${x2.toFixed(1)},${y2.toFixed(1)}`;
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      return `M${x1.toFixed(1)},${y1.toFixed(1)} Q${(mx + (x2 - x1) * 0.12).toFixed(1)},${(my + 26).toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`;
+    };
     const paths = [
-      v.hasSolar ? this._flowPath("ef-s-h", "M300,102 L300,252", v.solar - v.gridOut, S.solar.color, false) : "",
-      v.hasGrid ? this._flowPath("ef-g-h", "M104,196 C160,250 200,272 262,282",
+      v.hasSolar ? this._flowPath("ef-s-h", link(300, 62, rSolar, 300, 286, rHome, false),
+        v.solar - v.gridOut, S.solar.color, false) : "",
+      v.hasGrid ? this._flowPath("ef-g-h", link(78, 182, rGrid, 300, 286, rHome, true),
         v.gridIn || v.gridOut, S.grid.color, v.gridOut > 0) : "",
-      v.hasBattery ? this._flowPath("ef-b-h", "M496,196 C440,250 400,272 338,282",
+      v.hasBattery ? this._flowPath("ef-b-h", link(522, 182, rBatt, 300, 286, rHome, true),
         v.battOut || v.battIn, S.battery.color, v.battIn > 0) : "",
     ].join("");
 
     const devices = (flow.devices || []).map((d) => {
       const st = this._hass.states[d.entity];
-      const n = st ? parseFloat(st.state) : NaN;
-      const f = fmtPower(Number.isFinite(n) ? n : null);
-      const share = v.home > 0 && Number.isFinite(n) ? Math.min(100, (n / v.home) * 100) : 0;
+      const n = powerWatts(st);
+      const f = fmtPower(n);
+      const share = v.home > 0 && n !== null ? Math.min(100, (n / v.home) * 100) : 0;
       return `<div class="ef-dev" data-fp-badge="${esc(d.entity)}">
           <ha-icon icon="${esc(d.icon || autoIcon(d.entity, st || { attributes: {} }))}"></ha-icon>
           <div class="ef-dev-text">
@@ -1474,9 +1643,12 @@ class CyborgDashboard extends HTMLElement {
     }).join("");
 
     return `<div class="ef${open ? " open" : ""}">
-        <svg class="ef-svg" viewBox="0 0 600 ${366 + sub.extra}" preserveAspectRatio="xMidYMid meet">
-          ${paths}${sub.svg}${solarNode}${gridNode}${battNode}${homeNode}
-        </svg>
+        <div class="ef-stage" style="aspect-ratio:600/${vb}">
+          <svg class="ef-svg" viewBox="0 0 600 ${vb}" preserveAspectRatio="none">
+            ${paths}${sub.svg}
+          </svg>
+          <div class="ef-nodes">${solarNode}${gridNode}${battNode}${homeNode}${sub.html}</div>
+        </div>
         ${devices && !open ? `<div class="ef-devs">${devices}</div>` : ""}
       </div>`;
   }
@@ -1654,6 +1826,277 @@ class CyborgDashboard extends HTMLElement {
     }).join("")}</div>`;
   }
 
+  // ------------------------------------------------------ monitoraggio ---
+
+  /** Readings for one diagnostic group, auto-discovered by device_class. */
+  _monitorRows(group, item) {
+    const manual = item.entities && item.entities[group.key];
+    const ids = Array.isArray(manual) && manual.length
+      ? manual
+      : Object.keys(this._hass.states).filter((id) =>
+          this._hass.states[id].attributes.device_class === group.key
+          && !id.startsWith("update."));
+    const rows = [];
+    for (const id of ids) {
+      const st = this._hass.states[id];
+      if (!st) continue;
+      const n = parseFloat(st.state);
+      if (!Number.isFinite(n)) continue;
+      const alarm = group.alarm ? group.alarm(n) : false;
+      const warn = !alarm && group.warn ? group.warn(n) : false;
+      rows.push({ id, st, n, warn, alarm,
+        name: st.attributes.friendly_name || id,
+        unit: st.attributes.unit_of_measurement || group.unit });
+    }
+    // anything out of tolerance floats to the top: on a dense diagnostic panel
+    // the point is spotting the one bad reading, not reading all forty
+    rows.sort((a, b) => (b.alarm - a.alarm) || (b.warn - a.warn) || a.name.localeCompare(b.name));
+    return rows.slice(0, item.max_per_group || 8);
+  }
+
+  /** Semicircular gauge of the present draw against the contractual limit. */
+  _gridGauge(item) {
+    const limit = Math.max(500, item.limit_w || 3300);
+    const st = item.grid_entity && this._hass.states[item.grid_entity];
+    const raw = powerWatts(st);
+    const draw = raw === null ? null : Math.max(0, raw);
+    const pct = draw === null ? 0 : Math.min(1.25, draw / limit);
+    const level = pct >= 1 ? "over" : pct >= 0.8 ? "warn" : "ok";
+    const f = fmtPower(draw);
+    const lf = fmtPower(limit);
+
+    // 180deg sweep, radius 92 around (120,112)
+    const R = 92, CX = 120, CY = 112;
+    const pt = (frac) => {
+      const a = Math.PI * (1 - Math.min(1, frac));
+      return [CX + R * Math.cos(a), CY - R * Math.sin(a)];
+    };
+    const arc = (from, to, cls, extra) => {
+      const [x1, y1] = pt(from), [x2, y2] = pt(to);
+      const large = (to - from) > 0.5 ? 1 : 0;
+      return `<path class="mg-arc ${cls}" ${extra || ""} d="M${x1.toFixed(1)},${y1.toFixed(1)} A${R},${R} 0 ${large} 1 ${x2.toFixed(1)},${y2.toFixed(1)}"/>`;
+    };
+    const [nx, ny] = pt(Math.min(1, pct));
+
+    return `<div class="mg ${level}">
+        <svg class="mg-svg" viewBox="0 0 240 132">
+          ${arc(0, 1, "track")}
+          ${(() => { const [tx, ty] = pt(0.8), [ix, iy] = [CX + (R - 11) * Math.cos(Math.PI * 0.2), CY - (R - 11) * Math.sin(Math.PI * 0.2)];
+             return `<line class="mg-tick" x1="${ix.toFixed(1)}" y1="${iy.toFixed(1)}" x2="${tx.toFixed(1)}" y2="${ty.toFixed(1)}"/>
+               <text class="mg-tickl" x="${(tx + 6).toFixed(1)}" y="${(ty - 6).toFixed(1)}">80%</text>`; })()}
+          ${draw !== null && pct > 0.002 ? arc(0, Math.min(1, pct), "value") : ""}
+          ${draw !== null ? `<circle class="mg-dot" cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="5"/>` : ""}
+          <text class="mg-min" x="22" y="128">0</text>
+          <text class="mg-max" x="218" y="128">${esc(lf.v + " " + lf.u)}</text>
+        </svg>
+        <div class="mg-read">
+          <strong>${esc(f.v)}<i>${esc(f.u)}</i></strong>
+          <span>${draw === null ? "sensore rete non collegato"
+            : level === "over" ? `oltre il limite di ${esc(lf.v + " " + lf.u)}`
+            : `${Math.round(pct * 100)}% del contatore · margine ${esc(fmtPower(Math.max(0, limit - draw)).v + " " + fmtPower(Math.max(0, limit - draw)).u)}`}</span>
+        </div>
+      </div>`;
+  }
+
+  _monitorBody(item) {
+    const groups = MONITOR_GROUPS
+      .filter((g) => !Array.isArray(item.groups) || !item.groups.length || item.groups.includes(g.key))
+      .map((g) => ({ g, rows: this._monitorRows(g, item) }))
+      .filter((x) => x.rows.length);
+
+    const issues = groups.reduce((t, x) => t + x.rows.filter((r) => r.warn || r.alarm).length, 0);
+
+    return `<div class="mon">
+        ${this._gridGauge(item)}
+        <div class="mon-status ${issues ? "bad" : "good"}">
+          <ha-icon icon="${issues ? "mdi:alert-circle-outline" : "mdi:check-circle-outline"}"></ha-icon>
+          <span>${issues ? `${issues} letture fuori tolleranza` : "Tutte le letture in tolleranza"}</span>
+        </div>
+        ${groups.length ? groups.map(({ g, rows }) => `
+          <div class="mon-group">
+            <div class="mon-head"><ha-icon icon="${esc(g.icon)}"></ha-icon><strong>${esc(g.label)}</strong>
+              ${g.hint ? `<em>${esc(g.hint)}</em>` : ""}<span>${rows.length}</span></div>
+            <div class="mon-rows">${rows.map((r) => `
+              <button class="mon-row ${r.alarm ? "alarm" : r.warn ? "warn" : ""}" data-more-info="${esc(r.id)}">
+                <span class="mon-name">${esc(r.name)}</span>
+                <span class="mon-val">${esc(Math.abs(r.n) >= 100 ? r.n.toFixed(0) : r.n.toFixed(Math.abs(r.n) < 10 ? 2 : 1))}<i>${esc(r.unit)}</i></span>
+              </button>`).join("")}</div>
+          </div>`).join("")
+        : `<div class="ov-empty"><ha-icon icon="mdi:gauge-empty"></ha-icon>
+             <span>Nessun sensore diagnostico trovato. Servono entità con device_class tensione, corrente, temperatura, frequenza o fattore di potenza.</span></div>`}
+      </div>`;
+  }
+
+  // ----------------------------------------------------------- camere ---
+
+  _cameraIds(item) {
+    if (Array.isArray(item.cameras) && item.cameras.length) {
+      return item.cameras.filter((id) => this._hass.states[id]);
+    }
+    return Object.keys(this._hass.states).filter((id) => id.startsWith("camera."));
+  }
+
+  _cameraBody(item) {
+    const ids = this._cameraIds(item);
+    if (!ids.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:cctv-off"></ha-icon>
+        <span>Nessuna videocamera in Home Assistant.</span></div>`;
+    }
+    // one cache-buster per refresh tick, shared by every thumbnail so they
+    // update together instead of each pulling on its own timer
+    const tick = this._camTick || 0;
+    this._scheduleCameraRefresh(item);
+    return `<div class="cams">${ids.map((id) => {
+      const st = this._hass.states[id];
+      const url = cameraStill(id, st);
+      const off = st.state === "unavailable" || !url;
+      return `<button class="cam" data-cam-open="${esc(id)}" ${off ? "disabled" : ""}>
+          ${off ? `<div class="cam-off"><ha-icon icon="mdi:cctv-off"></ha-icon></div>`
+                : `<img class="cam-img" src="${esc(url)}${url.includes("?") ? "&" : "?"}_t=${tick}" alt="" loading="lazy">`}
+          <span class="cam-bar">
+            <ha-icon icon="mdi:cctv"></ha-icon>
+            <em>${esc(st.attributes.friendly_name || id)}</em>
+            ${off ? '<i class="cam-dot off"></i>' : '<i class="cam-dot"></i>'}
+          </span>
+        </button>`;
+    }).join("")}</div>`;
+  }
+
+  _scheduleCameraRefresh(item) {
+    if (this._camTimer) return;
+    const every = Math.max(5, item.refresh || 10) * 1000;
+    this._camTimer = setInterval(() => {
+      if (!this.isConnected) { clearInterval(this._camTimer); this._camTimer = null; return; }
+      // swap the src in place: a full re-render would tear down every <img>
+      // and make the whole wall of thumbnails flash
+      this._camTick = (this._camTick || 0) + 1;
+      for (const img of Array.from(this.querySelectorAll(".cam-img"))) {
+        const base = img.src.split("&_t=")[0].split("?_t=")[0];
+        img.src = base + (base.includes("?") ? "&" : "?") + "_t=" + this._camTick;
+      }
+    }, every);
+  }
+
+  // ---------------------------------------------------------- overlay ---
+
+  _openOverlay(kind, entity) {
+    this._overlay = { kind, entity };
+    this._touch();
+  }
+
+  _renderOverlay() {
+    const o = this._overlay;
+    if (!o) return "";
+    const st = this._hass.states[o.entity];
+    if (!st) return "";
+    const body = o.kind === "camera" ? this._cameraLive(o.entity, st) : this._weatherDetail(o.entity, st);
+    return `<div class="ovl" data-overlay-close>
+        <div class="ovl-panel" data-overlay-stop>
+          <div class="ovl-head">
+            <ha-icon icon="${esc(o.kind === "camera" ? "mdi:cctv" : "mdi:weather-partly-cloudy")}"></ha-icon>
+            <strong>${esc(st.attributes.friendly_name || o.entity)}</strong>
+            <button class="icon" data-overlay-close><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>
+          ${body}
+        </div>
+      </div>`;
+  }
+
+  _cameraLive(entityId, st) {
+    const url = cameraStream(entityId, st);
+    return `<div class="ovl-body cam-live">
+        ${url ? `<img src="${esc(url)}" alt="">`
+              : '<div class="ov-empty"><ha-icon icon="mdi:cctv-off"></ha-icon><span>Flusso non disponibile.</span></div>'}
+        <div class="cam-live-meta">
+          <span><i class="cam-dot"></i> diretta</span>
+          <span>${esc(stateWords(st.state, null))}</span>
+          <button class="secondary" data-more-info="${esc(entityId)}"><ha-icon icon="mdi:information-outline"></ha-icon> DETTAGLI</button>
+        </div>
+      </div>`;
+  }
+
+  _weatherDetail(id, st) {
+    const a = st.attributes;
+    const [icon, label] = WEATHER_CONDITIONS[st.state] || ["mdi:weather-cloudy", String(st.state)];
+    const unit = a.temperature_unit || "°C";
+
+    // bit 2 = hourly forecast; asking an entity that lacks it returns an error
+    if (a.supported_features & 2) {
+      this._subscribe("wxh:" + id,
+        { type: "weather/subscribe_forecast", forecast_type: "hourly", entity_id: id },
+        (ev) => { this._hourly = this._hourly || {}; this._hourly[id] = (ev && ev.forecast) || []; this._touch(); });
+    }
+    const hourly = ((this._hourly || {})[id] || []).slice(0, 12);
+    const daily = ((this._forecast || {})[id] || []).slice(0, 7);
+
+    const temps = hourly.map((h) => h.temperature).filter((n) => Number.isFinite(n));
+    const spark = temps.length > 1 ? sparkline(temps, 320, 60) : "";
+
+    const sun = this._hass.states["sun.sun"];
+    const hhmm = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "—"
+      : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+
+    const facts = [
+      a.temperature !== undefined ? ["mdi:thermometer", "Temperatura", Math.round(a.temperature * 10) / 10 + unit] : null,
+      a.apparent_temperature !== undefined ? ["mdi:thermometer-lines", "Percepita", Math.round(a.apparent_temperature) + unit] : null,
+      a.humidity !== undefined ? ["mdi:water-percent", "Umidità", Math.round(a.humidity) + "%"] : null,
+      a.pressure !== undefined ? ["mdi:gauge", "Pressione", Math.round(a.pressure) + " " + (a.pressure_unit || "hPa")] : null,
+      a.wind_speed !== undefined ? ["mdi:weather-windy", "Vento", Math.round(a.wind_speed) + " " + (a.wind_speed_unit || "km/h")] : null,
+      a.wind_bearing !== undefined ? ["mdi:compass-outline", "Direzione", windRose(a.wind_bearing)] : null,
+      a.visibility !== undefined ? ["mdi:eye-outline", "Visibilità", a.visibility + " " + (a.visibility_unit || "km")] : null,
+      a.uv_index !== undefined ? ["mdi:weather-sunny-alert", "Indice UV", String(a.uv_index)] : null,
+      sun ? ["mdi:weather-sunset-up", "Alba", hhmm(sun.attributes.next_rising)] : null,
+      sun ? ["mdi:weather-sunset-down", "Tramonto", hhmm(sun.attributes.next_setting)] : null,
+    ].filter(Boolean);
+
+    return `<div class="ovl-body wxd">
+        <div class="wxd-now">
+          <ha-icon class="wxd-icon" icon="${esc(icon)}"></ha-icon>
+          <div>
+            <div class="wxd-temp">${esc(a.temperature !== undefined ? Math.round(a.temperature) : "—")}<span>${esc(unit)}</span></div>
+            <div class="wxd-cond">${esc(label)}</div>
+          </div>
+        </div>
+
+        ${hourly.length ? `<div class="wxd-block">
+          <h4>Prossime ore</h4>
+          ${spark ? `<div class="wxd-spark">${spark}</div>` : ""}
+          <div class="wxd-hours">${hourly.map((h) => {
+            const [hi] = WEATHER_CONDITIONS[h.condition] || ["mdi:weather-cloudy"];
+            return `<div class="wxd-hour">
+              <span>${esc(hhmm(h.datetime))}</span>
+              <ha-icon icon="${esc(hi)}"></ha-icon>
+              <strong>${esc(h.temperature !== undefined ? Math.round(h.temperature) + "°" : "—")}</strong>
+              ${h.precipitation_probability !== undefined && h.precipitation_probability !== null
+                ? `<em>${esc(Math.round(h.precipitation_probability))}%</em>` : ""}
+            </div>`;
+          }).join("")}</div>
+        </div>` : ""}
+
+        ${daily.length ? `<div class="wxd-block">
+          <h4>Prossimi giorni</h4>
+          <div class="wxd-days">${daily.map((d) => {
+            const dt = new Date(d.datetime);
+            const [di] = WEATHER_CONDITIONS[d.condition] || ["mdi:weather-cloudy"];
+            return `<div class="wxd-day">
+              <span>${esc(WEEKDAYS[dt.getDay()] || "")}</span>
+              <ha-icon icon="${esc(di)}"></ha-icon>
+              <b>${esc(d.temperature !== undefined ? Math.round(d.temperature) + "°" : "—")}</b>
+              <i>${esc(d.templow !== undefined && d.templow !== null ? Math.round(d.templow) + "°" : "")}</i>
+              ${d.precipitation ? `<em>${esc(d.precipitation)} mm</em>` : ""}
+            </div>`;
+          }).join("")}</div>
+        </div>` : ""}
+
+        <div class="wxd-block">
+          <h4>Condizioni attuali</h4>
+          <div class="wxd-facts">${facts.map(([i, k, v]) => `
+            <div class="wxd-fact"><ha-icon icon="${esc(i)}"></ha-icon>
+              <span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join("")}</div>
+        </div>
+      </div>`;
+  }
+
   _cardBody(item, st) {
     const type = item.type || "entity";
     if (type === "energyflow") return this._energyFlowBody(item);
@@ -1661,6 +2104,8 @@ class CyborgDashboard extends HTMLElement {
     if (type === "active") return this._activeBody(item);
     if (type === "notifications") return this._notificationsBody(item);
     if (type === "people") return this._peopleBody(item);
+    if (type === "monitor") return this._monitorBody(item);
+    if (type === "camera") return this._cameraBody(item);
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
     const unit = attrs.unit_of_measurement || "";
@@ -1754,7 +2199,8 @@ class CyborgDashboard extends HTMLElement {
           </div>
         </article>`;
     }
-    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}${item.type === "weather" && item.entity_id ? " tappable" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+        ${item.type === "weather" && item.entity_id ? `data-weather-open="${esc(item.entity_id)}" class-hint="clickable"` : ""}
         ${composite || item.type === "weather" ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
   }
 
@@ -1874,6 +2320,48 @@ class CyborgDashboard extends HTMLElement {
   }
 
   _compositeEditor(card) {
+    if (card.type === "camera") {
+      const all = Object.keys(this._hass.states).filter((id) => id.startsWith("camera."));
+      const chosen = Array.isArray(card.cameras) && card.cameras.length ? card.cameras : all;
+      return `<div class="section">
+        <strong>VIDEOCAMERE</strong>
+        <span class="hint">${all.length
+          ? "Le anteprime sono fermi immagine aggiornati a intervalli; toccandone una si apre la diretta. Tenere otto flussi live aperti insieme saturerebbe un tablet da parete."
+          : "Nessuna videocamera trovata in Home Assistant."}</span>
+        <div class="dom-grid">${all.map((id) =>
+          `<button type="button" class="dom-chip ${chosen.includes(id) ? "on" : ""}" data-camera-pick="${esc(id)}">
+             <ha-icon icon="mdi:cctv"></ha-icon>${esc(this._hass.states[id].attributes.friendly_name || id)}</button>`).join("")}
+        </div>
+        <label>AGGIORNAMENTO ANTEPRIME (secondi)<input type="number" min="5" max="120" data-prop="refresh" value="${card.refresh || 10}"></label>
+      </div>`;
+    }
+    if (card.type === "monitor") {
+      const chosen = Array.isArray(card.groups) && card.groups.length
+        ? card.groups : MONITOR_GROUPS.map((g) => g.key);
+      const gridSt = card.grid_entity && this._hass.states[card.grid_entity];
+      return `<div class="section">
+        <strong>LIMITE DI PRELIEVO</strong>
+        <span class="hint">Il cursore misura la potenza assorbita adesso contro il limite del contatore. Zona ambra dall'80%, rossa oltre il limite.</span>
+        <label>SENSORE DI POTENZA DELLA RETE<select data-prop="grid_entity">
+          <option value="">— non collegato —</option>
+          ${this._powerCandidates(/rete|grid|scambio|contator|preliev|fase/i).map((r) =>
+            `<option value="${esc(r.id)}" ${card.grid_entity === r.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
+        </select></label>
+        ${gridSt ? `<span class="hint">Lettura attuale: <strong>${esc(fmtPower(powerWatts(gridSt)).v + " " + fmtPower(powerWatts(gridSt)).u)}</strong></span>` : ""}
+        <label>POTENZA CONTRATTUALE (W)<input type="number" min="500" max="100000" step="100" data-prop="limit_w" value="${card.limit_w || 3300}"></label>
+        <div class="dom-grid">${GRID_LIMIT_PRESETS.map((w) =>
+          `<button type="button" class="dom-chip ${(card.limit_w || 3300) === w ? "on" : ""}" data-limit-preset="${w}">${esc(fmtPower(w).v + " " + fmtPower(w).u)}</button>`).join("")}</div>
+      </div>
+      <div class="section">
+        <strong>GRUPPI DI LETTURE</strong>
+        <span class="hint">Le entità vengono trovate da sole in base al loro <em>device_class</em>. Le letture fuori tolleranza salgono in cima.</span>
+        <div class="dom-grid">${MONITOR_GROUPS.map((g) =>
+          `<button type="button" class="dom-chip ${chosen.includes(g.key) ? "on" : ""}" data-monitor-group="${esc(g.key)}">
+             <ha-icon icon="${esc(g.icon)}"></ha-icon>${esc(g.label)}</button>`).join("")}
+        </div>
+        <label>MASSIMO PER GRUPPO<input type="number" min="3" max="30" data-prop="max_per_group" value="${card.max_per_group || 8}"></label>
+      </div>`;
+    }
     if (card.type === "active") {
       const chosen = Array.isArray(card.domains) && card.domains.length
         ? card.domains : Object.keys(ACTIVE_DOMAINS);
@@ -1931,6 +2419,8 @@ class CyborgDashboard extends HTMLElement {
     top.push(mk("notifications", { size: "md" }));
     top.push(mk("active", { size: "md" }));
 
+    const hasCams = Object.keys(states).some((id) => id.startsWith("camera."));
+    if (hasCams) top.push(mk("camera", { size: "lg", appearance: { icon: "mdi:cctv" }, refresh: 10 }));
     const alarm = first((id) => id.startsWith("alarm_control_panel."));
     if (alarm) {
       top.push(mk("status", { entity_id: alarm, size: "sm",
@@ -1942,14 +2432,28 @@ class CyborgDashboard extends HTMLElement {
       appearance: { icon: "mdi:transit-connection-variant" },
       flow: { grid: null, solar: null, battery: null, home: null, devices: [] } });
 
+    // the grid sensor the flow uses is also what the gauge measures, so the
+    // monitoring card is wired from the same detection instead of asking twice
+    const monitorCard = mk("monitor", { size: "lg",
+      appearance: { icon: "mdi:gauge-full" },
+      grid_entity: null, limit_w: 3300, groups: [], max_per_group: 8 });
+
     const sections = [
       { id: uid("sec"), title: "Panoramica", icon: "mdi:view-dashboard-variant",
         accent: "#00e5ff", collapsed: false, items: top },
       { id: uid("sec"), title: "Energia", icon: "mdi:flash",
         accent: "#ffd166", collapsed: false, items: [flowCard] },
+      { id: uid("sec"), title: "Monitoraggio", icon: "mdi:gauge-full",
+        accent: "#8ecae6", collapsed: false, items: [monitorCard] },
     ];
     page.sections = sections;
-    this._detectFlow(flowCard);
+    this._detectFlow(flowCard).then(() => {
+      // reuse whatever the energy detection resolved for the grid
+      if (flowCard.flow && flowCard.flow.grid && !monitorCard.grid_entity) {
+        monitorCard.grid_entity = flowCard.flow.grid;
+        this._touch();
+      }
+    });
     this._selected = null;
     this._touch();
   }
@@ -1984,8 +2488,7 @@ class CyborgDashboard extends HTMLElement {
           <div class="wiz-hint">${esc(step.hint)}</div>
           <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra i sensori di potenza..." autocomplete="off">
           <div class="wiz-list">${rows.length ? rows.slice(0, 40).map((r) => {
-            const v = parseFloat(r.st.state);
-            const f = fmtPower(Number.isFinite(v) ? v : null);
+            const f = fmtPower(powerWatts(r.st));
             return `<button type="button" class="wiz-opt ${current === r.id ? "sel" : ""}" data-wiz-pick="${esc(r.id)}">
               <ha-icon icon="${esc(current === r.id ? "mdi:check-circle" : "mdi:flash")}"></ha-icon>
               <div><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></div>
@@ -2252,6 +2755,17 @@ class CyborgDashboard extends HTMLElement {
     if (!this._hass || !this._dashboard) return;
     this._signature = this._buildSignature();
 
+    // Every interaction rebuilds the DOM, which throws away scroll position:
+    // on a phone each tap on a checkbox threw the user back to the top of the
+    // page and of the sheet. Capture what is scrolled, restore it after.
+    const scroller = this._scrollParent();
+    const pageTop = scroller ? scroller.scrollTop : 0;
+    const scrolls = {};
+    for (const sel of [".editor", ".wiz-list", ".entity-results", ".fp-viewport"]) {
+      const el = this.querySelector(sel);
+      if (el && el.scrollTop) scrolls[sel] = el.scrollTop;
+    }
+
     // Preserve editor focus + caret across the innerHTML swap, otherwise
     // typing in a text field is interrupted every time a state arrives.
     const active = this.querySelector(":focus");
@@ -2316,7 +2830,16 @@ class CyborgDashboard extends HTMLElement {
           <main>${body}</main>
           ${this._editing ? `<div class="editor-backdrop" data-editor-backdrop></div>${this._renderEditor()}` : ""}
         </div>
+        ${this._renderOverlay()}
       </div>`;
+
+    // restore scroll synchronously, before the browser paints, so there is no
+    // visible jump
+    if (scroller && pageTop) scroller.scrollTop = pageTop;
+    for (const sel of Object.keys(scrolls)) {
+      const el = this.querySelector(sel);
+      if (el) el.scrollTop = scrolls[sel];
+    }
 
     this._bind();
     if (focusKey) {
@@ -2575,6 +3098,30 @@ class CyborgDashboard extends HTMLElement {
     });
     this._bindRoomDrag();
 
+    // --- overlay (dettaglio meteo, camera live)
+    all("[data-cam-open]").forEach((el) => {
+      el.onclick = () => this._openOverlay("camera", el.getAttribute("data-cam-open"));
+    });
+    all("[data-weather-open]").forEach((el) => {
+      el.onclick = (ev) => {
+        if (ev.target.closest("[data-more-info],[data-toggle-entity]")) return;
+        this._openOverlay("weather", el.getAttribute("data-weather-open"));
+      };
+    });
+    const ovl = q(".ovl");
+    if (ovl) {
+      ovl.onclick = (ev) => {
+        // only a hit on the backdrop itself dismisses; clicks inside the panel
+        // bubble up here too and must be ignored
+        if (ev.target !== ovl) return;
+        this._overlay = null;
+        this._touch();
+      };
+    }
+    all(".ovl-head [data-overlay-close]").forEach((el) => {
+      el.onclick = (ev) => { ev.stopPropagation(); this._overlay = null; this._touch(); };
+    });
+
     // --- overview cards
     all("[data-toggle-entity]").forEach((el) => {
       el.onclick = () => {
@@ -2587,6 +3134,36 @@ class CyborgDashboard extends HTMLElement {
     all("[data-more-info]").forEach((el) => {
       el.onclick = () => this.dispatchEvent(new CustomEvent("hass-more-info", {
         detail: { entityId: el.getAttribute("data-more-info") }, bubbles: true, composed: true }));
+    });
+    all("[data-camera-pick]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-camera-pick");
+        const allC = Object.keys(this._hass.states).filter((x) => x.startsWith("camera."));
+        const cur = Array.isArray(card.cameras) && card.cameras.length ? card.cameras.slice() : allC;
+        const i = cur.indexOf(id);
+        if (i >= 0) cur.splice(i, 1); else cur.push(id);
+        card.cameras = cur;
+        this._touch();
+      };
+    });
+    all("[data-monitor-group]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const k = el.getAttribute("data-monitor-group");
+        const cur = Array.isArray(card.groups) && card.groups.length ? card.groups.slice() : MONITOR_GROUPS.map((g) => g.key);
+        const i = cur.indexOf(k);
+        if (i >= 0) cur.splice(i, 1); else cur.push(k);
+        card.groups = cur;
+        this._touch();
+      };
+    });
+    all("[data-limit-preset]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.limit_w = parseInt(el.getAttribute("data-limit-preset"), 10);
+        this._touch();
+      };
     });
     all("[data-active-domain]").forEach((el) => {
       el.onclick = () => {
@@ -3140,6 +3717,99 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ppl-dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.18);flex-shrink:0}
 .ppl-row.home .ppl-dot{background:#06d6a0;box-shadow:0 0 9px #06d6a0}
 
+.item.tappable{cursor:pointer}
+.item.tappable:hover{border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.cams{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px}
+.cam{position:relative;padding:0;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:12px;overflow:hidden;background:#05090f;aspect-ratio:16/9;cursor:pointer;letter-spacing:0}
+.cam:hover{border-color:var(--accent)}
+.cam:disabled{cursor:default;opacity:.5}
+.cam-img{width:100%;height:100%;object-fit:cover;display:block}
+.cam-off{width:100%;height:100%;display:grid;place-items:center}
+.cam-off ha-icon{--mdc-icon-size:26px;opacity:.35}
+.cam-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;padding:7px 9px;background:linear-gradient(0deg,rgba(3,7,12,.92),transparent)}
+.cam-bar ha-icon{--mdc-icon-size:13px;color:var(--accent);flex-shrink:0}
+.cam-bar em{flex:1;min-width:0;font-style:normal;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.cam-dot{width:7px;height:7px;border-radius:50%;background:#06d6a0;box-shadow:0 0 8px #06d6a0;flex-shrink:0;animation:camPulse 2s ease-in-out infinite}
+.cam-dot.off{background:#8d99ae;box-shadow:none;animation:none}
+@keyframes camPulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+.ovl{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(2,6,12,.72);backdrop-filter:blur(4px);animation:ovlIn .18s ease}
+@keyframes ovlIn{from{opacity:0}to{opacity:1}}
+.ovl-panel{width:min(720px,100%);max-height:88vh;overflow-y:auto;overscroll-behavior:contain;border-radius:20px;background:linear-gradient(168deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.ovl-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;padding:15px 17px;background:inherit;border-bottom:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.ovl-head ha-icon{--mdc-icon-size:20px;color:var(--accent)}
+.ovl-head strong{flex:1;min-width:0;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ovl-body{padding:16px 17px 20px}
+.cam-live img{width:100%;border-radius:13px;display:block;background:#05090f}
+.cam-live-meta{display:flex;align-items:center;gap:12px;margin-top:11px;font:10px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;opacity:.6}
+.cam-live-meta span{display:inline-flex;align-items:center;gap:6px}
+.cam-live-meta button{margin-left:auto;text-transform:none;letter-spacing:.04em}
+.wxd-now{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+.wxd-icon{--mdc-icon-size:58px;color:var(--accent);filter:drop-shadow(0 0 16px color-mix(in srgb,var(--accent) 50%,transparent))}
+.wxd-temp{font:750 44px Inter,system-ui,sans-serif;letter-spacing:-.04em;line-height:1;color:var(--accent)}
+.wxd-temp span{font-size:18px;font-weight:600;opacity:.5;margin-left:3px}
+.wxd-cond{margin-top:5px;font-size:13px;opacity:.65}
+.wxd-block{margin-top:18px;padding-top:14px;border-top:1px solid color-mix(in srgb,var(--accent) 15%,transparent)}
+.wxd-block h4{margin:0 0 10px;font:700 10px ui-monospace,monospace;letter-spacing:2px;text-transform:uppercase;color:var(--accent);opacity:.75}
+.wxd-spark{margin-bottom:6px}
+.wxd-spark .spark{height:60px}
+.wxd-hours{display:flex;gap:5px;overflow-x:auto;padding-bottom:4px}
+.wxd-hour{flex:0 0 auto;width:56px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 3px;border-radius:11px;background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.wxd-hour span{font:9px ui-monospace,monospace;opacity:.5}
+.wxd-hour ha-icon{--mdc-icon-size:19px;color:var(--accent);opacity:.85}
+.wxd-hour strong{font-size:13px;font-weight:750}
+.wxd-hour em{font-style:normal;font:9px ui-monospace,monospace;color:#8ecae6;opacity:.8}
+.wxd-days{display:flex;flex-direction:column;gap:4px}
+.wxd-day{display:grid;grid-template-columns:46px 30px 1fr 44px auto;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.wxd-day span{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.55;text-transform:uppercase}
+.wxd-day ha-icon{--mdc-icon-size:18px;color:var(--accent);opacity:.85}
+.wxd-day b{font-size:14px;font-weight:750}
+.wxd-day i{font-style:normal;font-size:12px;opacity:.45;text-align:right}
+.wxd-day em{font-style:normal;font:9px ui-monospace,monospace;color:#8ecae6;opacity:.75}
+.wxd-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px}
+.wxd-fact{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.wxd-fact ha-icon{--mdc-icon-size:16px;color:var(--accent);opacity:.8;flex-shrink:0}
+.wxd-fact span{flex:1;min-width:0;font-size:11px;opacity:.6}
+.wxd-fact strong{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.mon{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.mg{display:flex;flex-direction:column;align-items:center;gap:2px}
+.mg-svg{width:100%;max-width:280px;height:auto;display:block}
+.mg-arc{fill:none;stroke-linecap:round}
+.mg-arc.track{stroke:rgba(255,255,255,.07);stroke-width:13}
+.mg-tick{stroke:#ffd166;stroke-width:2;opacity:.55}
+.mg-tickl{fill:#ffd166;opacity:.5;font:700 8px ui-monospace,monospace}
+.mg-arc.value{stroke:var(--accent);stroke-width:13;filter:drop-shadow(0 0 8px color-mix(in srgb,var(--accent) 65%,transparent));transition:stroke .3s}
+.mg.warn .mg-arc.value,.mg.warn .mg-dot{stroke:#ffd166;fill:#ffd166}
+.mg.over .mg-arc.value,.mg.over .mg-dot{stroke:#ff3d71;fill:#ff3d71}
+.mg-dot{fill:var(--accent);stroke:#0a1119;stroke-width:2}
+.mg-min,.mg-max{fill:currentColor;opacity:.35;font:600 9px ui-monospace,monospace}
+.mg-max{text-anchor:end}
+.mg-read{text-align:center;margin-top:-16px}
+.mg-read strong{display:block;font:750 30px Inter,system-ui,sans-serif;letter-spacing:-.03em;color:var(--accent);line-height:1}
+.mg.warn .mg-read strong{color:#ffd166}
+.mg.over .mg-read strong{color:#ff3d71}
+.mg-read strong i{font-style:normal;font-size:13px;font-weight:600;opacity:.55;margin-left:3px}
+.mg-read span{display:block;margin-top:5px;font:10px ui-monospace,monospace;letter-spacing:.8px;opacity:.5}
+.mon-status{display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:10px;font-size:11.5px;font-weight:600}
+.mon-status ha-icon{--mdc-icon-size:16px}
+.mon-status.good{background:rgba(6,214,160,.1);border:1px solid rgba(6,214,160,.26);color:#06d6a0}
+.mon-status.bad{background:rgba(255,209,102,.1);border:1px solid rgba(255,209,102,.3);color:#ffd166}
+.mon-group{border-top:1px solid color-mix(in srgb,var(--accent) 14%,transparent);padding-top:10px}
+.mon-head{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.mon-head ha-icon{--mdc-icon-size:15px;color:var(--accent);opacity:.8}
+.mon-head strong{font:700 10px ui-monospace,monospace;letter-spacing:1.8px;text-transform:uppercase;color:var(--accent)}
+.mon-head em{font-style:normal;font-size:9.5px;opacity:.35;letter-spacing:.3px}
+.mon-head span{margin-left:auto;font:10px ui-monospace,monospace;opacity:.35}
+.mon-rows{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:4px}
+.mon-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid transparent;color:var(--primary-text-color);text-align:left;font-weight:500;letter-spacing:0}
+.mon-row:hover{border-color:color-mix(in srgb,var(--accent) 34%,transparent)}
+.mon-name{flex:1;min-width:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.75}
+.mon-val{flex-shrink:0;font:750 13px Inter,system-ui,sans-serif;color:var(--accent);font-variant-numeric:tabular-nums}
+.mon-val i{font-style:normal;font-size:9px;font-weight:600;opacity:.55;margin-left:2px}
+.mon-row.warn{background:rgba(255,209,102,.12);border-color:rgba(255,209,102,.34)}
+.mon-row.warn .mon-val{color:#ffd166}
+.mon-row.alarm{background:rgba(255,61,113,.14);border-color:rgba(255,61,113,.4)}
+.mon-row.alarm .mon-val{color:#ff8091}
 .dom-grid{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
 .dom-chip{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:99px;font-size:10.5px;font-weight:600;letter-spacing:.02em;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.5}
 .dom-chip ha-icon{--mdc-icon-size:13px}
@@ -3147,40 +3817,41 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 
 .item.flow .value{display:none}
 .ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%}
-.ef-svg{display:block;width:100%;max-width:520px;margin:0 auto;height:auto;overflow:visible}
-.ef-node-bg{fill:color-mix(in srgb,var(--nc) 16%,#0a1119);stroke:none}
-.ef-node-ring{fill:none;stroke:var(--nc);stroke-width:1.5;opacity:.85}
-.ef-node-label{fill:currentColor;opacity:.45;font:600 10px ui-monospace,monospace;letter-spacing:2px;text-anchor:middle}
-.ef-node-val{fill:var(--nc);font:750 21px Inter,system-ui,sans-serif;text-anchor:middle;letter-spacing:-.02em}
-.ef-node-unit{fill:currentColor;opacity:.5;font:600 10px ui-monospace,monospace;text-anchor:middle}
-.ef-node-sub{fill:currentColor;opacity:.4;font:600 9px ui-monospace,monospace;letter-spacing:1.4px;text-anchor:middle}
-.ef-path{fill:none;stroke-width:2;stroke-linecap:round}
-.ef-path.idle{stroke:currentColor;opacity:.12;stroke-dasharray:4 6}
-.ef-path.active{stroke:var(--nc);opacity:.3}
-.ef-dot{fill:var(--nc);filter:drop-shadow(0 0 5px var(--nc))}
-.ef-home-hit{cursor:pointer}
-.ef-home-ring{fill:none;stroke:var(--accent);stroke-width:1.5;opacity:0;transition:opacity .2s}
-.ef-home-hit:hover .ef-home-ring{opacity:.5}
-.ef-home-ring.open{opacity:.85;stroke-dasharray:3 4}
-.ef-home-hint{fill:var(--accent);opacity:.55;font:700 8px ui-monospace,monospace;letter-spacing:1.6px;text-anchor:middle}
-.ef-home-hit:hover .ef-home-hint{opacity:1}
-.ef-leaf{cursor:pointer}
-.ef-leaf .ef-node-bg{fill:color-mix(in srgb,var(--nc) 15%,#0a1119)}
-.ef-leaf .ef-node-ring{stroke:var(--nc);stroke-width:1.4;opacity:.8}
-.ef-leaf:hover .ef-node-ring{opacity:1;stroke-width:2}
-.ef-leaf-val{fill:var(--nc);font:750 15px Inter,system-ui,sans-serif;text-anchor:middle}
-.ef-leaf-unit{fill:currentColor;opacity:.45;font:600 8px ui-monospace,monospace;text-anchor:middle}
-.ef-leaf-name{fill:currentColor;opacity:.72;font:600 10px Inter,system-ui,sans-serif;text-anchor:middle}
-.ef-leaf-share{fill:var(--nc);opacity:.6;font:700 9px ui-monospace,monospace;text-anchor:middle}
-.ef-leaf.other .ef-leaf-val,.ef-leaf.other .ef-leaf-share{opacity:.75}
-.ef-leaf.child .ef-leaf-val{font-size:12px}
-.ef-leaf.child .ef-leaf-name{font-size:9px;opacity:.6}
-.ef-leaf.child .ef-leaf-share{font-size:8px}
-.ef-leaf.child .ef-node-ring{stroke-width:1.1;opacity:.6}
-.ef-leaf.other .ef-node-ring{stroke-dasharray:4 4}
+.ef-stage{position:relative;width:100%;max-width:560px;margin:0 auto}
+/* Without fill:none an SVG path is filled with the default black, which drew
+   the connections as solid tapering wedges instead of lines. */
+.ef-path{fill:none;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.ef-path.idle{stroke:currentColor;stroke-width:1.5;opacity:.1;stroke-dasharray:4 6}
+.ef-path.active{stroke:var(--nc);opacity:.32}
+.ef-dot{fill:var(--nc);stroke:none;filter:drop-shadow(0 0 5px var(--nc))}
+.ef-svg{position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible}
+.ef-nodes{position:absolute;inset:0;pointer-events:none}
+.ef-n{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;width:max-content;padding:0;border:0;background:none;color:var(--primary-text-color);letter-spacing:0;font:inherit;pointer-events:auto}
+.ef-n-lab{font:700 9px ui-monospace,SFMono-Regular,monospace;letter-spacing:2px;text-transform:uppercase;opacity:.45;white-space:nowrap}
+.ef-n-disc{position:relative;display:grid;place-items:center;width:var(--r);height:var(--r);border-radius:50%;background:radial-gradient(circle at 50% 35%,color-mix(in srgb,var(--nc) 26%,#0a1119),color-mix(in srgb,var(--nc) 9%,#070d14));border:1.5px solid color-mix(in srgb,var(--nc) 75%,transparent);box-shadow:0 0 18px color-mix(in srgb,var(--nc) 26%,transparent),inset 0 0 14px color-mix(in srgb,var(--nc) 12%,transparent);transition:box-shadow .2s,border-color .2s}
+.ef-n-disc ha-icon{--mdc-icon-size:calc(var(--r) * .40);color:var(--nc);filter:drop-shadow(0 0 6px color-mix(in srgb,var(--nc) 55%,transparent))}
+.ef-n.inside .ef-n-disc{flex-direction:column;display:flex;align-items:center;justify-content:center;gap:1px}
+.ef-n.inside .ef-n-disc ha-icon{--mdc-icon-size:calc(var(--r) * .26);margin-top:2px}
+.ef-n-in{font:750 calc(var(--r) * .21) Inter,system-ui,sans-serif;color:var(--nc);line-height:1;letter-spacing:-.02em;white-space:nowrap}
+.ef-n-in i{font-style:normal;font-size:calc(var(--r) * .12);font-weight:600;opacity:.6;margin-left:1px}
+.ef-n-val{font:750 15px Inter,system-ui,sans-serif;color:var(--nc);white-space:nowrap;letter-spacing:-.02em;line-height:1}
+.ef-n-val i{font-style:normal;font-size:9px;font-weight:600;opacity:.55;margin-left:2px}
+.ef-n-sub{font:700 8px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;opacity:.45;white-space:nowrap}
+.ef-n.export .ef-n-disc{border-style:dashed}
+.ef-n.home{cursor:pointer}
+.ef-n.home .ef-n-disc{border-width:2px}
+.ef-n.home:hover .ef-n-disc,.ef-n.home:focus-visible .ef-n-disc{box-shadow:0 0 26px color-mix(in srgb,var(--nc) 55%,transparent);border-color:var(--nc)}
+.ef-n.home .ef-n-sub{color:var(--nc);opacity:.7}
+.ef-n.home.open .ef-n-disc{border-style:dashed}
+.ef-n.leaf{cursor:pointer}
+.ef-n.leaf .ef-n-lab{order:3;opacity:.7;font:600 10px Inter,system-ui,sans-serif;letter-spacing:.01em;text-transform:none;max-width:104px;overflow:hidden;text-overflow:ellipsis}
+.ef-n.leaf .ef-n-val{order:2;font-size:13px}
+.ef-n.leaf.child .ef-n-val{font-size:11.5px}
+.ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:88px}
+.ef-n.leaf.other .ef-n-disc{border-style:dashed;opacity:.8}
+.ef-n.leaf:hover .ef-n-disc{border-color:var(--nc);box-shadow:0 0 22px color-mix(in srgb,var(--nc) 45%,transparent)}
 .ef-subhint{fill:currentColor;opacity:.4;font:600 11px Inter,system-ui,sans-serif;text-anchor:middle}
-.ef.open{max-width:660px}
-.ef.open .ef-svg{max-width:620px}
+.ef.open .ef-stage{max-width:640px}
 .ef-empty{display:flex;flex-direction:column;align-items:center;gap:7px;padding:34px 18px;text-align:center;opacity:.6}
 .ef-empty ha-icon{--mdc-icon-size:30px;color:var(--accent)}
 .ef-empty strong{font-size:13px}

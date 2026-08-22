@@ -4,6 +4,101 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.13.0] - 2026-08-22
+
+Videocamere in diretta e dettaglio meteo.
+
+### Novità
+- **Card Videocamere.** Griglia di anteprime; toccandone una si apre la
+  **diretta**. Le anteprime sono fermi immagine aggiornati a intervalli e solo
+  la camera che apri diventa un flusso: otto connessioni MJPEG simultanee
+  saturerebbero un tablet da parete e le camere stesse, per una parete di
+  immagini che nessuno sta guardando. L'aggiornamento sostituisce la sorgente
+  dell'immagine sul posto, senza ricostruire il DOM, così le anteprime non
+  lampeggiano.
+- Endpoint verificati sul sorgente di Home Assistant 2026.8.3
+  (`components/camera/__init__.py`): `/api/camera_proxy/{id}?token=…` per il
+  fermo immagine e `/api/camera_proxy_stream/{id}?token=…` per l'MJPEG, che sta
+  dentro un `<img>` senza alcuna libreria. Il token viene letto dagli attributi
+  della camera al momento del render, mai messo in cache, perché HA lo ruota.
+- **La composizione della Sicurezza guida con le videocamere** invece di una
+  card di stato per ciascuna, che non serviva a niente.
+- **Dettaglio meteo.** La card meteo ora si apre: temperatura e condizione in
+  grande, andamento delle prossime 12 ore con grafico e probabilità di pioggia,
+  previsioni a 7 giorni con minime e precipitazioni, e le condizioni attuali —
+  percepita, umidità, pressione, vento con rosa dei venti, visibilità, indice
+  UV, alba e tramonto. Le previsioni orarie sono sottoscritte solo se l'entità
+  dichiara di supportarle (bit 2 di `supported_features`).
+
+### Correzioni
+- **Dipendenza implicita da `entity_id` sull'oggetto stato.** Camere e dettaglio
+  meteo leggevano l'identificativo dall'oggetto di stato invece di riceverlo:
+  funzionava in Home Assistant ma produceva silenziosamente URL
+  `/api/camera_proxy/undefined?token=…` con qualunque oggetto stato privo di
+  quel campo. Ora l'id viene passato esplicitamente ovunque.
+
+### Verifica
+- `tests/frontend.test.js`: 294 asserzioni (24 nuove su camere e dettaglio
+  meteo), incluse la distinzione fermo immagine/flusso, la camera non
+  disponibile e la formattazione degli orari nel fuso del browser.
+
+## [0.12.0] - 2026-08-22
+
+Correzione critica sulle unità di misura, diagramma ridisegnato e nuova sezione
+Monitoraggio.
+
+### Correzione critica
+- **Le unità di misura venivano ignorate.** Ogni potenza veniva letta con
+  `parseFloat` e trattata come watt: un sensore di casa in kW valeva 0,2 contro
+  carichi in W da 246, quindi la casa risultava da 0,2 W e le quote dei carichi
+  arrivavano al 136556%. Ora ogni lettura passa per una conversione esplicita
+  (W, kW, MW, mW, VA, kVA, var) prima di essere usata in qualunque calcolo.
+  Su un prodotto energetico è un errore che invalida ogni numero mostrato: c'è
+  una batteria di test dedicata, incluso il caso esatto osservato sul campo.
+
+### Correzione bloccante
+- **Configurando, la pagina tornava in cima a ogni tocco.** Ogni interazione
+  ricostruisce il DOM e la posizione di scorrimento andava persa: veniva
+  salvato solo il focus. Ora vengono salvati e ripristinati anche lo scorrimento
+  della pagina, del pannello di modifica e degli elenchi, prima che il browser
+  ridisegni.
+
+### Diagramma del flusso ridisegnato
+- **Icone vere:** il traliccio per la rete, la casa per la casa, il pannello per
+  il fotovoltaico, l'accumulo per la batteria. I nodi sono ora elementi HTML
+  sovrapposti al livello SVG, perché l'SVG non può ospitare `<ha-icon>`; il
+  livello SVG conserva solo i percorsi e le particelle.
+- **Dimensioni proporzionali alla potenza**, con l'*area* del disco
+  proporzionale al valore — è così che si legge un cerchio: raddoppiando la
+  potenza raddoppia l'inchiostro. Anche lo spessore dei collegamenti segue la
+  potenza.
+- **Percentuali rimosse.** La geometria dice già la proporzione; i numeri
+  percentuali erano rumore (ed erano sbagliati per via del bug sulle unità).
+- **I collegamenti si fermano al bordo dei dischi** invece di correre fino ai
+  centri, così una linea non attraversa mai l'etichetta del nodo che collega, e
+  la lettura dei nodi principali sta dentro il disco.
+
+### Novità: sezione Monitoraggio
+- **Cursore di prelievo** contro la potenza contrattuale, con soglia d'ambra
+  all'80% e stato rosso oltre il limite, margine residuo in chiaro e preset per
+  i contratti domestici italiani (3, 3.3, 4.5, 6, 10, 15 kW).
+- **Letture diagnostiche raggruppate** — tensioni, correnti, temperature dei
+  dispositivi, frequenza, fattore di potenza, batterie — trovate da sole in base
+  al `device_class`.
+- **Tolleranze reali, non inventate:** tensione contro EN 50160 (230 V ±10%,
+  cioè 207–253 V), frequenza 50 Hz ±1%, temperature oltre 70 °C in avviso e
+  oltre 85 °C in allarme, fattore di potenza sotto 0,90 segnalato perché
+  penalizzabile. Le letture fuori tolleranza salgono in cima al gruppo: su un
+  pannello diagnostico denso il punto è individuare la lettura sbagliata, non
+  leggerle tutte.
+- La composizione della Panoramica aggiunge la sezione e riusa il sensore di
+  rete già individuato per il flusso, senza richiederlo due volte.
+
+### Verifica
+- `tests/frontend.test.js`: 270 asserzioni (22 nuove su unità di misura e
+  monitoraggio, incluse le soglie normative e il caso kW/W osservato).
+- Verifica in Chromium con misura di raggi e spessori.
+
 ## [0.11.0] - 2026-08-22
 
 Configurazione guidata anche per la mappa 3D.

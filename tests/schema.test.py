@@ -113,3 +113,32 @@ assert devs[3]["parent"] is None, "tipo sbagliato -> nessun genitore"
 assert schema.normalize_dashboard(d) == d
 print("hierarchy schema: all tests passed")
 print("energyflow schema: all tests passed")
+
+# ---- monitor card ----------------------------------------------------------
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "m", "type": "monitor", "limit_w": "6000", "groups": ["voltage", 3, "current"],
+     "grid_entity": "", "max_per_group": "99"},
+    {"id": "m2", "type": "monitor", "limit_w": "boh"},
+    {"id": "s", "type": "sensor", "entity_id": "sensor.z"}]}]}]})
+it = {c["id"]: c for c in d["pages"][0]["sections"][0]["items"]}
+assert it["m"]["limit_w"] == 6000
+assert it["m"]["groups"] == ["voltage", "current"]
+assert it["m"]["grid_entity"] is None, "stringa vuota -> non collegato"
+assert it["m"]["max_per_group"] == 30, "clamp"
+assert it["m2"]["limit_w"] == 3300, "valore non numerico -> default"
+assert "limit_w" not in it["s"], "una card sensore non deve ereditare campi del monitoraggio"
+assert schema.normalize_dashboard(d) == d
+print("monitor schema: all tests passed")
+
+# ---- camera card -----------------------------------------------------------
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "c", "type": "camera", "cameras": ["camera.a", 5, "", "camera.b"], "refresh": "999"},
+    {"id": "c2", "type": "camera", "refresh": "boh"},
+    {"id": "s", "type": "sensor", "entity_id": "sensor.z"}]}]}]})
+it = {c["id"]: c for c in d["pages"][0]["sections"][0]["items"]}
+assert it["c"]["cameras"] == ["camera.a", "camera.b"]
+assert it["c"]["refresh"] == 120, "clamp"
+assert it["c2"]["refresh"] == 10, "default"
+assert "cameras" not in it["s"]
+assert schema.normalize_dashboard(d) == d
+print("camera schema: all tests passed")

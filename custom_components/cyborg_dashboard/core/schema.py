@@ -163,6 +163,26 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
     if result.get("type") == "notifications":
         result["show_updates"] = bool(result.get("show_updates", True))
+    if result.get("type") == "camera":
+        cams = result.get("cameras")
+        result["cameras"] = [c for c in cams if isinstance(c, str) and c] if isinstance(cams, list) else []
+        try:
+            result["refresh"] = max(5, min(120, int(result.get("refresh", 10))))
+        except (TypeError, ValueError):
+            result["refresh"] = 10
+    if result.get("type") == "monitor":
+        groups = result.get("groups")
+        result["groups"] = [g for g in groups if isinstance(g, str)] if isinstance(groups, list) else []
+        grid = result.get("grid_entity")
+        result["grid_entity"] = grid if isinstance(grid, str) and grid else None
+        try:
+            result["limit_w"] = max(500, min(100000, int(float(result.get("limit_w", 3300)))))
+        except (TypeError, ValueError):
+            result["limit_w"] = 3300
+        try:
+            result["max_per_group"] = max(3, min(30, int(result.get("max_per_group", 8))))
+        except (TypeError, ValueError):
+            result["max_per_group"] = 8
     if result.get("type") == "energyflow":
         flow = result.get("flow")
         flow = dict(flow) if isinstance(flow, dict) else {}

@@ -47,6 +47,17 @@ const states={
  "sensor.lavatrice_potenza":S("820",{friendly_name:"Lavatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.asciugatrice_potenza2":S("310",{friendly_name:"Asciugatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.nas_potenza":S("64",{friendly_name:"NAS & Modem",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.casa_kw":S("1.27",{friendly_name:"Consumo Casa",device_class:"power",unit_of_measurement:"kW"}),
+ "sensor.v_l1":S("231.4",{friendly_name:"Tensione L1",device_class:"voltage",unit_of_measurement:"V"}),
+ "sensor.v_l2":S("256.2",{friendly_name:"Tensione L2",device_class:"voltage",unit_of_measurement:"V"}),
+ "sensor.v_l3":S("229.8",{friendly_name:"Tensione L3",device_class:"voltage",unit_of_measurement:"V"}),
+ "sensor.i_l1":S("4.85",{friendly_name:"Corrente L1",device_class:"current",unit_of_measurement:"A"}),
+ "sensor.i_l2":S("2.14",{friendly_name:"Corrente L2",device_class:"current",unit_of_measurement:"A"}),
+ "sensor.t_cpu":S("52.1",{friendly_name:"Raspberry CPU",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.t_inv":S("91.3",{friendly_name:"Inverter",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.t_batt":S("34.6",{friendly_name:"Pacco batteria",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.freq":S("50.01",{friendly_name:"Frequenza rete",device_class:"frequency",unit_of_measurement:"Hz"}),
+ "sensor.cosphi":S("0.82",{friendly_name:"Fattore di potenza",device_class:"power_factor",unit_of_measurement:""}),
  "weather.casa_oscar":S("sunny",{friendly_name:"Casa Oscar",temperature:26.4,temperature_unit:"°C",wind_speed:4.1,wind_speed_unit:"km/h",wind_bearing:142,pressure:1014,pressure_unit:"hPa",supported_features:3}),
  "person.oscar":S("home",{friendly_name:"Oscar"}),
  "person.lilly":S("not_home",{friendly_name:"Lilly Bonny"}),
@@ -128,6 +139,9 @@ window.__mount=(dash,opts)=>{
                        {entity:"sensor.asciugatrice_potenza2",name:"Asciugatrice"},
                        {entity:"sensor.nas_potenza",name:"NAS & Modem"}]}});
           if(opts.selectFlow){el._selected={kind:"card",sectionId:sec.id,itemId:"flowcard"};}
+          if(opts.openTree){el._flowOpen={flowcard:true};}
+          if(opts.monitor){sec.items.push({id:"moncard",type:"monitor",entity_id:"",name:"",size:"lg",
+            appearance:{},states:{},actions:{},grid_entity:"sensor.rete_potenza",limit_w:3300,groups:[],max_per_group:8});}
         }
         if(opts&&opts.view){Object.assign(el._page().view,opts.view);}
         if(opts&&opts.selectRoom&&el._rooms().length){el._selected={kind:"room",roomId:el._rooms()[0].id};}

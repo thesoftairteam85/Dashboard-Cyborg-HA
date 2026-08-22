@@ -402,11 +402,16 @@ const flowCard = { id: "f", type: "energyflow", entity_id: "", name: "", size: "
           devices: [{ entity: "sensor.lav", name: "Lavatrice" }] } };
 const fsec = { id: "s", title: "Energia", icon: "mdi:flash", accent: "#ffd166", items: [flowCard] };
 const fhtml = el._renderCard(flowCard, fsec);
-ok("4 nodi disegnati", (fhtml.match(/class="ef-node"/g) || []).length === 4);
+ok("4 nodi disegnati", (fhtml.match(/class="ef-n /g) || []).length === 4, String((fhtml.match(/class="ef-n /g) || []).length));
+ok("i nodi hanno icone vere (traliccio, casa)", fhtml.includes("mdi:transmission-tower") && fhtml.includes('icon="mdi:home"'));
+ok("dimensione dei nodi proporzionale alla potenza", (() => {
+  const rs = [...fhtml.matchAll(/--r:(\d+)px/g)].map(m => +m[1]);
+  return rs.length === 4 && new Set(rs).size > 1;
+})(), fhtml.match(/--r:\d+px/g) + "");
 ok("3 percorsi attivi", (fhtml.match(/class="ef-path active"/g) || []).length === 3);
 ok("particelle animate", fhtml.includes("animateMotion") && fhtml.includes("<mpath"));
-ok("immissione etichettata", fhtml.includes("IMMISSIONE"));
-ok("batteria in carica etichettata", fhtml.includes("IN CARICA"));
+ok("immissione etichettata", fhtml.includes("immissione"));
+ok("batteria in carica etichettata", fhtml.includes("in carica"));
 ok("carico elencato con quota", fhtml.includes("ef-dev-bar") && fhtml.includes("Lavatrice"));
 ok("nessun tap sull'intero diagramma", !fhtml.includes("data-tap"));
 ok("flow: nessun undefined", !/>undefined</.test(fhtml) && !fhtml.includes("[object"));
@@ -425,6 +430,28 @@ ok("editor flusso: rilevamento automatico", el.innerHTML.includes("data-detect-f
 ok("editor flusso: inverti segno", el.innerHTML.includes("data-flow-invert"));
 ok("editor flusso: nessun picker entita singola", !el.innerHTML.includes("ENTIT\u00c0 SELEZIONATA"));
 el._editing = false; el._selected = null;
+
+console.log("\n== 11a. UNITA DI MISURA ==");
+ok("W restano W", powerWatts(S("246", { unit_of_measurement: "W" })) === 246);
+ok("kW convertiti in W", powerWatts(S("0.2", { unit_of_measurement: "kW" })) === 200);
+ok("kW maiuscolo/minuscolo", powerWatts(S("1.5", { unit_of_measurement: "kw" })) === 1500);
+ok("MW convertiti", powerWatts(S("1", { unit_of_measurement: "MW" })) === 1e6);
+ok("senza unita si assume W", powerWatts(S("42", {})) === 42);
+ok("unita sconosciuta non moltiplica", powerWatts(S("7", { unit_of_measurement: "pippo" })) === 7);
+ok("stato non numerico -> null", powerWatts(S("unavailable", { unit_of_measurement: "kW" })) === null);
+ok("entita assente -> null", powerWatts(null) === null);
+
+// the exact failure from the field: house in kW, loads in W
+states["sensor.casa_kw"] = S("0.2", { friendly_name: "Casa", device_class: "power", unit_of_measurement: "kW" });
+states["sensor.lav_w"]   = S("246", { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
+states["sensor.fri_w"]   = S("24.8", { friendly_name: "Friggitrice", device_class: "power", unit_of_measurement: "W" });
+const mixed = { home: "sensor.casa_kw", devices: [
+  { entity: "sensor.lav_w", name: "Lavatrice" }, { entity: "sensor.fri_w", name: "Friggitrice" }] };
+const mv = el._flowValues(mixed);
+ok("casa in kW letta come 200 W, non 0.2", mv.home === 200, String(mv.home));
+const ml = el._flowLoads(mixed, mv.home);
+ok("carichi in W sommati correttamente", Math.round(ml.reduce((t, l) => t + l.watts, 0)) === 271, JSON.stringify(ml.map(l => l.watts)));
+ok("nessun nodo 'non misurato' se i carichi superano la casa", !ml.some(l => l.other));
 
 console.log("\n== 11b. SOTTO-ALBERO DEI CARICHI ==");
 states["sensor.lav"]  = S("820", { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
@@ -454,16 +481,23 @@ el._flowOpen = {};
 let treeClosed = el._renderCard(treeCard, tsec);
 ok("chiuso: nessuna foglia", !treeClosed.includes("ef-leaf"));
 ok("chiuso: elenco piatto visibile", treeClosed.includes("ef-dev-bar"));
-ok("chiuso: invito con il numero di carichi", treeClosed.includes("4 CARICHI"), "atteso 4 (3 attivi + non misurato)");
+ok("chiuso: invito con il numero di carichi", treeClosed.includes("4 carichi"), "atteso 4 (3 attivi + non misurato)");
 ok("chiuso: nodo casa cliccabile", treeClosed.includes('data-flow-toggle="tree"'));
 
 el._flowOpen.tree = true;
 const treeOpened = el._renderCard(treeCard, tsec);
-ok("aperto: una foglia per carico", (treeOpened.match(/class="ef-leaf ["a-z]/g) || []).length === 4, String((treeOpened.match(/class="ef-leaf ["a-z]/g) || []).length));
-ok("aperto: nodo non misurato tratteggiato", treeOpened.includes('class="ef-leaf other"'));
-ok("aperto: quote percentuali", treeOpened.includes("65%") && treeOpened.includes("24%"));
+ok("aperto: una foglia per carico", (treeOpened.match(/class="ef-n leaf/g) || []).length === 4, String((treeOpened.match(/class="ef-n leaf/g) || []).length));
+ok("aperto: nodo non misurato distinto", treeOpened.includes("ef-n leaf other"));
+ok("aperto: nessuna percentuale (la dimensione dice la proporzione)", !/\d+%<\/span>/.test(treeOpened) && !treeOpened.includes("ef-leaf-share"));
+ok("aperto: la foglia piu' grossa ha il raggio maggiore", (() => {
+  const blocks = treeOpened.split('class="ef-n leaf').slice(1);
+  const lav = blocks.find(b => b.includes("Lavatrice")), nas = blocks.find(b => b.includes("NAS"));
+  const r = (b) => +(/--r:(\d+)px/.exec(b) || [])[1];
+  return lav && nas && r(lav) > r(nas);
+})());
 ok("aperto: elenco piatto nascosto (niente doppioni)", !treeOpened.includes("ef-dev-bar"));
 ok("aperto: viewBox esteso", /viewBox="0 0 600 566"/.test(treeOpened), (treeOpened.match(/viewBox="[^"]+"/) || [])[0]);
+ok("aperto: proporzioni bloccate sullo stage", treeOpened.includes("aspect-ratio:600/566"));
 ok("aperto: le foglie reali sono cliccabili", treeOpened.includes('data-fp-badge="sensor.lav"'));
 ok("aperto: il nodo non misurato non e' cliccabile", !/ef-leaf other[^>]*data-fp-badge/.test(treeOpened));
 ok("aperto: nessun undefined", !/>undefined</.test(treeOpened) && !treeOpened.includes("[object"));
@@ -506,9 +540,14 @@ const hCard = { id: "h", type: "energyflow", entity_id: "", appearance: {}, stat
 const hSec = { id: "hs", title: "E", icon: "mdi:flash", accent: "#ffd166", items: [hCard] };
 el._flowOpen = { h: true };
 const hHtml = el._renderCard(hCard, hSec);
-ok("albero a due livelli renderizzato", (hHtml.match(/class="ef-leaf child/g) || []).length === 2);
-ok("viewBox esteso per il secondo livello", /viewBox="0 0 600 696"/.test(hHtml), (hHtml.match(/viewBox="[^"]+"/) || [])[0]);
-ok("quota del figlio calcolata sul genitore (600/1000)", hHtml.includes("60%"));
+ok("albero a due livelli renderizzato", (hHtml.match(/class="ef-n leaf child/g) || []).length === 2, String((hHtml.match(/class="ef-n leaf child/g) || []).length));
+ok("viewBox esteso per il secondo livello", /viewBox="0 0 600 706"/.test(hHtml), (hHtml.match(/viewBox="[^"]+"/) || [])[0]);
+ok("il figlio maggiore e' disegnato piu' grande", (() => {
+  const b = hHtml.split('class="ef-n leaf child').slice(1);
+  const r = (x) => +(/--r:(\d+)px/.exec(x) || [])[1];
+  const forno = b.find(x => x.includes("Forno")), piano = b.find(x => x.includes("Piano"));
+  return forno && piano && r(forno) > r(piano);
+})());
 el._flowOpen = {};
 
 // wizard
@@ -537,6 +576,128 @@ ok("wizard gerarchia elenca i carichi scelti", el.innerHTML.includes("Quadro cuc
 ok("wizard ultimo passo mostra FINE", el.innerHTML.includes("FINE"));
 el._wizard = null; el._editing = false; el._selected = null;
 
+console.log("\n== 11d. MONITORAGGIO ==");
+states["sensor.v1"] = S("231.4", { friendly_name: "Tensione L1", device_class: "voltage", unit_of_measurement: "V" });
+states["sensor.v2"] = S("256.0", { friendly_name: "Tensione L2", device_class: "voltage", unit_of_measurement: "V" });
+states["sensor.i1"] = S("4.85",  { friendly_name: "Corrente L1", device_class: "current", unit_of_measurement: "A" });
+states["sensor.t1"] = S("52.1",  { friendly_name: "CPU", device_class: "temperature", unit_of_measurement: "\u00b0C" });
+states["sensor.t2"] = S("91.0",  { friendly_name: "Inverter", device_class: "temperature", unit_of_measurement: "\u00b0C" });
+states["sensor.hz"] = S("50.01", { friendly_name: "Frequenza", device_class: "frequency", unit_of_measurement: "Hz" });
+states["sensor.pf"] = S("0.82",  { friendly_name: "Cos phi", device_class: "power_factor", unit_of_measurement: "" });
+states["sensor.gridw"] = S("2.7", { friendly_name: "Rete", device_class: "power", unit_of_measurement: "kW" });
+
+const monCard = { id: "mon", type: "monitor", entity_id: "", appearance: {}, states: {}, actions: {},
+  grid_entity: "sensor.gridw", limit_w: 3300, groups: [], max_per_group: 8 };
+const monSec = { id: "ms", title: "Monitoraggio", icon: "mdi:gauge-full", accent: "#8ecae6", items: [monCard] };
+const mh = el._renderCard(monCard, monSec);
+
+ok("gauge disegnato", mh.includes("mg-svg") && mh.includes("mg-arc"));
+ok("gauge legge il sensore in kW come 2.7 kW", mh.includes("2.70") || mh.includes("2.7"), "");
+ok("gauge in zona ambra sopra l'80%", mh.includes('class="mg warn"'), (mh.match(/class="mg [a-z]+"/) || [])[0]);
+ok("gauge mostra il margine residuo", mh.includes("margine"));
+ok("tensione fuori EN 50160 segnalata", /mon-row warn[^>]*>[^<]*<span class="mon-name">Tensione L2/.test(mh.replace(/\s+/g, " ")) || mh.includes("mon-row warn"));
+ok("temperatura oltre 85 in allarme", mh.includes("mon-row alarm"));
+ok("frequenza in tolleranza non segnalata", (() => {
+  const b = mh.split('class="mon-row').find(x => x.includes("Frequenza"));
+  return b && !b.startsWith(" warn") && !b.startsWith(" alarm");
+})());
+ok("cos phi sotto 0.90 segnalato", (() => {
+  const b = mh.split('class="mon-row').find(x => x.includes("Cos phi"));
+  return b && b.startsWith(" warn");
+})());
+ok("le anomalie salgono in cima al gruppo", mh.indexOf("Tensione L2") < mh.indexOf("Tensione L1"));
+ok("conteggio anomalie riportato", mh.includes("fuori tolleranza"));
+ok("riferimento normativo mostrato", mh.includes("EN 50160"));
+ok("ogni lettura apre i dettagli", mh.includes("data-more-info"));
+ok("monitor: nessun undefined", !/>undefined</.test(mh) && !mh.includes("[object"));
+ok("monitor: div bilanciati", (mh.match(/<div/g) || []).length === (mh.match(/<\/div>/g) || []).length);
+
+monCard.groups = ["voltage"];
+const only = el._renderCard(monCard, monSec);
+ok("filtro gruppi rispettato", only.includes("Tensioni") && !only.includes("Temperature"));
+monCard.groups = [];
+monCard.grid_entity = null;
+ok("senza sensore rete il gauge lo dice", el._renderCard(monCard, monSec).includes("non collegato"));
+monCard.grid_entity = "sensor.gridw";
+
+// over the contractual limit
+states["sensor.gridw"] = S("3.9", { friendly_name: "Rete", device_class: "power", unit_of_measurement: "kW" });
+ok("oltre il limite: stato rosso", el._renderCard(monCard, monSec).includes('class="mg over"'));
+ok("oltre il limite: messaggio esplicito", el._renderCard(monCard, monSec).includes("oltre il limite"));
+states["sensor.gridw"] = S("2.7", { friendly_name: "Rete", device_class: "power", unit_of_measurement: "kW" });
+
+el._editing = true;
+el._dashboard.pages[0].sections = [monSec];
+el._selected = { kind: "card", sectionId: "ms", itemId: "mon" };
+el.render();
+ok("editor monitoraggio: preset di potenza", el.innerHTML.includes("data-limit-preset"));
+ok("editor monitoraggio: gruppi", el.innerHTML.includes("data-monitor-group"));
+ok("editor monitoraggio: scelta sensore rete", el.innerHTML.includes('data-prop="grid_entity"'));
+el._editing = false; el._selected = null;
+
+console.log("\n== 11e. VIDEOCAMERE E DETTAGLIO METEO ==");
+states["camera.salotto"] = S("idle", { friendly_name: "Salotto", access_token: "tok123" });
+states["camera.soppalco"] = S("idle", { friendly_name: "Soppalco",
+  entity_picture: "/api/camera_proxy/camera.soppalco?token=abc" });
+states["camera.rotta"] = S("unavailable", { friendly_name: "Guasta" });
+states["sun.sun"] = S("above_horizon", { next_rising: "2026-08-23T06:34:00+02:00", next_setting: "2026-08-22T20:12:00+02:00" });
+
+ok("still da access_token", cameraStill("camera.salotto", states["camera.salotto"]) === "/api/camera_proxy/camera.salotto?token=tok123",
+   cameraStill("camera.salotto", states["camera.salotto"]));
+ok("entity_picture ha precedenza", cameraStill("camera.soppalco", states["camera.soppalco"]).includes("token=abc"));
+ok("stream MJPEG dall'endpoint verificato", cameraStream("camera.salotto", states["camera.salotto"]) === "/api/camera_proxy_stream/camera.salotto?token=tok123");
+ok("camera senza token -> nessuno stream", cameraStream("camera.rotta", states["camera.rotta"]) === null);
+
+const camCard = { id: "cam", type: "camera", entity_id: "", appearance: {}, states: {}, actions: {}, refresh: 10 };
+const camSec = { id: "cs", title: "Sicurezza", icon: "mdi:shield-home", accent: "#ff3d71", items: [camCard] };
+const ch = el._renderCard(camCard, camSec);
+const camCount = Object.keys(states).filter(x => x.startsWith("camera.")).length;
+ok("una anteprima per camera", (ch.match(/data-cam-open=/g) || []).length === camCount, String(camCount));
+ok("le anteprime sono fermi immagine, non stream", ch.includes("camera_proxy/") && !ch.includes("camera_proxy_stream"));
+ok("camera non disponibile disabilitata", ch.includes("disabled") && ch.includes("cam-off"));
+ok("cache-buster condiviso", (ch.match(/_t=\d+/g) || []).length >= 2);
+camCard.cameras = ["camera.salotto"];
+ok("selezione camere rispettata", (el._renderCard(camCard, camSec).match(/data-cam-open=/g) || []).length === 1);
+camCard.cameras = [];
+
+el._overlay = { kind: "camera", entity: "camera.salotto" };
+el.render();
+ok("overlay camera: stream live", el.innerHTML.includes("camera_proxy_stream/camera.salotto"));
+ok("overlay camera: indicatore diretta", el.innerHTML.includes("diretta"));
+el._overlay = null;
+
+// weather detail
+states["weather.casa_oscar"] = S("sunny", { friendly_name: "Casa Oscar", temperature: 26.4,
+  temperature_unit: "\u00b0C", humidity: 47, pressure: 1014, wind_speed: 4.1, wind_bearing: 142,
+  supported_features: 3 });
+el._forecast = { "weather.casa_oscar": [
+  { datetime: "2026-08-22T12:00:00+02:00", condition: "sunny", temperature: 29, templow: 19 },
+  { datetime: "2026-08-23T12:00:00+02:00", condition: "rainy", temperature: 24, templow: 18, precipitation: 6 }] };
+el._hourly = { "weather.casa_oscar": [
+  { datetime: "2026-08-22T16:00:00+02:00", condition: "sunny", temperature: 28, precipitation_probability: 5 },
+  { datetime: "2026-08-22T17:00:00+02:00", condition: "cloudy", temperature: 27, precipitation_probability: 20 },
+  { datetime: "2026-08-22T18:00:00+02:00", condition: "rainy", temperature: 25, precipitation_probability: 70 }] };
+el._overlay = { kind: "weather", entity: "weather.casa_oscar" };
+el.render();
+const wd = el.innerHTML;
+ok("dettaglio meteo: temperatura grande", wd.includes("wxd-temp") && wd.includes("26"));
+ok("dettaglio meteo: condizione tradotta", wd.includes("Soleggiato"));
+ok("dettaglio meteo: prossime ore", wd.includes("Prossime ore") && (wd.match(/wxd-hour"/g) || []).length === 3);
+ok("dettaglio meteo: probabilita di pioggia", wd.includes("70%"));
+ok("dettaglio meteo: prossimi giorni", wd.includes("Prossimi giorni"));
+ok("dettaglio meteo: precipitazione giornaliera", wd.includes("6 mm"));
+ok("dettaglio meteo: grafico orario", wd.includes("spark-line"));
+ok("dettaglio meteo: alba e tramonto", wd.includes("Alba") && wd.includes("Tramonto")
+   && (wd.match(/>\d{2}:\d{2}</g) || []).length >= 2, "orari formattati nel fuso del browser");
+ok("dettaglio meteo: rosa dei venti", wd.includes("SE") && wd.includes("142"));
+ok("dettaglio meteo: umidita e pressione", wd.includes("47%") && wd.includes("1014"));
+ok("dettaglio meteo: nessun undefined", !/>undefined</.test(wd));
+ok("dettaglio meteo: div bilanciati", (wd.match(/<div/g) || []).length === (wd.match(/<\/div>/g) || []).length);
+el._overlay = null;
+
+const wCard = { id: "w", type: "weather", entity_id: "weather.casa_oscar", appearance: {}, states: {}, actions: {} };
+ok("la card meteo e' cliccabile", el._renderCard(wCard, camSec).includes("data-weather-open"));
+
 console.log("\n== 12. LEGGIBILITA STATI ==");
 ok("porta on -> Aperta", stateWords("on", "door") === "Aperta");
 ok("porta off -> Chiusa", stateWords("off", "door") === "Chiusa");
@@ -564,7 +725,8 @@ el._hass.connection = { subscribeMessage: () => Promise.resolve(() => {}) };
 
 el._composeOverview();
 const osec = el._sections();
-ok("panoramica: due sezioni", osec.length === 2, String(osec.length));
+ok("panoramica: tre sezioni", osec.length === 3, String(osec.length));
+ok("panoramica include il monitoraggio", osec[2].items[0].type === "monitor");
 const types = osec[0].items.map(i => i.type);
 ok("meteo presente", types.includes("weather"));
 ok("presenze presenti", types.includes("people"));
