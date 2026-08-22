@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 4 and len(d["pages"][0]["sections"]) == 6
+assert d["version"] == 4 and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -26,8 +26,10 @@ print("schema: all tests passed")
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
 assert d["version"] == 4
-assert [p["type"] for p in d["pages"]] == ["sections", "floorplan"]
-assert d["pages"][1]["view"]["pitch"] == 56 and d["pages"][1]["rooms"] == []
+assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
+assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
+assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
+assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 
 # a v3 page (no "type") must become a sections page and keep its cards
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
@@ -76,4 +78,23 @@ assert f["devices"][0] == {"entity": "sensor.a", "name": "A", "icon": ""}
 assert all(x["entity"] for x in f["devices"])
 assert "flow" not in d["pages"][0]["sections"][0]["items"][1], "non-flow card must not gain a flow key"
 assert schema.normalize_dashboard(d) == d, "energyflow normalize must be idempotent"
+
+# ---- composite overview cards ---------------------------------------------
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "a", "type": "active", "domains": ["light", 5, None, "switch"], "max": "99"},
+    {"id": "b", "type": "active", "max": "boh"},
+    {"id": "p", "type": "people", "people": ["person.x", 7, ""]},
+    {"id": "n", "type": "notifications"},
+    {"id": "n2", "type": "notifications", "show_updates": 0},
+    {"id": "s", "type": "sensor", "entity_id": "sensor.z"}]}]}]})
+it = {c["id"]: c for c in d["pages"][0]["sections"][0]["items"]}
+assert it["a"]["domains"] == ["light", "switch"], it["a"]["domains"]
+assert it["a"]["max"] == 30, it["a"]["max"]          # clamped
+assert it["b"]["max"] == 8                            # bad -> default
+assert it["p"]["people"] == ["person.x"]
+assert it["n"]["show_updates"] is True
+assert it["n2"]["show_updates"] is False
+assert "domains" not in it["s"] and "people" not in it["s"], "una card sensore non deve ereditare campi compositi"
+assert schema.normalize_dashboard(d) == d, "composite normalize must be idempotent"
+print("composite schema: all tests passed")
 print("energyflow schema: all tests passed")

@@ -4,6 +4,56 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.8.0] - 2026-08-22
+
+Pagina Panoramica: meteo, presenze, notifiche, dispositivi accesi e flusso
+energetico in una schermata sola.
+
+### Novità
+- **Quattro nuovi tipi di card**, non una schermata speciale. Meteo, Attivi
+  ora, Notifiche e Presenze sono card normali rese dallo stesso motore a
+  sezioni di tutto il resto, quindi si possono mettere in qualsiasi sezione
+  invece di restare prigioniere di una pagina "overview".
+- **Meteo** con condizioni correnti tradotte, temperatura, vento, pressione e
+  striscia delle previsioni a 5 giorni. Le previsioni arrivano da
+  `weather/subscribe_forecast`, sottoscritto solo se l'entità dichiara di
+  supportarle (bit 1 di `supported_features`): chiederle a un'entità che non
+  le espone restituisce un errore.
+- **Attivi ora**: tutto ciò che sta funzionando davvero, ordinato dal cambio
+  di stato più recente, con un tocco per spegnere. Un clima acceso, una
+  tapparella aperta e una luce accesa sono tutti "attivi": quali domini
+  contano è configurabile, perché la risposta cambia da casa a casa.
+- **Notifiche** persistenti di Home Assistant in tempo reale, più il conteggio
+  degli aggiornamenti disponibili.
+- **Presenze**: chi è in casa, con foto quando c'è.
+- **"COMPONI PANORAMICA"** costruisce la pagina in un click e collega solo le
+  card che hanno qualcosa dietro: una tile meteo vuota o una card presenze
+  senza persone configurate è peggio di nessuna card.
+- La dashboard nuova parte con tre pagine: Panoramica, Cyborg, Mappa 3D.
+
+### Correzioni
+- **Le card corte venivano stirate** all'altezza della più alta della riga:
+  una card di stato finiva con il badge in fondo e mezzo riquadro vuoto. Ora
+  ogni card ha la sua altezza naturale (l'esempio dell'allarme: da 362 a 98 px).
+- **Stati in italiano ovunque.** `DISARMED` diceva così; ora dice "Disarmato".
+  Idem `PLAYING` -> "In riproduzione", `HEAT COOL` -> "Automatico", `DRY` ->
+  "Deumidifica", `OPEN` -> "Aperto". Il vocabolario per device class resta
+  prioritario: un sensore porta a "on" dice "Aperta", non "Acceso".
+
+### Note tecniche
+- Le sottoscrizioni WebSocket sono gestite da un piccolo registro con chiave e
+  chiuse in `disconnectedCallback`. Sottoscrivere dentro un render aprirebbe
+  uno stream a ogni ridisegno e li perderebbe tutti; senza la chiusura il
+  pannello continuerebbe a ricevere previsioni su un elemento ormai staccato.
+
+### Verifica
+- `tests/frontend.test.js`: 169 asserzioni (30 nuove su panoramica e
+  vocabolario degli stati, inclusa la verifica che una sottoscrizione venga
+  aperta una sola volta e che le card composite non risultino "non
+  configurate").
+- `tests/visual/`: rendering reale in Chromium, altezze delle card misurate,
+  zero errori di console.
+
 ## [0.7.0] - 2026-08-22
 
 Rifinitura della dashboard a sezioni e nuova card Flusso energetico.

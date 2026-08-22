@@ -350,11 +350,91 @@ console.log("\n== 12. LEGGIBILITA STATI ==");
 ok("porta on -> Aperta", stateWords("on", "door") === "Aperta");
 ok("porta off -> Chiusa", stateWords("off", "door") === "Chiusa");
 ok("movimento on", stateWords("on", "motion") === "Movimento");
-ok("senza device_class resta lo stato", stateWords("heat_cool", null) === "heat cool");
+ok("vocabolario generico: heat_cool -> Automatico", stateWords("heat_cool", null) === "Automatico");
+ok("vocabolario generico: disarmed -> Disarmato", stateWords("disarmed", null) === "Disarmato");
+ok("vocabolario generico: playing -> In riproduzione", stateWords("playing", null) === "In riproduzione");
+ok("device_class batte il vocabolario (porta on != Acceso)", stateWords("on", "door") === "Aperta" && stateWords("on", null) === "Acceso");
+ok("stato sconosciuto resta leggibile", stateWords("qualcosa_di_strano", null) === "qualcosa di strano");
 ok("descrittore non ripete il valore", cardDescriptor("sensor.pv", states["sensor.pv"]) === "Potenza");
 ok("descrittore per dominio senza device_class", cardDescriptor("light.x", { attributes: {} }) === "Luce");
 const dupe = el._renderCard({ id: "d", type: "sensor", entity_id: "sensor.pv", appearance: {}, states: {}, actions: {} }, fsec);
 ok("card sensore non stampa il valore due volte", (dupe.match(/2840/g) || []).length === 1, String((dupe.match(/2840/g) || []).length));
+
+console.log("\n== 13. PANORAMICA ==");
+el._pageIndex = 0; el._editing = false; el._selected = null;
+el._dashboard.pages = [{ id: "overview", type: "sections", title: "Panoramica", icon: "mdi:x", sections: [] }];
+states["weather.casa_oscar"] = S("sunny", { friendly_name: "Casa Oscar", temperature: 26.4, temperature_unit: "\u00b0C", wind_speed: 4.1, supported_features: 3 });
+states["person.oscar"] = S("home", { friendly_name: "Oscar" });
+states["person.lilly"] = S("not_home", { friendly_name: "Lilly" });
+states["update.u1"] = S("on", { friendly_name: "Aggiornamento 1" });
+states["media_player.tv"] = S("playing", { friendly_name: "TV" });
+states["cover.tap"] = S("open", { friendly_name: "Tapparella" });
+el._hass.connection = { subscribeMessage: () => Promise.resolve(() => {}) };
+
+el._composeOverview();
+const osec = el._sections();
+ok("panoramica: due sezioni", osec.length === 2, String(osec.length));
+const types = osec[0].items.map(i => i.type);
+ok("meteo presente", types.includes("weather"));
+ok("presenze presenti", types.includes("people"));
+ok("notifiche presenti", types.includes("notifications"));
+ok("attivi presenti", types.includes("active"));
+ok("flusso energetico in sezione Energia", osec[1].items[0].type === "energyflow");
+ok("meteo collegato a un'entita reale", osec[0].items.find(i => i.type === "weather").entity_id === "weather.casa_oscar");
+
+const wsec = osec[0];
+const wcard = wsec.items.find(i => i.type === "weather");
+const whtml = el._renderCard(wcard, wsec);
+ok("meteo: condizione tradotta", whtml.includes("Soleggiato"));
+ok("meteo: temperatura mostrata", whtml.includes("26"));
+ok("meteo: nessun undefined", !/>undefined</.test(whtml));
+
+const acard = wsec.items.find(i => i.type === "active");
+const ahtml = el._renderCard(acard, wsec);
+ok("attivi: conta i dispositivi accesi", /class="act-count"/.test(ahtml));
+ok("attivi: media player in riproduzione incluso", ahtml.includes("TV"));
+ok("attivi: tapparella aperta inclusa", ahtml.includes("Tapparella"));
+ok("attivi: automation NON considerata attiva", !ahtml.includes("Esco di casa"));
+ok("attivi: ogni riga e cliccabile", ahtml.includes("data-toggle-entity"));
+acard.domains = ["light"];
+const aLight = el._renderCard(acard, wsec);
+ok("attivi: filtro per dominio rispettato", !aLight.includes("TV") && !aLight.includes("Tapparella"));
+acard.domains = [];
+
+const pcard = wsec.items.find(i => i.type === "people");
+const phtml = el._renderCard(pcard, wsec);
+ok("presenze: chi e in casa evidenziato", (phtml.match(/ppl-row home/g) || []).length === 1);
+ok("presenze: stato tradotto", phtml.includes("In casa") && phtml.includes("Fuori"));
+
+const ncard = wsec.items.find(i => i.type === "notifications");
+const nhtml = el._renderCard(ncard, wsec);
+ok("notifiche: aggiornamenti pendenti contati", nhtml.includes("1 aggiornamento disponibile"));
+ncard.show_updates = false;
+ok("notifiche: aggiornamenti disattivabili", !el._renderCard(ncard, wsec).includes("aggiornamento disponibile"));
+ncard.show_updates = true;
+
+ok("card composite non hanno data-tap", !ahtml.includes("data-tap") && !phtml.includes("data-tap") && !nhtml.includes("data-tap"));
+ok("card composite non sono marcate come non configurate", !ahtml.includes("missing") && !nhtml.includes("missing"));
+ok("panoramica: div bilanciati", [whtml, ahtml, phtml, nhtml].every(h =>
+  (h.match(/<div/g) || []).length === (h.match(/<\/div>/g) || []).length));
+
+el._editing = true;
+el._selected = { kind: "card", sectionId: wsec.id, itemId: acard.id };
+el.render();
+ok("editor attivi: chip dei domini", el.innerHTML.includes("data-active-domain"));
+el._selected = { kind: "card", sectionId: wsec.id, itemId: pcard.id };
+el.render();
+ok("editor presenze: selezione persone", el.innerHTML.includes("data-person"));
+el._editing = false; el._selected = null;
+
+// subscriptions must be opened once and closed on teardown
+let opened = 0, closed = 0;
+el._subs = {};
+el._hass.connection = { subscribeMessage: () => { opened++; return Promise.resolve(() => { closed++; }); } };
+el._subscribe("k", { type: "x" }, () => {});
+el._subscribe("k", { type: "x" }, () => {});
+ok("sottoscrizione aperta una sola volta", opened === 1, String(opened));
+setTimeout(() => {}, 0);
 
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");

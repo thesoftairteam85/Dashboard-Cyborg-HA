@@ -263,6 +263,49 @@ function cardDescriptor(entityId, st) {
   return DOMAIN_LABELS[d] || d.replace(/_/g, " ");
 }
 
+/* ==========================================================================
+ * OVERVIEW CARDS
+ * Weather, live device activity, notifications and presence. All four are
+ * ordinary card types rendered by the same sections engine as everything else,
+ * so they can be dropped into any section rather than being locked inside a
+ * special "overview" screen.
+ * ======================================================================== */
+
+const WEATHER_CONDITIONS = {
+  "clear-night":   ["mdi:weather-night", "Sereno"],
+  cloudy:          ["mdi:weather-cloudy", "Nuvoloso"],
+  exceptional:     ["mdi:alert-circle-outline", "Eccezionale"],
+  fog:             ["mdi:weather-fog", "Nebbia"],
+  hail:            ["mdi:weather-hail", "Grandine"],
+  lightning:       ["mdi:weather-lightning", "Temporale"],
+  "lightning-rainy": ["mdi:weather-lightning-rainy", "Temporale e pioggia"],
+  partlycloudy:    ["mdi:weather-partly-cloudy", "Parzialmente nuvoloso"],
+  pouring:         ["mdi:weather-pouring", "Pioggia intensa"],
+  rainy:           ["mdi:weather-rainy", "Pioggia"],
+  snowy:           ["mdi:weather-snowy", "Neve"],
+  "snowy-rainy":   ["mdi:weather-snowy-rainy", "Nevischio"],
+  sunny:           ["mdi:weather-sunny", "Soleggiato"],
+  windy:           ["mdi:weather-windy", "Ventoso"],
+  "windy-variant": ["mdi:weather-windy-variant", "Ventoso"],
+};
+
+const WEEKDAYS = ["Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"];
+
+/** Domains that can meaningfully be "running", and how to read that. */
+const ACTIVE_DOMAINS = {
+  light: (st) => st.state === "on",
+  switch: (st) => st.state === "on",
+  fan: (st) => st.state === "on",
+  input_boolean: (st) => st.state === "on",
+  siren: (st) => st.state === "on",
+  media_player: (st) => ["playing", "on", "paused"].includes(st.state),
+  climate: (st) => st.state !== "off" && st.state !== "unavailable",
+  cover: (st) => st.state === "open",
+  vacuum: (st) => ["cleaning", "returning"].includes(st.state),
+  water_heater: (st) => st.state !== "off",
+  humidifier: (st) => st.state === "on",
+};
+
 const SIZE_SPAN = { sm: 3, md: 4, lg: 6, xl: 12 };
 const SIZE_LABEL = { sm: "Piccola", md: "Media", lg: "Grande", xl: "Piena larghezza" };
 
@@ -301,7 +344,21 @@ const CARD_TYPES = [
   ["gauge", "Gauge — indicatore percentuale"],
   ["chart", "Grafico — andamento 24h"],
   ["energyflow", "Flusso energetico — schema animato"],
+  ["weather", "Meteo — condizioni e previsioni"],
+  ["active", "Attivi ora — cosa è acceso"],
+  ["notifications", "Notifiche — avvisi e aggiornamenti"],
+  ["people", "Presenze — chi è in casa"],
 ];
+
+/** Card types that stand on their own instead of displaying one entity. */
+const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people"]);
+
+const COMPOSITE_META = {
+  energyflow:    ["Flusso energetico", "Potenza in tempo reale", "mdi:transit-connection-variant", "lg"],
+  active:        ["Attivi ora", "Dispositivi accesi", "mdi:flash-alert-outline", "md"],
+  notifications: ["Notifiche", "Avvisi di sistema", "mdi:bell-outline", "md"],
+  people:        ["Presenze", "Chi è in casa", "mdi:account-group", "sm"],
+};
 
 const BINARY_WORDS = {
   door: ["Aperta", "Chiusa"], window: ["Aperta", "Chiusa"],
@@ -314,10 +371,34 @@ const BINARY_WORDS = {
   lock: ["Sbloccata", "Bloccata"], tamper: ["Manomesso", "Integro"],
 };
 
-/** Human wording for a state, using the device class when it has one. */
+const STATE_WORDS = {
+  on: "Acceso", off: "Spento", open: "Aperto", closed: "Chiuso",
+  opening: "In apertura", closing: "In chiusura",
+  home: "In casa", not_home: "Fuori", unavailable: "Non disponibile",
+  unknown: "Sconosciuto", idle: "Inattivo", standby: "Standby",
+  playing: "In riproduzione", paused: "In pausa", buffering: "In caricamento",
+  locked: "Bloccato", unlocked: "Sbloccato", locking: "In blocco",
+  unlocking: "In sblocco", jammed: "Inceppato",
+  disarmed: "Disarmato", armed_home: "Armato in casa", armed_away: "Armato fuori",
+  armed_night: "Armato notte", armed_vacation: "Armato vacanza",
+  armed_custom_bypass: "Armato parziale", arming: "In attivazione",
+  disarming: "In disattivazione", pending: "In attesa", triggered: "Allarme in corso",
+  heat: "Riscaldamento", cool: "Raffrescamento", heat_cool: "Automatico",
+  dry: "Deumidifica", fan_only: "Ventilazione", auto: "Automatico",
+  cleaning: "In pulizia", returning: "Rientro alla base", docked: "In base",
+  above_horizon: "Giorno", below_horizon: "Notte",
+};
+
+/**
+ * Human wording for a state.
+ * Device-class wording wins over the generic vocabulary: a door sensor reading
+ * "on" means Aperta, not Acceso.
+ */
 function stateWords(state, deviceClass) {
   const pair = BINARY_WORDS[deviceClass];
   if (pair && (state === "on" || state === "off")) return state === "on" ? pair[0] : pair[1];
+  const word = STATE_WORDS[state];
+  if (word) return word;
   return String(state).replace(/_/g, " ");
 }
 
@@ -392,6 +473,8 @@ class CyborgDashboard extends HTMLElement {
   }
 
   connectedCallback() { if (this._hass && !this._dashboard) this._load(); }
+
+  disconnectedCallback() { this._unsubscribeAll(); }
 
   // ---------------------------------------------------------------- data ---
 
@@ -1082,9 +1165,186 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  // --------------------------------------------------------- overview ---
+
+  /**
+   * Shared WebSocket subscription manager.
+   *
+   * Cards re-render constantly, so subscribing inside a render would open a new
+   * stream on every repaint and leak them all. Subscriptions are keyed and
+   * opened once, and every one is closed in disconnectedCallback — without that
+   * the panel keeps feeding forecasts to a detached element after the user
+   * navigates away.
+   */
+  _subscribe(key, msg, handler) {
+    this._subs = this._subs || {};
+    if (this._subs[key]) return;
+    this._subs[key] = "pending";
+    const conn = this._hass && this._hass.connection;
+    if (!conn || !conn.subscribeMessage) { this._subs[key] = null; return; }
+    conn.subscribeMessage((ev) => handler(ev), msg)
+      .then((unsub) => { this._subs[key] = unsub; })
+      .catch(() => { this._subs[key] = null; this._subFailed = this._subFailed || {}; this._subFailed[key] = true; this._touch(); });
+  }
+
+  _unsubscribeAll() {
+    for (const key of Object.keys(this._subs || {})) {
+      const unsub = this._subs[key];
+      if (typeof unsub === "function") { try { unsub(); } catch (e) { /* already gone */ } }
+    }
+    this._subs = {};
+  }
+
+  _weatherBody(item) {
+    const id = item.entity_id;
+    const st = this._hass.states[id];
+    if (!st) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>
+        <span>Collega un'entità meteo per vedere condizioni e previsioni.</span></div>`;
+    }
+    const a = st.attributes;
+    const [icon, label] = WEATHER_CONDITIONS[st.state] || ["mdi:weather-cloudy", String(st.state).replace(/_/g, " ")];
+    const unit = a.temperature_unit || "°C";
+
+    // supported_features bit 1 = daily forecast (weather/const.py). Subscribing
+    // for a type the entity does not support returns an error, so check first.
+    if ((a.supported_features & 1) && item.show_forecast !== false) {
+      this._subscribe("wx:" + id,
+        { type: "weather/subscribe_forecast", forecast_type: "daily", entity_id: id },
+        (ev) => { this._forecast = this._forecast || {}; this._forecast[id] = (ev && ev.forecast) || []; this._touch(); });
+    }
+    const fc = ((this._forecast || {})[id] || []).slice(0, 5);
+    const strip = fc.length ? `<div class="wx-fc">${fc.map((d) => {
+      const day = new Date(d.datetime);
+      const [ic] = WEATHER_CONDITIONS[d.condition] || ["mdi:weather-cloudy"];
+      const hi = d.temperature, lo = d.templow;
+      return `<div class="wx-day">
+          <span class="wx-dow">${esc(WEEKDAYS[day.getDay()] || "")}</span>
+          <ha-icon icon="${esc(ic)}"></ha-icon>
+          <span class="wx-hi">${esc(hi !== undefined && hi !== null ? Math.round(hi) + "°" : "—")}</span>
+          ${lo !== undefined && lo !== null ? `<span class="wx-lo">${esc(Math.round(lo))}°</span>` : ""}
+        </div>`;
+    }).join("")}</div>` : "";
+
+    const facts = [
+      a.temperature !== undefined ? ["mdi:thermometer", Math.round(a.temperature * 10) / 10 + unit] : null,
+      a.humidity !== undefined ? ["mdi:water-percent", Math.round(a.humidity) + "%"] : null,
+      a.wind_speed !== undefined ? ["mdi:weather-windy", Math.round(a.wind_speed) + " " + (a.wind_speed_unit || "km/h")] : null,
+      a.pressure !== undefined ? ["mdi:gauge", Math.round(a.pressure) + " " + (a.pressure_unit || "hPa")] : null,
+    ].filter(Boolean);
+
+    return `<div class="wx">
+        <div class="wx-now">
+          <ha-icon class="wx-icon" icon="${esc(icon)}"></ha-icon>
+          <div>
+            <div class="wx-temp">${esc(a.temperature !== undefined ? Math.round(a.temperature) : "—")}<span class="unit-inline">${esc(unit)}</span></div>
+            <div class="wx-cond">${esc(label)}</div>
+          </div>
+        </div>
+        <div class="wx-facts">${facts.map(([i, t]) =>
+          `<span><ha-icon icon="${esc(i)}"></ha-icon>${esc(t)}</span>`).join("")}</div>
+        ${strip}
+      </div>`;
+  }
+
+  /** Everything currently running, newest change first. */
+  _activeEntities(item) {
+    const include = Array.isArray(item.domains) && item.domains.length
+      ? item.domains : Object.keys(ACTIVE_DOMAINS);
+    const exclude = new Set(item.exclude || []);
+    const out = [];
+    for (const id of Object.keys(this._hass.states)) {
+      const d = domainOf(id);
+      const test = ACTIVE_DOMAINS[d];
+      if (!test || !include.includes(d) || exclude.has(id)) continue;
+      const st = this._hass.states[id];
+      if (st.state === "unavailable" || st.state === "unknown") continue;
+      if (!test(st)) continue;
+      out.push({ id, st, since: Date.parse(st.last_changed || 0) || 0 });
+    }
+    out.sort((a, b) => b.since - a.since);
+    return out;
+  }
+
+  _activeBody(item) {
+    const rows = this._activeEntities(item);
+    const cap = item.max || 8;
+    if (!rows.length) {
+      return `<div class="ov-empty ok"><ha-icon icon="mdi:power-sleep"></ha-icon>
+        <span>Niente acceso in questo momento.</span></div>`;
+    }
+    return `<div class="act">
+        <div class="act-count"><strong>${rows.length}</strong><span>attivi</span></div>
+        <div class="act-list">${rows.slice(0, cap).map((r) => `
+          <button class="act-row" data-toggle-entity="${esc(r.id)}">
+            <ha-icon icon="${esc(autoIcon(r.id, r.st))}"></ha-icon>
+            <span>${esc(r.st.attributes.friendly_name || r.id)}</span>
+            <small>${esc(stateWords(r.st.state, r.st.attributes.device_class))}</small>
+          </button>`).join("")}
+        </div>
+        ${rows.length > cap ? `<div class="act-more">+${rows.length - cap} altri</div>` : ""}
+      </div>`;
+  }
+
+  _notificationsBody(item) {
+    this._subscribe("notif", { type: "persistent_notification/subscribe" }, (ev) => {
+      this._notifs = this._notifs || {};
+      if (!ev) return;
+      if (ev.type === "current" || ev.type === "added") Object.assign(this._notifs, ev.notifications || {});
+      if (ev.type === "removed") for (const k of Object.keys(ev.notifications || {})) delete this._notifs[k];
+      this._touch();
+    });
+    const notifs = Object.values(this._notifs || {});
+    const updates = item.show_updates === false ? [] : Object.keys(this._hass.states)
+      .filter((id) => id.startsWith("update.") && this._hass.states[id].state === "on")
+      .map((id) => this._hass.states[id]);
+
+    if (!notifs.length && !updates.length) {
+      return `<div class="ov-empty ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon>
+        <span>Nessuna notifica. Sistema in ordine.</span></div>`;
+    }
+    return `<div class="notif">
+        ${notifs.map((n) => `<div class="notif-row">
+            <ha-icon icon="mdi:bell-ring-outline"></ha-icon>
+            <div><strong>${esc(n.title || "Notifica")}</strong><small>${esc(String(n.message || "").slice(0, 140))}</small></div>
+          </div>`).join("")}
+        ${updates.length ? `<div class="notif-row upd">
+            <ha-icon icon="mdi:package-up"></ha-icon>
+            <div><strong>${updates.length} aggiornament${updates.length === 1 ? "o" : "i"} disponibil${updates.length === 1 ? "e" : "i"}</strong>
+              <small>${esc(updates.slice(0, 3).map((u) => u.attributes.friendly_name || "").join(" · "))}</small></div>
+          </div>` : ""}
+      </div>`;
+  }
+
+  _peopleBody(item) {
+    const ids = Array.isArray(item.people) && item.people.length
+      ? item.people
+      : Object.keys(this._hass.states).filter((id) => id.startsWith("person."));
+    if (!ids.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:account-question-outline"></ha-icon>
+        <span>Nessuna persona configurata in Home Assistant.</span></div>`;
+    }
+    return `<div class="ppl">${ids.map((id) => {
+      const st = this._hass.states[id];
+      if (!st) return "";
+      const home = st.state === "home";
+      const pic = st.attributes.entity_picture;
+      const name = String(st.attributes.friendly_name || id.split(".")[1]).trim();
+      return `<button class="ppl-row ${home ? "home" : ""}" data-more-info="${esc(id)}">
+          ${pic ? `<img src="${esc(pic)}" alt="">` : `<ha-icon icon="mdi:account"></ha-icon>`}
+          <div><strong>${esc(name)}</strong><small>${esc(home ? "In casa" : st.state === "not_home" ? "Fuori" : st.state)}</small></div>
+          <i class="ppl-dot"></i>
+        </button>`;
+    }).join("")}</div>`;
+  }
+
   _cardBody(item, st) {
     const type = item.type || "entity";
     if (type === "energyflow") return this._energyFlowBody(item);
+    if (type === "weather") return this._weatherBody(item);
+    if (type === "active") return this._activeBody(item);
+    if (type === "notifications") return this._notificationsBody(item);
+    if (type === "people") return this._peopleBody(item);
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
     const unit = attrs.unit_of_measurement || "";
@@ -1092,7 +1352,7 @@ class CyborgDashboard extends HTMLElement {
 
     if (type === "control") {
       return `<div class="control-row">
-          <span class="control-state">${esc(isOn ? "ACCESO" : "SPENTO")}</span>
+          <span class="control-state">${esc(stateWords(state, attrs.device_class))}</span>
           <span class="switch ${isOn ? "on" : ""}"><span class="knob"></span></span>
         </div>`;
     }
@@ -1109,7 +1369,7 @@ class CyborgDashboard extends HTMLElement {
           <div class="value">${esc(cur !== undefined ? cur : state)}<span class="unit-inline">°C</span></div>
           <div class="climate-meta">
             <span><ha-icon icon="mdi:target"></ha-icon> ${esc(target !== undefined ? target + "°" : "—")}</span>
-            <span><ha-icon icon="mdi:tune-variant"></ha-icon> ${esc(String(state).replace(/_/g, " "))}</span>
+            <span><ha-icon icon="mdi:tune-variant"></ha-icon> ${esc(stateWords(state, attrs.device_class))}</span>
           </div>
         </div>`;
     }
@@ -1140,24 +1400,26 @@ class CyborgDashboard extends HTMLElement {
 
   _renderCard(item, section) {
     const isFlow = item.type === "energyflow";
+    const composite = COMPOSITE_TYPES.has(item.type);
+    const meta = COMPOSITE_META[item.type];
     const st = this._hass.states[item.entity_id];
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
-    const name = item.name || (isFlow ? "Flusso energetico" : null)
+    const name = item.name || (meta ? meta[0] : null)
       || attrs.friendly_name || item.entity_id || "Card non configurata";
     const app = item.appearance || {};
     const stateStyle = (item.states && (item.states[state] || item.states.default)) || {};
     const accent = stateStyle.accent || app.accent || section.accent || (this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff";
-    const icon = stateStyle.icon || app.icon
-      || (isFlow ? "mdi:transit-connection-variant" : autoIcon(item.entity_id, st || { attributes: {} }));
-    const span = SIZE_SPAN[item.size] || (isFlow ? SIZE_SPAN.lg : SIZE_SPAN.md);
+    const icon = stateStyle.icon || app.icon || (meta ? meta[2] : null)
+      || autoIcon(item.entity_id, st || { attributes: {} });
+    const span = SIZE_SPAN[item.size] || SIZE_SPAN[meta ? meta[3] : "md"] || SIZE_SPAN.md;
     const glow = app.glow !== false;
     const pulse = stateStyle.animate ? " pulse" : "";
-    const missing = (!item.entity_id && !isFlow) ? " missing" : "";
+    const missing = (!item.entity_id && !composite) ? " missing" : "";
     const style = `--accent:${esc(accent)};grid-column:span ${span}`;
     const body = this._cardBody(item, st);
     const sub = stateStyle.label
-      || (isFlow ? "Potenza in tempo reale" : cardDescriptor(item.entity_id, st));
+      || (meta ? meta[1] : cardDescriptor(item.entity_id, st));
     const head = `<div class="head">
         ${item.show_icon === false ? "" : `<ha-icon class="card-icon" icon="${esc(icon)}"></ha-icon>`}
         <div class="head-text"><strong>${esc(name)}</strong>${
@@ -1176,8 +1438,8 @@ class CyborgDashboard extends HTMLElement {
           </div>
         </article>`;
     }
-    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
-        ${isFlow ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
+    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+        ${composite || item.type === "weather" ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
   }
 
   _renderSection(section, index, total) {
@@ -1295,6 +1557,87 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  _compositeEditor(card) {
+    if (card.type === "active") {
+      const chosen = Array.isArray(card.domains) && card.domains.length
+        ? card.domains : Object.keys(ACTIVE_DOMAINS);
+      return `<div class="section">
+        <strong>COSA CONSIDERARE ATTIVO</strong>
+        <span class="hint">Un clima acceso, una tapparella aperta e una luce accesa sono tutti "attivi": scegli quali contano per te.</span>
+        <div class="dom-grid">${Object.keys(ACTIVE_DOMAINS).map((d) =>
+          `<button type="button" class="dom-chip ${chosen.includes(d) ? "on" : ""}" data-active-domain="${esc(d)}">
+             <ha-icon icon="${esc(DOMAIN_ICONS[d] || "mdi:shape-outline")}"></ha-icon>${esc(DOMAIN_LABELS[d] || d)}</button>`).join("")}
+        </div>
+        <label>MASSIMO IN ELENCO<input type="number" min="3" max="30" data-prop="max" value="${card.max || 8}"></label>
+      </div>`;
+    }
+    if (card.type === "notifications") {
+      return `<div class="section">
+        <strong>CONTENUTO</strong>
+        <label class="check"><input type="checkbox" data-prop="show_updates" ${card.show_updates !== false ? "checked" : ""}> Includi aggiornamenti disponibili</label>
+        <span class="hint">Le notifiche persistenti di Home Assistant arrivano in tempo reale.</span>
+      </div>`;
+    }
+    if (card.type === "people") {
+      const all = Object.keys(this._hass.states).filter((id) => id.startsWith("person."));
+      const chosen = Array.isArray(card.people) && card.people.length ? card.people : all;
+      return `<div class="section">
+        <strong>PERSONE</strong>
+        <span class="hint">${all.length ? "Deseleziona chi non vuoi mostrare." : "Nessuna persona configurata in Home Assistant."}</span>
+        <div class="dom-grid">${all.map((id) =>
+          `<button type="button" class="dom-chip ${chosen.includes(id) ? "on" : ""}" data-person="${esc(id)}">
+             <ha-icon icon="mdi:account"></ha-icon>${esc(this._hass.states[id].attributes.friendly_name || id)}</button>`).join("")}
+        </div>
+      </div>`;
+    }
+    return "";
+  }
+
+  /**
+   * Build a Panoramica: the handful of things worth seeing before anything
+   * else. Only cards with something real behind them are added — an empty
+   * weather tile or a presence card with nobody configured is worse than no
+   * card at all.
+   */
+  _composeOverview() {
+    const page = this._page();
+    const states = this._hass.states;
+    const first = (pred) => Object.keys(states).find(pred);
+    const mk = (type, extra) => Object.assign({
+      id: uid("card"), type, entity_id: "", name: "", size: COMPOSITE_META[type] ? COMPOSITE_META[type][3] : "md",
+      appearance: {}, states: {}, actions: { tap: { action: "more-info" } },
+    }, extra || {});
+
+    const top = [];
+    const weather = first((id) => id.startsWith("weather."));
+    if (weather) top.push(mk("weather", { entity_id: weather, size: "md" }));
+    if (Object.keys(states).some((id) => id.startsWith("person."))) top.push(mk("people", { size: "sm" }));
+    top.push(mk("notifications", { size: "md" }));
+    top.push(mk("active", { size: "md" }));
+
+    const alarm = first((id) => id.startsWith("alarm_control_panel."));
+    if (alarm) {
+      top.push(mk("status", { entity_id: alarm, size: "sm",
+        appearance: { icon: "mdi:shield-home" },
+        actions: { tap: { action: "more-info" } } }));
+    }
+
+    const flowCard = mk("energyflow", { size: "lg",
+      appearance: { icon: "mdi:transit-connection-variant" },
+      flow: { grid: null, solar: null, battery: null, home: null, devices: [] } });
+
+    const sections = [
+      { id: uid("sec"), title: "Panoramica", icon: "mdi:view-dashboard-variant",
+        accent: "#00e5ff", collapsed: false, items: top },
+      { id: uid("sec"), title: "Energia", icon: "mdi:flash",
+        accent: "#ffd166", collapsed: false, items: [flowCard] },
+    ];
+    page.sections = sections;
+    this._detectFlow(flowCard);
+    this._selected = null;
+    this._touch();
+  }
+
   _flowEditor(card) {
     const flow = card.flow || {};
     const devices = flow.devices || [];
@@ -1350,7 +1693,8 @@ class CyborgDashboard extends HTMLElement {
         <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
       </div>
 
-      ${card.type === "energyflow" ? this._flowEditor(card) : `
+      ${card.type === "energyflow" ? this._flowEditor(card)
+        : COMPOSITE_TYPES.has(card.type) ? this._compositeEditor(card) : `
       <div class="section">
         <strong>ENTITÀ</strong>
         ${card.entity_id ? `<div class="entity-current">
@@ -1450,6 +1794,7 @@ class CyborgDashboard extends HTMLElement {
       <div class="section">
         <strong>COMPOSIZIONE AUTOMATICA</strong>
         <span class="hint">Analizza le ${Object.keys(this._hass.states).length} entità di Home Assistant e costruisce le sezioni con le entità più rilevanti già collegate.</span>
+        <button class="secondary wide" data-compose-overview><ha-icon icon="mdi:view-dashboard-variant"></ha-icon> COMPONI PANORAMICA</button>
         <button class="secondary wide" data-autocompose="add"><ha-icon icon="mdi:auto-fix"></ha-icon> AGGIUNGI SEZIONI COMPOSTE</button>
         <button class="secondary wide danger-outline" data-autocompose="replace"><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DA ZERO</button>
       </div>
@@ -1504,8 +1849,11 @@ class CyborgDashboard extends HTMLElement {
       : `<div class="bootstrap">
            <ha-icon icon="mdi:view-dashboard-outline"></ha-icon>
            <h2>Dashboard vuota</h2>
-           <p>Costruisci la struttura in un click: Cyborg analizza le tue entità e crea le sezioni Sicurezza, Energia, Clima, Illuminazione, Presenza e Sistema già popolate.</p>
-           <button data-autocompose="replace"><ha-icon icon="mdi:auto-fix"></ha-icon> COMPONI AUTOMATICAMENTE</button>
+           <p>Due modi per partire: una <strong>panoramica</strong> con meteo, presenze, notifiche, dispositivi accesi e flusso energetico, oppure la <strong>dashboard completa</strong> con tutte le tue entità divise per sezione.</p>
+           <div class="bootstrap-actions">
+             <button data-compose-overview><ha-icon icon="mdi:view-dashboard-variant"></ha-icon> COMPONI PANORAMICA</button>
+             <button class="secondary" data-autocompose="replace"><ha-icon icon="mdi:auto-fix"></ha-icon> DASHBOARD COMPLETA</button>
+           </div>
          </div>`;
 
     this.innerHTML = `<style>${this._css()}</style>
@@ -1779,6 +2127,45 @@ class CyborgDashboard extends HTMLElement {
     });
     this._bindRoomDrag();
 
+    // --- overview cards
+    all("[data-toggle-entity]").forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute("data-toggle-entity");
+        const d = domainOf(id);
+        const sd = ["light", "switch", "fan", "media_player", "input_boolean", "cover", "siren", "humidifier"].includes(d) ? d : "homeassistant";
+        this._hass.callService(sd, "toggle", { entity_id: id });
+      };
+    });
+    all("[data-more-info]").forEach((el) => {
+      el.onclick = () => this.dispatchEvent(new CustomEvent("hass-more-info", {
+        detail: { entityId: el.getAttribute("data-more-info") }, bubbles: true, composed: true }));
+    });
+    all("[data-active-domain]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const d = el.getAttribute("data-active-domain");
+        const cur = Array.isArray(card.domains) && card.domains.length ? card.domains.slice() : Object.keys(ACTIVE_DOMAINS);
+        const i = cur.indexOf(d);
+        if (i >= 0) cur.splice(i, 1); else cur.push(d);
+        card.domains = cur;
+        this._touch();
+      };
+    });
+    all("[data-person]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-person");
+        const allP = Object.keys(this._hass.states).filter((x) => x.startsWith("person."));
+        const cur = Array.isArray(card.people) && card.people.length ? card.people.slice() : allP;
+        const i = cur.indexOf(id);
+        if (i >= 0) cur.splice(i, 1); else cur.push(id);
+        card.people = cur;
+        this._touch();
+      };
+    });
+    const overview = q("[data-compose-overview]");
+    if (overview) overview.onclick = () => this._composeOverview();
+
     // --- energy flow editor
     const detect = q("[data-detect-flow]");
     if (detect && card) detect.onclick = () => this._detectFlow(card);
@@ -2005,7 +2392,7 @@ button.mini.accentbtn{background:var(--accent);color:#03131a;border-color:transp
 button.mini.danger{color:#ff8091;border-color:rgba(255,61,113,.4);background:rgba(255,61,113,.1)}
 button.mini.grow{flex:1;justify-content:center}
 
-.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:${theme.gap || 16}px}
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:${theme.gap || 16}px;align-items:start}
 .item{--accent:#00e5ff;position:relative;display:flex;flex-direction:column;min-height:98px;padding:14px 16px;border-radius:${theme.radius || 16}px;background:linear-gradient(158deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);overflow:hidden;transition:transform .18s,border-color .18s}
 .item::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);opacity:.85}
 .item[data-tap]{cursor:pointer}
@@ -2097,7 +2484,67 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .preset ha-icon{--mdc-icon-size:20px;color:var(--accent)}
 
 
-.item.flow{cursor:default}
+.item.composite,.item.flow{cursor:default}
+.bootstrap-actions{display:flex;gap:9px;justify-content:center;flex-wrap:wrap}
+.ov-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;flex:1;margin-top:auto;padding:16px 6px;text-align:center;opacity:.5}
+.ov-empty ha-icon{--mdc-icon-size:26px;color:var(--accent)}
+.ov-empty span{font-size:11.5px;line-height:1.5;max-width:230px}
+.ov-empty.ok ha-icon{color:#06d6a0}
+
+.wx{margin-top:12px;display:flex;flex-direction:column;gap:11px}
+.wx-now{display:flex;align-items:center;gap:13px}
+.wx-icon{--mdc-icon-size:44px;color:var(--accent);filter:drop-shadow(0 0 14px color-mix(in srgb,var(--accent) 50%,transparent));flex-shrink:0}
+.wx-temp{font-size:32px;font-weight:750;line-height:1;letter-spacing:-.03em;color:var(--accent)}
+.wx-cond{margin-top:4px;font-size:11.5px;opacity:.6}
+.wx-facts{display:flex;flex-wrap:wrap;gap:6px}
+.wx-facts span{display:inline-flex;align-items:center;gap:4px;padding:4px 9px;border-radius:99px;font:10px ui-monospace,monospace;letter-spacing:.4px;background:color-mix(in srgb,var(--accent) 11%,transparent);border:1px solid color-mix(in srgb,var(--accent) 20%,transparent)}
+.wx-facts ha-icon{--mdc-icon-size:13px;opacity:.75}
+.wx-fc{display:flex;gap:5px;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.wx-day{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 2px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.wx-dow{font:9px ui-monospace,monospace;letter-spacing:1px;opacity:.5;text-transform:uppercase}
+.wx-day ha-icon{--mdc-icon-size:18px;color:var(--accent);opacity:.85}
+.wx-hi{font-size:12.5px;font-weight:700}
+.wx-lo{font-size:10px;opacity:.45}
+
+.act{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+.act-count{display:flex;align-items:baseline;gap:6px}
+.act-count strong{font-size:28px;font-weight:750;color:var(--accent);line-height:1}
+.act-count span{font:10px ui-monospace,monospace;letter-spacing:2px;opacity:.5;text-transform:uppercase}
+.act-list{display:flex;flex-direction:column;gap:3px}
+.act-row{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border-radius:8px;background:color-mix(in srgb,var(--accent) 7%,transparent);border:1px solid transparent;color:var(--primary-text-color);font-size:11.5px;font-weight:500;letter-spacing:0;text-align:left}
+.act-row:hover{border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:color-mix(in srgb,var(--accent) 13%,transparent)}
+.act-row ha-icon{--mdc-icon-size:15px;color:var(--accent);flex-shrink:0}
+.act-row span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-row small{font:9px ui-monospace,monospace;letter-spacing:.6px;opacity:.45;text-transform:uppercase;flex-shrink:0}
+.act-more{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.4}
+
+.notif{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.notif-row{display:flex;gap:9px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,#ffd166 10%,transparent);border:1px solid color-mix(in srgb,#ffd166 26%,transparent)}
+.notif-row ha-icon{--mdc-icon-size:17px;color:#ffd166;flex-shrink:0}
+.notif-row div{min-width:0}
+.notif-row strong{display:block;font-size:12px}
+.notif-row small{display:block;margin-top:2px;font-size:10.5px;opacity:.6;line-height:1.45}
+.notif-row.upd{background:color-mix(in srgb,var(--accent) 10%,transparent);border-color:color-mix(in srgb,var(--accent) 26%,transparent)}
+.notif-row.upd ha-icon{color:var(--accent)}
+
+.ppl{margin-top:12px;display:flex;flex-direction:column;gap:5px}
+.ppl-row{display:flex;align-items:center;gap:9px;width:100%;padding:6px 8px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid transparent;color:var(--primary-text-color);text-align:left;font-weight:500;letter-spacing:0}
+.ppl-row:hover{border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.ppl-row img{width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;filter:grayscale(1);opacity:.5}
+.ppl-row.home img{filter:none;opacity:1}
+.ppl-row>ha-icon{--mdc-icon-size:20px;width:30px;height:30px;padding:5px;border-radius:50%;background:rgba(255,255,255,.06);flex-shrink:0;opacity:.5}
+.ppl-row.home>ha-icon{opacity:1;color:#06d6a0;background:rgba(6,214,160,.14)}
+.ppl-row div{flex:1;min-width:0}
+.ppl-row strong{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ppl-row small{display:block;font:9px ui-monospace,monospace;letter-spacing:1px;opacity:.45;text-transform:uppercase}
+.ppl-dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.18);flex-shrink:0}
+.ppl-row.home .ppl-dot{background:#06d6a0;box-shadow:0 0 9px #06d6a0}
+
+.dom-grid{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+.dom-chip{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:99px;font-size:10.5px;font-weight:600;letter-spacing:.02em;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.5}
+.dom-chip ha-icon{--mdc-icon-size:13px}
+.dom-chip.on{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 13%,transparent)}
+
 .item.flow .value{display:none}
 .ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%}
 .ef-svg{display:block;width:100%;max-width:520px;margin:0 auto;height:auto;overflow:visible}

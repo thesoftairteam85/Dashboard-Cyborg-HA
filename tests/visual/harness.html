@@ -47,6 +47,14 @@ const states={
  "sensor.lavatrice_potenza":S("820",{friendly_name:"Lavatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.asciugatrice_potenza2":S("310",{friendly_name:"Asciugatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.nas_potenza":S("64",{friendly_name:"NAS & Modem",device_class:"power",unit_of_measurement:"W"}),
+ "weather.casa_oscar":S("sunny",{friendly_name:"Casa Oscar",temperature:26.4,temperature_unit:"°C",wind_speed:4.1,wind_speed_unit:"km/h",wind_bearing:142,pressure:1014,pressure_unit:"hPa",supported_features:3}),
+ "person.oscar":S("home",{friendly_name:"Oscar"}),
+ "person.lilly":S("not_home",{friendly_name:"Lilly Bonny"}),
+ "alarm_control_panel.allarme":S("disarmed",{friendly_name:"Allarme"}),
+ "update.cyborg":S("on",{friendly_name:"Cyborg Dashboard"}),
+ "update.matter":S("on",{friendly_name:"Matter Server"}),
+ "media_player.salotto":S("playing",{friendly_name:"Salotto"}),
+ "cover.camera_tapparella2":S("open",{friendly_name:"Tapparella studio"}),
  "sensor.balcone_temp":S("28.9",{friendly_name:"Balcone Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
 };
 const AREA=[["soggiorno","Soggiorno",null],["camera_da_letto","Camera da letto",null],
@@ -72,7 +80,23 @@ const hass={states,
     if(m.type==="history/history_during_period") return {};
     return {};
   },
-  callService:(d,s,data)=>{window.__CALLS__=(window.__CALLS__||[]).concat([d+"."+s+" "+JSON.stringify(data)])}};
+  callService:(d,s,data)=>{window.__CALLS__=(window.__CALLS__||[]).concat([d+"."+s+" "+JSON.stringify(data)])},
+  connection:{subscribeMessage:(cb,msg)=>{
+    if(msg.type==="weather/subscribe_forecast"){
+      setTimeout(()=>cb({type:"daily",forecast:[
+        {datetime:"2026-08-22T12:00:00+02:00",condition:"sunny",temperature:29,templow:19},
+        {datetime:"2026-08-23T12:00:00+02:00",condition:"partlycloudy",temperature:27,templow:18},
+        {datetime:"2026-08-24T12:00:00+02:00",condition:"rainy",temperature:23,templow:17},
+        {datetime:"2026-08-25T12:00:00+02:00",condition:"lightning-rainy",temperature:21,templow:16},
+        {datetime:"2026-08-26T12:00:00+02:00",condition:"cloudy",temperature:24,templow:17}]}),60);
+    }
+    if(msg.type==="persistent_notification/subscribe"){
+      setTimeout(()=>cb({type:"current",notifications:{
+        n1:{notification_id:"n1",title:"Backup non riuscito",message:"L'ultimo backup automatico è fallito: spazio insufficiente sul NAS."},
+        n2:{notification_id:"n2",title:"Nuovo dispositivo Matter",message:"Rilevato un dispositivo non configurato in salotto."}}}),80);
+    }
+    return Promise.resolve(()=>{});
+  }}};
 
 window.__mount=(dash,opts)=>{
   window.__DASH__=dash;
@@ -93,6 +117,7 @@ window.__mount=(dash,opts)=>{
         if(opts&&opts.editing){el._editing=true;}
         if(opts&&opts.autoRooms){el._autoRooms();}
         if(opts&&opts.autoCompose){el._autoCompose(true);}
+        if(opts&&opts.overview){el._composeOverview();}
         if(opts&&opts.flowCard){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
           sec.items.unshift({id:"flowcard",type:"energyflow",entity_id:"",name:"",size:"xl",

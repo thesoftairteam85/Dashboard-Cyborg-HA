@@ -110,6 +110,13 @@ def default_dashboard() -> dict[str, Any]:
         "version": SCHEMA_VERSION,
         "revision": 0,
         "pages": [{
+            "id": "overview",
+            "type": "sections",
+            "title": "Panoramica",
+            "icon": "mdi:view-dashboard-variant",
+            "layout": {"type": "grid", "columns": 12, "gap": 16},
+            "sections": [],
+        }, {
             "id": "home",
             "title": "Cyborg",
             "icon": "mdi:hexagon-multiple-outline",
@@ -144,6 +151,18 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["states"] = {}
     if not isinstance(result.get("actions"), dict):
         result["actions"] = {}
+    if result.get("type") == "active":
+        domains = result.get("domains")
+        result["domains"] = [d for d in domains if isinstance(d, str)] if isinstance(domains, list) else []
+        try:
+            result["max"] = max(3, min(30, int(result.get("max", 8))))
+        except (TypeError, ValueError):
+            result["max"] = 8
+    if result.get("type") == "people":
+        people = result.get("people")
+        result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
+    if result.get("type") == "notifications":
+        result["show_updates"] = bool(result.get("show_updates", True))
     if result.get("type") == "energyflow":
         flow = result.get("flow")
         flow = dict(flow) if isinstance(flow, dict) else {}
