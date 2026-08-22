@@ -4,6 +4,49 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.10.0] - 2026-08-22
+
+Editor usabile da telefono e configurazione guidata del flusso energetico.
+
+### Correzione bloccante
+- **L'editor era irraggiungibile da telefono.** Sotto i 1200 px il pannello
+  smetteva di stare a destra e finiva in fondo al documento, sotto tutte le
+  card: premere CONFIGURA selezionava davvero la card, ma il pannello si
+  apriva diverse schermate più in basso e non lo vedeva nessuno. Ora sotto
+  quella soglia è un pannello a scomparsa ancorato in basso, con sfondo
+  oscurato, maniglia e chiusura toccando fuori. Su desktop non cambia niente.
+  Il difetto c'era perché non avevo mai provato la dashboard a larghezza
+  telefono: ora c'è un test che la apre a 390 px, preme CONFIGURA e verifica
+  che il pannello sia effettivamente dentro lo schermo.
+- L'editor di pagina non aveva alcun pulsante di chiusura: su telefono
+  significava restare intrappolati nel pannello.
+
+### Novità
+- **Configurazione guidata del flusso energetico**, sul modello della
+  procedura di Home Assistant: una domanda per schermata — fotovoltaico,
+  accumulo, rete, consumo di casa, carichi, gerarchia — con barra di
+  avanzamento, possibilità di saltare ogni passo e di tornare indietro.
+  Mostra solo sensori con `device_class: power`, con il valore attuale
+  accanto a ciascuno per riconoscerli a colpo d'occhio, e marca come
+  **consigliato** quello il cui nome combacia con la domanda. La
+  configurazione manuale resta raggiungibile da "Configurazione avanzata".
+- **Gerarchia dei consumi.** Un carico può essere dichiarato compreso dentro
+  un altro (una presa a valle di un quadro che stai già misurando). Il
+  sotto-albero lo disegna su un secondo livello sotto il genitore, con la
+  quota calcolata sul genitore e non sulla casa. Soprattutto: **un carico
+  annidato non viene sommato al totale misurato**, perché il suo consumo è
+  già dentro quello del genitore — contarli entrambi inventerebbe consumo
+  inesistente e azzererebbe il "Non misurato".
+- Le scelte del wizard vengono salvate alla fine della procedura, senza dover
+  premere SALVA separatamente.
+
+### Verifica
+- `tests/frontend.test.js`: 209 asserzioni (20 nuove su gerarchia e wizard,
+  incluso che un genitore inesistente non inghiotta il figlio e che i cicli
+  padre-figlio vengano spezzati).
+- Nuovo test a 390 px in Chromium: il pannello è `fixed`, dentro lo schermo,
+  con sfondo e maniglia; su desktop resta `sticky` senza sfondo.
+
 ## [0.9.0] - 2026-08-22
 
 Il nodo Casa del flusso energetico si apre su un sotto-albero dei carichi.

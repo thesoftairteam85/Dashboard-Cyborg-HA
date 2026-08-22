@@ -74,7 +74,7 @@ f = d["pages"][0]["sections"][0]["items"][0]["flow"]
 assert f["grid"] == "sensor.g" and f["solar"] is None and f["battery"] is None
 assert f["invert_grid"] is True and f["invert_solar"] is False
 assert len(f["devices"]) == 8, len(f["devices"])
-assert f["devices"][0] == {"entity": "sensor.a", "name": "A", "icon": ""}
+assert f["devices"][0] == {"entity": "sensor.a", "name": "A", "icon": "", "parent": None}
 assert all(x["entity"] for x in f["devices"])
 assert "flow" not in d["pages"][0]["sections"][0]["items"][1], "non-flow card must not gain a flow key"
 assert schema.normalize_dashboard(d) == d, "energyflow normalize must be idempotent"
@@ -97,4 +97,19 @@ assert it["n2"]["show_updates"] is False
 assert "domains" not in it["s"] and "people" not in it["s"], "una card sensore non deve ereditare campi compositi"
 assert schema.normalize_dashboard(d) == d, "composite normalize must be idempotent"
 print("composite schema: all tests passed")
+
+# load hierarchy
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "f", "type": "energyflow", "flow": {"devices": [
+        {"entity": "sensor.quadro"},
+        {"entity": "sensor.forno", "parent": "sensor.quadro"},
+        {"entity": "sensor.piano", "parent": ""},
+        {"entity": "sensor.altro", "parent": 42}]}}]}]}]})
+devs = d["pages"][0]["sections"][0]["items"][0]["flow"]["devices"]
+assert devs[0]["parent"] is None
+assert devs[1]["parent"] == "sensor.quadro"
+assert devs[2]["parent"] is None, "stringa vuota -> nessun genitore"
+assert devs[3]["parent"] is None, "tipo sbagliato -> nessun genitore"
+assert schema.normalize_dashboard(d) == d
+print("hierarchy schema: all tests passed")
 print("energyflow schema: all tests passed")

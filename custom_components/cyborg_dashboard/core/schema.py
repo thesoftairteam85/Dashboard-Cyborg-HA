@@ -175,7 +175,9 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         flow["devices"] = [
             {"entity": d["entity"],
              "name": str(d.get("name") or ""),
-             "icon": str(d.get("icon") or "")}
+             "icon": str(d.get("icon") or ""),
+             # a load nested inside another is already counted by its parent
+             "parent": d["parent"] if isinstance(d.get("parent"), str) and d["parent"] else None}
             for d in devices
             if isinstance(d, dict) and isinstance(d.get("entity"), str) and d["entity"]
         ][:8] if isinstance(devices, list) else []

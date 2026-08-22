@@ -402,6 +402,61 @@ el._flowOpen.tree = false; el._flowOpen.tree = true;
 ok("l'apertura non sporca la configurazione salvata", JSON.stringify(el._dashboard) === before);
 el._flowOpen = {};
 
+console.log("\n== 11c. GERARCHIA E WIZARD ==");
+states["sensor.quadro"] = S("1000", { friendly_name: "Quadro cucina", device_class: "power", unit_of_measurement: "W" });
+states["sensor.forno"]  = S("600",  { friendly_name: "Forno", device_class: "power", unit_of_measurement: "W" });
+states["sensor.piano"]  = S("300",  { friendly_name: "Piano induzione", device_class: "power", unit_of_measurement: "W" });
+const hFlow = { grid: "sensor.rete", devices: [
+  { entity: "sensor.quadro", name: "Quadro cucina" },
+  { entity: "sensor.forno",  name: "Forno", parent: "sensor.quadro" },
+  { entity: "sensor.piano",  name: "Piano induzione", parent: "sensor.quadro" }] };
+let hl = el._flowLoads(hFlow, 1270);
+ok("solo i carichi radice al primo livello", hl.filter(l => !l.other).length === 1, JSON.stringify(hl.map(l => l.name)));
+ok("i figli sono appesi al genitore", hl[0].children.length === 2);
+ok("figli ordinati per assorbimento", hl[0].children.map(c => c.name).join() === "Forno,Piano induzione");
+ok("i figli NON gonfiano il misurato (non misurato = 1270-1000)",
+   hl.find(l => l.other) && hl.find(l => l.other).watts === 270,
+   JSON.stringify(hl.map(l => [l.name, l.watts])));
+
+// a parent that is not itself a monitored load must not swallow its child
+const orphan = { devices: [{ entity: "sensor.forno", name: "Forno", parent: "sensor.inesistente" }] };
+ok("genitore inesistente -> il figlio resta radice", el._flowLoads(orphan, 900).filter(l => !l.other).length === 1);
+
+const hCard = { id: "h", type: "energyflow", entity_id: "", appearance: {}, states: {}, actions: {}, flow: hFlow };
+const hSec = { id: "hs", title: "E", icon: "mdi:flash", accent: "#ffd166", items: [hCard] };
+el._flowOpen = { h: true };
+const hHtml = el._renderCard(hCard, hSec);
+ok("albero a due livelli renderizzato", (hHtml.match(/class="ef-leaf child/g) || []).length === 2);
+ok("viewBox esteso per il secondo livello", /viewBox="0 0 600 696"/.test(hHtml), (hHtml.match(/viewBox="[^"]+"/) || [])[0]);
+ok("quota del figlio calcolata sul genitore (600/1000)", hHtml.includes("60%"));
+el._flowOpen = {};
+
+// wizard
+el._editing = true;
+el._dashboard.pages[0].sections = [hSec];
+el._selected = { kind: "card", sectionId: "hs", itemId: "h" };
+el._wizard = null;
+el.render();
+ok("editor flusso offre la procedura guidata", el.innerHTML.includes("data-wiz-start"));
+el._wizard = { cardId: "h", step: 0 };
+el.render();
+ok("wizard passo 1: fotovoltaico", el.innerHTML.includes("produzione fotovoltaica") || el.innerHTML.includes("fotovoltaico"));
+ok("wizard mostra solo sensori di potenza", !el.innerHTML.includes("light.soggiorno"));
+ok("wizard evidenzia i suggeriti", el.innerHTML.includes("consigliato"));
+ok("wizard ha barra di avanzamento", el.innerHTML.includes("wiz-bar"));
+ok("wizard: 6 passi", (el.innerHTML.match(/PASSO 1 DI 6/)) !== null, "atteso 4 slot + carichi + gerarchia");
+ok("wizard: si puo saltare", el.innerHTML.includes("data-wiz-skip"));
+ok("wizard: uscita verso avanzata", el.innerHTML.includes("data-wiz-exit"));
+el._wizard = { cardId: "h", step: 4 };
+el.render();
+ok("wizard passo carichi: selezione multipla", el.innerHTML.includes("data-wiz-load"));
+el._wizard = { cardId: "h", step: 5 };
+el.render();
+ok("wizard passo gerarchia: menu genitore", el.innerHTML.includes("data-wiz-parent"));
+ok("wizard gerarchia elenca i carichi scelti", el.innerHTML.includes("Quadro cucina"));
+ok("wizard ultimo passo mostra FINE", el.innerHTML.includes("FINE"));
+el._wizard = null; el._editing = false; el._selected = null;
+
 console.log("\n== 12. LEGGIBILITA STATI ==");
 ok("porta on -> Aperta", stateWords("on", "door") === "Aperta");
 ok("porta off -> Chiusa", stateWords("off", "door") === "Chiusa");

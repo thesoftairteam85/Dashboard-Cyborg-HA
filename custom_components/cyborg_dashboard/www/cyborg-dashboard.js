@@ -185,6 +185,35 @@ const BADGE_PRIORITY = [
 
 const MAX_BADGES_PER_ROOM = 6;
 
+/**
+ * Guided energy setup, modelled on the Home Assistant energy configuration:
+ * one question per screen, in the order an installer actually thinks about a
+ * plant. The raw slot editor stays available behind "configurazione avanzata"
+ * for anyone who already knows which entity is which.
+ */
+const WIZARD_STEPS = [
+  { key: "solar", title: "Produzione fotovoltaica",
+    q: "Quale sensore misura la potenza prodotta dal fotovoltaico?",
+    hint: "Cerca la potenza istantanea dell'inverter, in W o kW. Non l'energia in kWh.",
+    skip: "Non ho il fotovoltaico",
+    match: /solar|fotovolt|pv|inverter|produzion/i },
+  { key: "battery", title: "Accumulo",
+    q: "Quale sensore misura la potenza della batteria?",
+    hint: "Un solo sensore con segno: positivo in scarica, negativo in carica. Se nel tuo impianto è al contrario, lo raddrizzi al passo finale.",
+    skip: "Non ho l'accumulo",
+    match: /batter|accumul|bess/i },
+  { key: "grid", title: "Scambio con la rete",
+    q: "Quale sensore misura lo scambio con la rete?",
+    hint: "Positivo quando prelevi, negativo quando immetti. È l'unico davvero necessario per far funzionare lo schema.",
+    skip: "Salta (schema senza rete)",
+    match: /rete|grid|scambio|contator|preliev|immiss|fase/i },
+  { key: "home", title: "Consumo di casa",
+    q: "Hai un sensore che misura il consumo totale di casa?",
+    hint: "Se non ce l'hai, salta: Cyborg lo calcola da solo come solare + prelievo + scarica − immissione − carica.",
+    skip: "Non ce l'ho, calcolalo tu",
+    match: /casa|home|consumo.*total|total.*consumo|carichi/i },
+];
+
 /** Palette cycled through when rooms are generated from HA areas. */
 const ROOM_COLORS = ["#00e5ff", "#c77dff", "#ffd166", "#06d6a0", "#ff8fab", "#8ecae6", "#ffb703", "#a0e7a0"];
 
@@ -461,6 +490,7 @@ class CyborgDashboard extends HTMLElement {
     this._drag = null;          // active room drag
     this._flowSlot = null;      // which energy-flow slot the picker is filling
     this._flowOpen = {};        // per-card: is the load sub-tree expanded?
+    this._wizard = null;        // {cardId, step} guided energy setup
   }
 
   set hass(value) {
@@ -984,10 +1014,7 @@ class CyborgDashboard extends HTMLElement {
     const derived = this._roomEntities(room);
     const custom = Array.isArray(room.entities);
     return `<aside class="editor">
-      <div class="editor-title">
-        <div><small>STANZA</small><h2>${esc(room.title)}</h2></div>
-        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
-      </div>
+      ${this._editorHead("STANZA", room.title)}
       <div class="section">
         <label>NOME<input data-room-prop="title" value="${esc(room.title)}"></label>
         <label>AREA HOME ASSISTANT<select data-room-prop="area_id">
@@ -1037,7 +1064,7 @@ class CyborgDashboard extends HTMLElement {
     const view = page.view || {};
     const areas = (this._registry && this._registry.areas) || [];
     return `<aside class="editor">
-      <div class="editor-title"><div><small>MAPPA 3D</small><h2>${esc(page.title)}</h2></div></div>
+      ${this._editorHead("MAPPA 3D", page.title)}
       <div class="section">
         <label>TITOLO PAGINA<input data-page-prop="title" value="${esc(page.title || "")}"></label>
         <label>ICONA${iconField("data-page-prop", "icon", page.icon || "mdi:floor-plan")}</label>
@@ -1135,19 +1162,32 @@ class CyborgDashboard extends HTMLElement {
    * big enough to be real rather than rounding noise.
    */
   _flowLoads(flow, homeWatts) {
-    const loads = [];
+    const all = [];
     for (const d of (flow.devices || [])) {
       const st = this._hass.states[d.entity];
       if (!st) continue;
       const n = parseFloat(st.state);
       if (!Number.isFinite(n) || n < 1) continue;
-      loads.push({
+      all.push({
         entity: d.entity,
         name: d.name || st.attributes.friendly_name || d.entity,
         icon: d.icon || autoIcon(d.entity, st),
         watts: n,
+        parent: d.parent || null,
+        children: [],
       });
     }
+    // A nested load is already inside its parent's reading, so only roots may
+    // be summed against the house total — counting both would invent
+    // consumption that does not exist and shrink "unmeasured" to nothing.
+    const byId = {};
+    for (const l of all) byId[l.entity] = l;
+    const loads = [];
+    for (const l of all) {
+      const parent = l.parent && byId[l.parent];
+      if (parent && parent !== l) parent.children.push(l); else loads.push(l);
+    }
+    for (const l of loads) l.children.sort((a, b) => b.watts - a.watts);
     loads.sort((a, b) => b.watts - a.watts);
     const measured = loads.reduce((t, l) => t + l.watts, 0);
     const rest = homeWatts - measured;
@@ -1157,7 +1197,7 @@ class CyborgDashboard extends HTMLElement {
     // node would just restate the house total under a second name.
     if (loads.length && homeWatts > 0 && rest > Math.max(25, homeWatts * 0.05)) {
       loads.push({ entity: null, name: "Non misurato", icon: "mdi:help-circle-outline",
-        watts: rest, other: true });
+        watts: rest, other: true, children: [] });
     }
     return loads;
   }
@@ -1173,27 +1213,44 @@ class CyborgDashboard extends HTMLElement {
     const n = loads.length;
     const spacing = Math.min(118, 560 / n);
     const y = 470;
+    const childY = 604;
+    const hasChildren = loads.some((l) => l.children.length);
     const parts = [];
-    loads.forEach((l, i) => {
-      const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
-      const id = "ef-l" + i;
-      const color = l.other ? "#8d99ae" : "#00e5ff";
-      const share = homeWatts > 0 ? (l.watts / homeWatts) * 100 : 0;
+
+    const leaf = (l, x, yy, r, share, cls) => {
       const f = fmtPower(l.watts);
-      // branch first so the nodes paint over it
-      parts.push(this._flowPath(id, `M300,322 C300,392 ${x},396 ${x},${y - 26}`,
-        l.watts, color, false));
-      parts.push(`<g class="ef-leaf ${l.other ? "other" : ""}" style="--nc:${color}"
-          ${l.entity ? `data-fp-badge="${esc(l.entity)}"` : ""} transform="translate(${x},${y})">
-          <circle r="26" class="ef-node-bg"/>
-          <circle r="26" class="ef-node-ring"/>
+      const max = r >= 26 ? 13 : 11;
+      return `<g class="ef-leaf ${cls}" style="--nc:${l.other ? "#8d99ae" : "#00e5ff"}"
+          ${l.entity ? `data-fp-badge="${esc(l.entity)}"` : ""} transform="translate(${x},${yy})">
+          <circle r="${r}" class="ef-node-bg"/>
+          <circle r="${r}" class="ef-node-ring"/>
           <text class="ef-leaf-val" y="-1">${esc(f.v)}</text>
           <text class="ef-leaf-unit" y="11">${esc(f.u)}</text>
-          <text class="ef-leaf-name" y="44">${esc(l.name.length > 13 ? l.name.slice(0, 12) + "\u2026" : l.name)}</text>
-          <text class="ef-leaf-share" y="57">${esc(share >= 1 ? Math.round(share) + "%" : "<1%")}</text>
-        </g>`);
+          <text class="ef-leaf-name" y="${r + 18}">${esc(l.name.length > max ? l.name.slice(0, max - 1) + "\u2026" : l.name)}</text>
+          <text class="ef-leaf-share" y="${r + 31}">${esc(share >= 1 ? Math.round(share) + "%" : "<1%")}</text>
+        </g>`;
+    };
+
+    loads.forEach((l, i) => {
+      const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
+      const color = l.other ? "#8d99ae" : "#00e5ff";
+      parts.push(this._flowPath("ef-l" + i, `M300,322 C300,392 ${x},396 ${x},${y - 26}`,
+        l.watts, color, false));
+      parts.push(leaf(l, x, y, 26, homeWatts > 0 ? (l.watts / homeWatts) * 100 : 0,
+        l.other ? "other" : ""));
+
+      // children hang under their parent, sharing the parent's column width
+      const cn = l.children.length;
+      l.children.forEach((c, j) => {
+        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(86, spacing));
+        parts.push(this._flowPath("ef-c" + i + "-" + j,
+          `M${x},${y + 26} C${x},${y + 74} ${cx},${childY - 74} ${cx},${childY - 20}`,
+          c.watts, "#7de2ff", false));
+        parts.push(leaf(c, cx, childY, 20,
+          l.watts > 0 ? (c.watts / l.watts) * 100 : 0, "child"));
+      });
     });
-    return { extra: 200, svg: parts.join("") };
+    return { extra: hasChildren ? 330 : 200, svg: parts.join("") };
   }
 
   _energyFlowBody(item) {
@@ -1730,10 +1787,119 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /** Power sensors ranked with the ones whose name fits the question first. */
+  _powerCandidates(re) {
+    const rows = [];
+    for (const id of Object.keys(this._hass.states)) {
+      const st = this._hass.states[id];
+      if (st.attributes.device_class !== "power") continue;
+      const name = st.attributes.friendly_name || id;
+      rows.push({ id, name, st, hit: re ? re.test(name + " " + id) : false });
+    }
+    rows.sort((a, b) => (b.hit - a.hit) || a.name.localeCompare(b.name));
+    return rows;
+  }
+
+  _wizardBody(card) {
+    const w = this._wizard;
+    const flow = card.flow || (card.flow = {});
+    const total = WIZARD_STEPS.length + 2;   // + loads + hierarchy
+
+    // ---- slot steps
+    if (w.step < WIZARD_STEPS.length) {
+      const step = WIZARD_STEPS[w.step];
+      const q = (this._entityQuery || "").trim().toLowerCase();
+      let rows = this._powerCandidates(step.match);
+      if (q) rows = rows.filter((r) => (r.name + " " + r.id).toLowerCase().includes(q));
+      const current = flow[step.key];
+      return `<div class="wiz-step">
+          <div class="wiz-q">${esc(step.q)}</div>
+          <div class="wiz-hint">${esc(step.hint)}</div>
+          <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra i sensori di potenza..." autocomplete="off">
+          <div class="wiz-list">${rows.length ? rows.slice(0, 40).map((r) => {
+            const v = parseFloat(r.st.state);
+            const f = fmtPower(Number.isFinite(v) ? v : null);
+            return `<button type="button" class="wiz-opt ${current === r.id ? "sel" : ""}" data-wiz-pick="${esc(r.id)}">
+              <ha-icon icon="${esc(current === r.id ? "mdi:check-circle" : "mdi:flash")}"></ha-icon>
+              <div><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></div>
+              <span class="wiz-val">${esc(f.v)}<i>${esc(f.u)}</i></span>
+              ${r.hit ? '<em class="wiz-tip">consigliato</em>' : ""}
+            </button>`;
+          }).join("") : `<div class="entity-result-empty">Nessun sensore di potenza${q ? " per questa ricerca" : " trovato in Home Assistant"}.</div>`}</div>
+        </div>`;
+    }
+
+    // ---- loads
+    if (w.step === WIZARD_STEPS.length) {
+      const q = (this._entityQuery || "").trim().toLowerCase();
+      const chosen = new Set((flow.devices || []).map((d) => d.entity));
+      let rows = this._powerCandidates(null).filter((r) => !FLOW_SLOTS.some((sl) => flow[sl.key] === r.id));
+      if (q) rows = rows.filter((r) => (r.name + " " + r.id).toLowerCase().includes(q));
+      return `<div class="wiz-step">
+          <div class="wiz-q">Quali carichi vuoi vedere nel dettaglio?</div>
+          <div class="wiz-hint">Sono i rami che compaiono aprendo il nodo Casa. Selezionane quanti vuoi, fino a 8.</div>
+          <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra i carichi..." autocomplete="off">
+          <div class="wiz-list">${rows.slice(0, 40).map((r) => `
+            <button type="button" class="wiz-opt ${chosen.has(r.id) ? "sel" : ""}" data-wiz-load="${esc(r.id)}">
+              <ha-icon icon="${esc(chosen.has(r.id) ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
+              <div><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></div>
+            </button>`).join("")}</div>
+        </div>`;
+    }
+
+    // ---- hierarchy
+    const devices = flow.devices || [];
+    return `<div class="wiz-step">
+        <div class="wiz-q">Gerarchia dei consumi</div>
+        <div class="wiz-hint">Se un carico è già compreso dentro un altro — per esempio una presa a valle di un quadro che stai misurando — indicalo qui: non verrà contato due volte.</div>
+        ${devices.length ? devices.map((d, i) => `
+          <label class="wiz-parent">${esc(d.name || (this._hass.states[d.entity] && this._hass.states[d.entity].attributes.friendly_name) || d.entity)}
+            <select data-wiz-parent="${i}">
+              <option value="">— carico principale —</option>
+              ${devices.map((o, j) => j === i ? "" :
+                `<option value="${esc(o.entity)}" ${d.parent === o.entity ? "selected" : ""}>compreso in ${esc(o.name || o.entity)}</option>`).join("")}
+            </select>
+          </label>`).join("")
+        : '<div class="entity-result-empty">Nessun carico selezionato al passo precedente.</div>'}
+        <div class="wiz-hint" style="margin-top:14px">Se un segno risulta al contrario (immissione mostrata come prelievo, o carica come scarica) lo correggi dalla configurazione avanzata.</div>
+      </div>`;
+  }
+
+  _wizardEditor(card) {
+    const w = this._wizard;
+    const total = WIZARD_STEPS.length + 2;
+    const last = w.step >= total - 1;
+    const step = WIZARD_STEPS[w.step];
+    return `<div class="wiz">
+        <div class="wiz-bar">${Array.from({ length: total }, (_, i) =>
+          `<i class="${i < w.step ? "done" : i === w.step ? "now" : ""}"></i>`).join("")}</div>
+        <div class="wiz-head">
+          <span>PASSO ${w.step + 1} DI ${total}</span>
+          <strong>${esc(step ? step.title : w.step === WIZARD_STEPS.length ? "Carichi monitorati" : "Gerarchia")}</strong>
+        </div>
+        ${this._wizardBody(card)}
+        <div class="wiz-nav">
+          ${w.step > 0 ? '<button class="secondary" data-wiz-back><ha-icon icon="mdi:chevron-left"></ha-icon> INDIETRO</button>' : ""}
+          ${step ? `<button class="secondary" data-wiz-skip>${esc(step.skip)}</button>` : ""}
+          <button data-wiz-next>${last ? "FINE" : "AVANTI"} <ha-icon icon="${last ? "mdi:check" : "mdi:chevron-right"}"></ha-icon></button>
+        </div>
+        <button class="wiz-advanced" data-wiz-exit>Configurazione avanzata</button>
+      </div>`;
+  }
+
   _flowEditor(card) {
+    if (this._wizard && this._wizard.cardId === card.id) return this._wizardEditor(card);
     const flow = card.flow || {};
     const devices = flow.devices || [];
+    const configured = FLOW_SLOTS.some((sl) => flow[sl.key]);
     return `<div class="section">
+      <strong>CONFIGURAZIONE GUIDATA</strong>
+      <span class="hint">${configured
+        ? "Ricomincia la procedura passo passo se vuoi rifare i collegamenti."
+        : "Ti fa una domanda alla volta: fotovoltaico, batteria, rete, carichi. È il modo consigliato."}</span>
+      <button class="wide" data-wiz-start><ha-icon icon="mdi:wizard-hat"></ha-icon> ${configured ? "RIFAI LA PROCEDURA" : "AVVIA CONFIGURAZIONE GUIDATA"}</button>
+    </div>
+    <div class="section">
       <strong>SORGENTI DI POTENZA</strong>
       <span class="hint">Collega i sensori di <em>potenza istantanea</em> (W o kW), non i contatori di energia in kWh.</span>
       <button class="secondary wide" data-detect-flow><ha-icon icon="mdi:auto-fix"></ha-icon> RILEVA DALLA DASHBOARD ENERGIA</button>
@@ -1780,10 +1946,8 @@ class CyborgDashboard extends HTMLElement {
     const tap = (card.actions && card.actions.tap && card.actions.tap.action) || "more-info";
 
     return `<aside class="editor">
-      <div class="editor-title">
-        <div><small>CARD</small><h2>${esc(card.name || (st && st.attributes.friendly_name) || card.entity_id || "Nuova card")}</h2></div>
-        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
-      </div>
+      ${this._editorHead("CARD", card.name || (COMPOSITE_META[card.type] && COMPOSITE_META[card.type][0])
+        || (st && st.attributes.friendly_name) || card.entity_id || "Nuova card")}
 
       ${card.type === "energyflow" ? this._flowEditor(card)
         : COMPOSITE_TYPES.has(card.type) ? this._compositeEditor(card) : `
@@ -1840,10 +2004,7 @@ class CyborgDashboard extends HTMLElement {
 
   _renderSectionEditor(section) {
     return `<aside class="editor">
-      <div class="editor-title">
-        <div><small>SEZIONE</small><h2>${esc(section.title)}</h2></div>
-        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
-      </div>
+      ${this._editorHead("SEZIONE", section.title)}
       <div class="section">
         <label>TITOLO<input data-sec-prop="title" value="${esc(section.title)}"></label>
         <label>COLORE ACCENTO<input type="color" data-sec-prop="accent" value="${esc(section.accent || "#00e5ff")}"></label>
@@ -1868,7 +2029,7 @@ class CyborgDashboard extends HTMLElement {
   _renderPageEditor() {
     const p = this._page();
     return `<aside class="editor">
-      <div class="editor-title"><div><small>PAGINA</small><h2>Struttura</h2></div></div>
+      ${this._editorHead("PAGINA", "Struttura")}
       <div class="section">
         <label>TITOLO<input data-page-prop="title" value="${esc(p.title || "")}" placeholder="Cyborg"></label>
         <label>ICONA${iconField("data-page-prop", "icon", p.icon || "mdi:hexagon-multiple-outline")}</label>
@@ -1891,6 +2052,15 @@ class CyborgDashboard extends HTMLElement {
         <button class="secondary wide danger-outline" data-autocompose="replace"><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DA ZERO</button>
       </div>
     </aside>`;
+  }
+
+  /** Sheet chrome shared by every editor variant (handle + close). */
+  _editorHead(label, title, closable) {
+    return `<div class="editor-handle" data-close-editor></div>
+      <div class="editor-title">
+        <div><small>${esc(label)}</small><h2>${esc(title)}</h2></div>
+        <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>`;
   }
 
   _renderEditor() {
@@ -1974,7 +2144,7 @@ class CyborgDashboard extends HTMLElement {
         ${tabs}
         <div class="workspace ${this._editing ? "editing" : ""}">
           <main>${body}</main>
-          ${this._editing ? this._renderEditor() : ""}
+          ${this._editing ? `<div class="editor-backdrop" data-editor-backdrop></div>${this._renderEditor()}` : ""}
         </div>
       </div>`;
 
@@ -2050,8 +2220,16 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => this._tap(el.getAttribute("data-sec"), el.getAttribute("data-item"));
     });
 
-    const close = q("[data-close-editor]");
-    if (close) close.onclick = () => { this._selected = null; this._touch(); };
+    all("[data-close-editor]").forEach((el) => {
+      el.onclick = () => {
+        // On a phone the sheet covers the page, so closing it with nothing
+        // selected has to leave edit mode entirely or the user is stuck.
+        if (this._selected) this._selected = null; else this._editing = false;
+        this._touch();
+      };
+    });
+    const backdrop = q("[data-editor-backdrop]");
+    if (backdrop) backdrop.onclick = () => { this._selected = null; this._touch(); };
 
     // --- page + theme
     all("[data-page-prop]").forEach((el) => {
@@ -2265,6 +2443,93 @@ class CyborgDashboard extends HTMLElement {
     });
     const overview = q("[data-compose-overview]");
     if (overview) overview.onclick = () => this._composeOverview();
+
+    // --- guided energy wizard
+    const wizStart = q("[data-wiz-start]");
+    if (wizStart && card) wizStart.onclick = () => {
+      this._wizard = { cardId: card.id, step: 0 };
+      this._entityQuery = "";
+      this._touch();
+    };
+    const wizExit = q("[data-wiz-exit]");
+    if (wizExit) wizExit.onclick = () => { this._wizard = null; this._entityQuery = ""; this._touch(); };
+    const wizBack = q("[data-wiz-back]");
+    if (wizBack) wizBack.onclick = () => {
+      this._wizard.step = Math.max(0, this._wizard.step - 1);
+      this._entityQuery = "";
+      this._touch();
+    };
+    const wizNext = q("[data-wiz-next]");
+    if (wizNext && card) wizNext.onclick = () => {
+      const total = WIZARD_STEPS.length + 2;
+      if (this._wizard.step >= total - 1) {
+        // Leaving the wizard is the natural moment to persist: the user has
+        // just answered every question and expects it to stick.
+        this._wizard = null;
+        this._save();
+        return;
+      }
+      this._wizard.step += 1;
+      this._entityQuery = "";
+      this._touch();
+    };
+    const wizSkip = q("[data-wiz-skip]");
+    if (wizSkip && card) wizSkip.onclick = () => {
+      const step = WIZARD_STEPS[this._wizard.step];
+      if (step) { card.flow = card.flow || {}; card.flow[step.key] = null; }
+      this._wizard.step += 1;
+      this._entityQuery = "";
+      this._touch();
+    };
+    all("[data-wiz-pick]").forEach((el) => {
+      el.onclick = () => {
+        const step = WIZARD_STEPS[this._wizard.step];
+        card.flow = card.flow || {};
+        const id = el.getAttribute("data-wiz-pick");
+        // tapping the selected one again clears it, so a mistake is undoable
+        card.flow[step.key] = card.flow[step.key] === id ? null : id;
+        this._touch();
+      };
+    });
+    all("[data-wiz-load]").forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute("data-wiz-load");
+        card.flow = card.flow || {};
+        const devices = card.flow.devices = card.flow.devices || [];
+        const i = devices.findIndex((d) => d.entity === id);
+        if (i >= 0) {
+          devices.splice(i, 1);
+          // a removed load can no longer be anyone's parent
+          for (const d of devices) if (d.parent === id) d.parent = null;
+        } else if (devices.length < 8) {
+          const st = this._hass.states[id];
+          devices.push({ entity: id, name: (st && st.attributes.friendly_name) || "", icon: "", parent: null });
+        }
+        this._touch();
+      };
+    });
+    all("[data-wiz-parent]").forEach((el) => {
+      el.onchange = () => {
+        const i = parseInt(el.getAttribute("data-wiz-parent"), 10);
+        const devices = (card.flow && card.flow.devices) || [];
+        if (!devices[i]) return;
+        devices[i].parent = el.value || null;
+        // a cycle would make the "unmeasured" maths meaningless
+        const seen = new Set();
+        let node = devices[i], guard = 0;
+        while (node && node.parent && guard++ < 10) {
+          if (seen.has(node.parent)) { devices[i].parent = null; break; }
+          seen.add(node.parent);
+          node = devices.find((d) => d.entity === node.parent);
+          if (node === devices[i]) { devices[i].parent = null; break; }
+        }
+        this._touch();
+      };
+    });
+    if (this._wizard) {
+      const ws = q("[data-entity-search]");
+      if (ws) ws.oninput = () => { this._entityQuery = ws.value; this._touch(); };
+    }
 
     // --- energy flow editor
     const detect = q("[data-detect-flow]");
@@ -2673,6 +2938,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-leaf-name{fill:currentColor;opacity:.72;font:600 10px Inter,system-ui,sans-serif;text-anchor:middle}
 .ef-leaf-share{fill:var(--nc);opacity:.6;font:700 9px ui-monospace,monospace;text-anchor:middle}
 .ef-leaf.other .ef-leaf-val,.ef-leaf.other .ef-leaf-share{opacity:.75}
+.ef-leaf.child .ef-leaf-val{font-size:12px}
+.ef-leaf.child .ef-leaf-name{font-size:9px;opacity:.6}
+.ef-leaf.child .ef-leaf-share{font-size:8px}
+.ef-leaf.child .ef-node-ring{stroke-width:1.1;opacity:.6}
 .ef-leaf.other .ef-node-ring{stroke-dasharray:4 4}
 .ef-subhint{fill:currentColor;opacity:.4;font:600 11px Inter,system-ui,sans-serif;text-anchor:middle}
 .ef.open{max-width:660px}
@@ -2691,6 +2960,35 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-dev-bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .5s ease}
 .ef-dev strong{font:750 13px Inter,system-ui,sans-serif;color:var(--accent);flex-shrink:0}
 .ef-dev strong small{font-size:9px;opacity:.55;margin-left:2px;font-weight:600}
+.wiz{display:flex;flex-direction:column;gap:12px}
+.wiz-bar{display:flex;gap:4px}
+.wiz-bar i{flex:1;height:3px;border-radius:99px;background:rgba(255,255,255,.12)}
+.wiz-bar i.done{background:color-mix(in srgb,var(--accent) 55%,transparent)}
+.wiz-bar i.now{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.wiz-head span{display:block;font:10px ui-monospace,monospace;letter-spacing:2px;color:var(--accent);opacity:.7}
+.wiz-head strong{display:block;margin-top:3px;font-size:17px}
+.wiz-q{font-size:14px;font-weight:650;line-height:1.4}
+.wiz-hint{font-size:11.5px;line-height:1.55;opacity:.55}
+.wiz-step input[type=text]{width:100%;box-sizing:border-box;margin-top:2px;padding:10px;border-radius:9px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000);color:var(--primary-text-color);font:inherit;font-size:13px}
+.wiz-step input[type=text]:focus{outline:0;border-color:var(--accent)}
+.wiz-list{display:flex;flex-direction:column;gap:4px;max-height:44vh;overflow-y:auto;padding-right:2px}
+.wiz-opt{position:relative;display:flex;align-items:center;gap:9px;width:100%;padding:13px 10px 9px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid transparent;color:var(--primary-text-color);text-align:left;font-weight:500;letter-spacing:0}
+.wiz-opt:hover{border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.wiz-opt.sel{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.wiz-opt>ha-icon{--mdc-icon-size:18px;color:var(--accent);flex-shrink:0;opacity:.75}
+.wiz-opt.sel>ha-icon{opacity:1}
+.wiz-opt>div{flex:1;min-width:0}
+.wiz-opt strong{display:block;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wiz-opt small{display:block;opacity:.45;font:10px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wiz-val{flex-shrink:0;font:750 13px Inter,system-ui,sans-serif;color:var(--accent)}
+.wiz-val i{font-style:normal;font-size:9px;opacity:.55;margin-left:2px}
+.wiz-tip{position:absolute;top:4px;right:8px;font-style:normal;font:700 8px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;padding:2px 6px;border-radius:99px;background:var(--accent);color:#03131a}
+.wiz-parent{display:block;margin-top:11px;font-size:12px;font-weight:600}
+.wiz-parent select{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:9px;border-radius:9px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 60%,#000);color:var(--primary-text-color);font:inherit;font-size:12.5px}
+.wiz-nav{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.wiz-nav button{flex:1;justify-content:center;min-width:110px}
+.wiz-advanced{background:none;border:0;color:var(--primary-text-color);opacity:.4;font-size:11px;font-weight:500;letter-spacing:0;text-decoration:underline;padding:4px;align-self:center}
+.wiz-advanced:hover{opacity:.8}
 .flow-slot{margin-top:9px;padding:10px;border-radius:11px;background:color-mix(in srgb,var(--nc) 8%,transparent);border:1px solid color-mix(in srgb,var(--nc) 26%,transparent)}
 .flow-slot.active{border-color:var(--nc)}
 .flow-slot-head{display:flex;align-items:center;gap:9px}
@@ -2743,7 +3041,19 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .room-ent span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .editor input[type=range]{padding:0;height:26px;background:transparent;border:0;accent-color:var(--accent)}
 
-@media(max-width:1200px){.workspace.editing{grid-template-columns:minmax(0,1fr)}.editor{position:relative;top:0;max-height:none}}
+.editor-backdrop{display:none}
+.editor-handle{display:none}
+@media(max-width:1200px){
+  .workspace.editing{grid-template-columns:minmax(0,1fr)}
+  /* Below this width the editor used to flow to the bottom of the document,
+     several screens under the cards: tapping CONFIGURA selected the card but
+     the panel opened where nobody would ever scroll. It is a sheet now. */
+  .editor-backdrop{display:block;position:fixed;inset:0;background:rgba(2,6,12,.6);backdrop-filter:blur(2px);z-index:40}
+  .editor{position:fixed;left:0;right:0;bottom:0;top:auto;z-index:41;max-height:86vh;overflow-y:auto;overscroll-behavior:contain;border-radius:22px 22px 0 0;border-bottom:0;padding:8px 16px calc(20px + env(safe-area-inset-bottom));box-shadow:0 -24px 60px rgba(0,0,0,.6);animation:cySheet .24s cubic-bezier(.32,.72,0,1)}
+  .editor-handle{display:block;width:42px;height:4px;margin:6px auto 10px;border-radius:99px;background:color-mix(in srgb,var(--accent) 45%,transparent);cursor:pointer}
+  .editor-title{position:sticky;top:0;z-index:2;margin:0 -16px 4px;padding:6px 16px 12px;background:linear-gradient(180deg,var(--card-background-color) 78%,transparent)}
+}
+@keyframes cySheet{from{transform:translateY(100%)}to{transform:translateY(0)}}
 @media(max-width:820px){.shell{padding:14px 14px 40px}.grid{grid-template-columns:repeat(6,minmax(0,1fr))}.item{grid-column:span 6!important}.top{align-items:flex-start}}
 `;
   }
