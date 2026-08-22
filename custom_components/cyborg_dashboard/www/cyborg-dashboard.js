@@ -2,9 +2,6 @@ const DEFAULT_DASHBOARD={version:5,pages:[{id:"home",title:"NEXUS",icon:"mdi:hex
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 const coerceNumber=v=>{if(typeof v==="boolean")return null;const n=Number(v);return Number.isFinite(n)?n:null};
-const evaluateRule=(rule,state,attrs)=>{const raw=rule.source==="attribute"?attrs?.[rule.attribute]:state;const op=rule.operator;if(op==="eq"||op==="neq"){const m=String(raw)===String(rule.value);return op==="eq"?m:!m}const cur=coerceNumber(raw);if(cur===null)return false;const target=coerceNumber(rule.value);if(op==="gt")return cur>target;if(op==="gte")return cur>=target;if(op==="lt")return cur<target;if(op==="lte")return cur<=target;if(op==="between"){const t2=coerceNumber(rule.value2);const[lo,hi]=[target,t2].sort((a,b)=>a-b);return cur>=lo&&cur<=hi}return false};
-const resolveRuleStyle=(rules,state,attrs)=>{for(const r of rules||[])if(evaluateRule(r,state,attrs))return r.style||{};return null};
-const coerceNumber=v=>{if(typeof v==="boolean")return null;const n=Number(v);return Number.isFinite(n)?n:null};
 const evaluateRule=(rule,state,attrs)=>{const raw=rule.source==="attribute"?attrs?.[rule.attribute]:state;const op=rule.operator;
  if(op==="eq"||op==="neq"){const m=String(raw)===String(rule.value);return op==="eq"?m:!m}
  const cur=coerceNumber(raw);if(cur===null)return false;const target=coerceNumber(rule.value);
@@ -16,7 +13,7 @@ class CyborgDashboard extends HTMLElement{
  set hass(v){this._hass=v;if(!this._loaded)this._load();else if(!this._editing)this.render()}
  connectedCallback(){this._load()}
  async _load(){if(!this._hass||this._loading)return;this._loading=true;try{const r=await this._hass.callWS({type:"cyborg_dashboard/get"});this._dashboard=r.dashboard||structuredClone(DEFAULT_DASHBOARD)}catch(e){this._dashboard=structuredClone(DEFAULT_DASHBOARD);this._error="Impossibile caricare la dashboard"}this._loaded=true;this._loading=false;this.render()}
- async _save(){this._saving=true;this.render();try{await this._hass.callWS({type:"cyborg_dashboard/save",dashboard:this._dashboard});this._saved=true;this._editing=false}catch(e){console.error(e);this._error="Impossibile salvare"}this._saving=false;this.render();setTimeout(()=>{this._saved=false;this._error="";this.render()},1800)}
+ async _save(){this._saving=true;this.render();try{const r=await this._hass.callWS({type:"cyborg_dashboard/save",dashboard:this._dashboard,expected_revision:this._dashboard.revision});this._dashboard.revision=r.revision;this._saved=true;this._editing=false}catch(e){console.error(e);if(e&&e.code==="revision_conflict"){this._error="Modificato altrove, ricarico i dati aggiornati";try{const r=await this._hass.callWS({type:"cyborg_dashboard/get"});this._dashboard=r.dashboard||this._dashboard}catch(e2){console.error(e2)}}else{this._error="Impossibile salvare"}}this._saving=false;this.render();setTimeout(()=>{this._saved=false;this._error="";this.render()},1800)}
  _edit(){this._editing=!this._editing;this._selected=null;this.render()}
  _add(type="entity"){const ids=Object.keys(this._hass.states||{}),id=ids.find(x=>x.startsWith("sensor."))||ids[0];if(!id)return;const n=this._dashboard.pages[0].items.length;const item={id:"item-"+Date.now(),type,entity_id:id,position:{x:(n%4)*3,y:Math.floor(n/4)*2,w:3,h:2},show_name:true,show_state:true,show_icon:true,appearance:{template:"neo",radius:16,glow:true,icon:"mdi:chart-box-outline",accent:"#00e5ff"},states:{},actions:{tap:{action:"more-info"}}};this._dashboard.pages[0].items.push(item);this._selected=item.id;this.render()}
  _item(id){return this._dashboard.pages[0].items.find(i=>i.id===id)}

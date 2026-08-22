@@ -12,7 +12,7 @@ DEFAULT_THEME = {
 
 
 def default_dashboard() -> dict[str, Any]:
-    return {"version": 2, "pages": [{
+    return {"version": 2, "revision": 0, "pages": [{
         "id": "home", "title": "Home", "icon": "mdi:home",
         "layout": {"type": "grid", "columns": 12, "gap": 16}, "items": [],
     }], "theme": dict(DEFAULT_THEME)}
@@ -24,6 +24,10 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
         return default_dashboard()
     result = default_dashboard()
     result.update(data)
+    try:
+        result["revision"] = int(data.get("revision", 0))
+    except (TypeError, ValueError):
+        result["revision"] = 0
     theme = dict(DEFAULT_THEME)
     if isinstance(data.get("theme"), dict):
         theme.update(data["theme"])
