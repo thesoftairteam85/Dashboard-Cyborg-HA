@@ -4,6 +4,43 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.9.0] - 2026-08-22
+
+Il nodo Casa del flusso energetico si apre su un sotto-albero dei carichi.
+
+### Novità
+- **Clicca su "Casa" e lo schema si espande**: un ramo animato per ogni
+  dispositivo che sta assorbendo potenza in quel momento, con watt, nome e
+  quota percentuale sul consumo di casa. I rami hanno la stessa animazione
+  proporzionale del resto dello schema, quindi si legge a colpo d'occhio chi
+  sta tirando davvero.
+- **Nodo "Non misurato".** È il motivo per cui vale la pena aprire l'albero:
+  vedere che 1,2 kW di un assorbimento da 1,9 kW non è attribuito a nulla dice
+  molto più di un elenco ordinato delle tre prese che per caso hai
+  strumentato. Compare solo se lo scarto supera il 5% del consumo di casa con
+  un minimo di 25 W — sotto quella soglia è arrotondamento tra contatori, non
+  un carico nascosto — e solo se c'è almeno un carico misurato con cui
+  confrontarlo.
+- **Carichi ordinati dal più assorbente**, e chi è a zero non compare: un albero
+  pieno di rami da 0 W nasconde quelli che contano.
+- Le foglie sono cliccabili e aprono i dettagli dell'entità. Con l'albero
+  aperto l'elenco piatto sotto lo schema sparisce, per non dire due volte la
+  stessa cosa.
+
+### Note tecniche
+- **L'apertura è stato di sessione, non configurazione.** Salvarla nella card
+  avrebbe marcato la dashboard come modificata a ogni clic e trasformato una
+  curiosità in una scrittura su disco.
+- La firma anti-ridisegno ora include le entità del flusso energetico (rete,
+  solare, batteria, casa e ogni carico). Senza, l'albero sarebbe rimasto
+  congelato finché non cambiava un'entità mostrata da un'altra card.
+
+### Verifica
+- `tests/frontend.test.js`: 189 asserzioni (20 nuove sul sotto-albero:
+  ordinamento, esclusione dei carichi a zero, calcolo e soglia del resto non
+  misurato, somma dei rami uguale al totale di casa, apertura che non sporca
+  la configurazione salvata).
+
 ## [0.8.0] - 2026-08-22
 
 Pagina Panoramica: meteo, presenze, notifiche, dispositivi accesi e flusso

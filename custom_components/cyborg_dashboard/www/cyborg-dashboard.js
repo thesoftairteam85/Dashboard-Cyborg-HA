@@ -460,6 +460,7 @@ class CyborgDashboard extends HTMLElement {
     this._registryLoading = false;
     this._drag = null;          // active room drag
     this._flowSlot = null;      // which energy-flow slot the picker is filling
+    this._flowOpen = {};        // per-card: is the load sub-tree expanded?
   }
 
   set hass(value) {
@@ -506,6 +507,7 @@ class CyborgDashboard extends HTMLElement {
     if (!this._hass || !this._dashboard) return "";
     const parts = [this._editing ? "e" : "v", String(this._pageIndex),
       JSON.stringify(this._selected || null)];
+    parts.push(JSON.stringify(this._flowOpen || {}));
     if (this._isFloorplan()) {
       parts.push(this._registry ? "reg" : "noreg");
       for (const room of this._rooms()) {
@@ -520,6 +522,17 @@ class CyborgDashboard extends HTMLElement {
       for (const it of sec.items) {
         const st = this._hass.states[it.entity_id];
         parts.push(it.entity_id + "=" + (st ? st.state : "?"));
+        // composite cards read entities that are not their own entity_id
+        if (it.type === "energyflow" && it.flow) {
+          for (const key of ["grid", "solar", "battery", "home"]) {
+            const fs = it.flow[key] && this._hass.states[it.flow[key]];
+            if (fs) parts.push(it.flow[key] + "=" + fs.state);
+          }
+          for (const d of (it.flow.devices || [])) {
+            const ds = this._hass.states[d.entity];
+            if (ds) parts.push(d.entity + "=" + ds.state);
+          }
+        }
       }
     }
     return parts.join("|");
@@ -1113,6 +1126,76 @@ class CyborgDashboard extends HTMLElement {
     return `<path id="${id}" class="ef-path active" style="--nc:${color}" d="${d}"/>${dots.join("")}`;
   }
 
+  /**
+   * Loads currently drawing power, biggest first, plus the unmeasured rest.
+   *
+   * The "Altro" node is the point of the whole sub-tree: seeing that 1.2 kW of
+   * a 1.9 kW draw is unaccounted for tells you far more than a tidy list of the
+   * three sockets you happen to have metered. It is only shown when the gap is
+   * big enough to be real rather than rounding noise.
+   */
+  _flowLoads(flow, homeWatts) {
+    const loads = [];
+    for (const d of (flow.devices || [])) {
+      const st = this._hass.states[d.entity];
+      if (!st) continue;
+      const n = parseFloat(st.state);
+      if (!Number.isFinite(n) || n < 1) continue;
+      loads.push({
+        entity: d.entity,
+        name: d.name || st.attributes.friendly_name || d.entity,
+        icon: d.icon || autoIcon(d.entity, st),
+        watts: n,
+      });
+    }
+    loads.sort((a, b) => b.watts - a.watts);
+    const measured = loads.reduce((t, l) => t + l.watts, 0);
+    const rest = homeWatts - measured;
+    // 5% of the house draw, floor 25 W: below that the remainder is meter
+    // rounding between sensors, not a real hidden load. And with nothing
+    // metered at all there is no remainder to speak of — a lone "unmeasured"
+    // node would just restate the house total under a second name.
+    if (loads.length && homeWatts > 0 && rest > Math.max(25, homeWatts * 0.05)) {
+      loads.push({ entity: null, name: "Non misurato", icon: "mdi:help-circle-outline",
+        watts: rest, other: true });
+    }
+    return loads;
+  }
+
+  _flowSubtree(item, flow, homeWatts) {
+    const loads = this._flowLoads(flow, homeWatts);
+    if (!loads.length) {
+      return { extra: 120, svg: `<text class="ef-subhint" x="300" y="430">${
+        esc((flow.devices || []).length
+          ? "Nessun carico sta assorbendo potenza in questo momento"
+          : "Nessun carico monitorato — aggiungili nell'editor della card")}</text>` };
+    }
+    const n = loads.length;
+    const spacing = Math.min(118, 560 / n);
+    const y = 470;
+    const parts = [];
+    loads.forEach((l, i) => {
+      const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
+      const id = "ef-l" + i;
+      const color = l.other ? "#8d99ae" : "#00e5ff";
+      const share = homeWatts > 0 ? (l.watts / homeWatts) * 100 : 0;
+      const f = fmtPower(l.watts);
+      // branch first so the nodes paint over it
+      parts.push(this._flowPath(id, `M300,322 C300,392 ${x},396 ${x},${y - 26}`,
+        l.watts, color, false));
+      parts.push(`<g class="ef-leaf ${l.other ? "other" : ""}" style="--nc:${color}"
+          ${l.entity ? `data-fp-badge="${esc(l.entity)}"` : ""} transform="translate(${x},${y})">
+          <circle r="26" class="ef-node-bg"/>
+          <circle r="26" class="ef-node-ring"/>
+          <text class="ef-leaf-val" y="-1">${esc(f.v)}</text>
+          <text class="ef-leaf-unit" y="11">${esc(f.u)}</text>
+          <text class="ef-leaf-name" y="44">${esc(l.name.length > 13 ? l.name.slice(0, 12) + "\u2026" : l.name)}</text>
+          <text class="ef-leaf-share" y="57">${esc(share >= 1 ? Math.round(share) + "%" : "<1%")}</text>
+        </g>`);
+    });
+    return { extra: 200, svg: parts.join("") };
+  }
+
   _energyFlowBody(item) {
     const flow = item.flow || {};
     const configured = FLOW_SLOTS.some((s) => flow[s.key]);
@@ -1132,7 +1215,16 @@ class CyborgDashboard extends HTMLElement {
       Math.abs(v.grid || 0), v.gridOut > 0 ? "IMMISSIONE" : "PRELIEVO") : "";
     const battNode = v.hasBattery ? this._flowNode(526, 176, S.battery,
       Math.abs(v.batt || 0), v.battIn > 0 ? "IN CARICA" : "IN SCARICA") : "";
-    const homeNode = this._flowNode(300, 286, S.home, v.home, null, true);
+    const open = !!this._flowOpen[item.id];
+    const loadCount = this._flowLoads(flow, v.home).length;
+    const homeNode = `<g class="ef-home-hit" data-flow-toggle="${esc(item.id)}">
+        ${this._flowNode(300, 286, S.home, v.home, null, true)}
+        <g transform="translate(300,286)">
+          <circle r="34" class="ef-home-ring ${open ? "open" : ""}"/>
+          <text class="ef-home-hint" y="64">${esc(open ? "CHIUDI" : loadCount ? loadCount + " CARICHI" : "DETTAGLIO")}</text>
+        </g>
+      </g>`;
+    const sub = open ? this._flowSubtree(item, flow, v.home) : { extra: 0, svg: "" };
 
     const paths = [
       v.hasSolar ? this._flowPath("ef-s-h", "M300,102 L300,252", v.solar - v.gridOut, S.solar.color, false) : "",
@@ -1157,11 +1249,11 @@ class CyborgDashboard extends HTMLElement {
         </div>`;
     }).join("");
 
-    return `<div class="ef">
-        <svg class="ef-svg" viewBox="0 0 600 366" preserveAspectRatio="xMidYMid meet">
-          ${paths}${solarNode}${gridNode}${battNode}${homeNode}
+    return `<div class="ef${open ? " open" : ""}">
+        <svg class="ef-svg" viewBox="0 0 600 ${366 + sub.extra}" preserveAspectRatio="xMidYMid meet">
+          ${paths}${sub.svg}${solarNode}${gridNode}${battNode}${homeNode}
         </svg>
-        ${devices ? `<div class="ef-devs">${devices}</div>` : ""}
+        ${devices && !open ? `<div class="ef-devs">${devices}</div>` : ""}
       </div>`;
   }
 
@@ -2088,6 +2180,14 @@ class CyborgDashboard extends HTMLElement {
         };
       }
     });
+    all("[data-flow-toggle]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const id = el.getAttribute("data-flow-toggle");
+        this._flowOpen[id] = !this._flowOpen[id];
+        this._touch();
+      };
+    });
     all("[data-fp-badge]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
@@ -2558,6 +2658,25 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-path.idle{stroke:currentColor;opacity:.12;stroke-dasharray:4 6}
 .ef-path.active{stroke:var(--nc);opacity:.3}
 .ef-dot{fill:var(--nc);filter:drop-shadow(0 0 5px var(--nc))}
+.ef-home-hit{cursor:pointer}
+.ef-home-ring{fill:none;stroke:var(--accent);stroke-width:1.5;opacity:0;transition:opacity .2s}
+.ef-home-hit:hover .ef-home-ring{opacity:.5}
+.ef-home-ring.open{opacity:.85;stroke-dasharray:3 4}
+.ef-home-hint{fill:var(--accent);opacity:.55;font:700 8px ui-monospace,monospace;letter-spacing:1.6px;text-anchor:middle}
+.ef-home-hit:hover .ef-home-hint{opacity:1}
+.ef-leaf{cursor:pointer}
+.ef-leaf .ef-node-bg{fill:color-mix(in srgb,var(--nc) 15%,#0a1119)}
+.ef-leaf .ef-node-ring{stroke:var(--nc);stroke-width:1.4;opacity:.8}
+.ef-leaf:hover .ef-node-ring{opacity:1;stroke-width:2}
+.ef-leaf-val{fill:var(--nc);font:750 15px Inter,system-ui,sans-serif;text-anchor:middle}
+.ef-leaf-unit{fill:currentColor;opacity:.45;font:600 8px ui-monospace,monospace;text-anchor:middle}
+.ef-leaf-name{fill:currentColor;opacity:.72;font:600 10px Inter,system-ui,sans-serif;text-anchor:middle}
+.ef-leaf-share{fill:var(--nc);opacity:.6;font:700 9px ui-monospace,monospace;text-anchor:middle}
+.ef-leaf.other .ef-leaf-val,.ef-leaf.other .ef-leaf-share{opacity:.75}
+.ef-leaf.other .ef-node-ring{stroke-dasharray:4 4}
+.ef-subhint{fill:currentColor;opacity:.4;font:600 11px Inter,system-ui,sans-serif;text-anchor:middle}
+.ef.open{max-width:660px}
+.ef.open .ef-svg{max-width:620px}
 .ef-empty{display:flex;flex-direction:column;align-items:center;gap:7px;padding:34px 18px;text-align:center;opacity:.6}
 .ef-empty ha-icon{--mdc-icon-size:30px;color:var(--accent)}
 .ef-empty strong{font-size:13px}

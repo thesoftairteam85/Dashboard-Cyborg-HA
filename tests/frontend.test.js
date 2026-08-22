@@ -346,6 +346,62 @@ ok("editor flusso: inverti segno", el.innerHTML.includes("data-flow-invert"));
 ok("editor flusso: nessun picker entita singola", !el.innerHTML.includes("ENTIT\u00c0 SELEZIONATA"));
 el._editing = false; el._selected = null;
 
+console.log("\n== 11b. SOTTO-ALBERO DEI CARICHI ==");
+states["sensor.lav"]  = S("820", { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
+states["sensor.asc"]  = S("310", { friendly_name: "Asciugatrice", device_class: "power", unit_of_measurement: "W" });
+states["sensor.nas"]  = S("64",  { friendly_name: "NAS", device_class: "power", unit_of_measurement: "W" });
+states["sensor.zero"] = S("0",   { friendly_name: "Spento", device_class: "power", unit_of_measurement: "W" });
+const treeFlow = { solar: "sensor.pv", grid: "sensor.rete", battery: "sensor.batt",
+  devices: [{ entity: "sensor.nas", name: "NAS" }, { entity: "sensor.lav", name: "Lavatrice" },
+            { entity: "sensor.asc", name: "Asciugatrice" }, { entity: "sensor.zero", name: "Spento" }] };
+const treeCard = { id: "tree", type: "energyflow", entity_id: "", name: "", size: "lg",
+  appearance: {}, states: {}, actions: {}, flow: treeFlow };
+const tsec = { id: "ts", title: "Energia", icon: "mdi:flash", accent: "#ffd166", items: [treeCard] };
+
+let loads = el._flowLoads(treeFlow, 1270);
+ok("carichi ordinati dal piu' assorbente", loads.map(l => l.name).slice(0, 3).join() === "Lavatrice,Asciugatrice,NAS", loads.map(l => l.name).join());
+ok("carico a 0 W escluso", !loads.some(l => l.name === "Spento"));
+ok("resto non misurato calcolato", loads[3] && loads[3].other && loads[3].watts === 76, JSON.stringify(loads[3]));
+ok("somma carichi + resto = casa", Math.round(loads.reduce((t, l) => t + l.watts, 0)) === 1270);
+
+// remainder below the noise floor must not become a phantom load
+loads = el._flowLoads(treeFlow, 1194 + 10);
+ok("resto sotto soglia non mostrato", !loads.some(l => l.other), JSON.stringify(loads.map(l => l.name)));
+loads = el._flowLoads({ devices: [] }, 900);
+ok("nessun carico configurato -> nessun nodo", loads.length === 0);
+
+el._flowOpen = {};
+let treeClosed = el._renderCard(treeCard, tsec);
+ok("chiuso: nessuna foglia", !treeClosed.includes("ef-leaf"));
+ok("chiuso: elenco piatto visibile", treeClosed.includes("ef-dev-bar"));
+ok("chiuso: invito con il numero di carichi", treeClosed.includes("4 CARICHI"), "atteso 4 (3 attivi + non misurato)");
+ok("chiuso: nodo casa cliccabile", treeClosed.includes('data-flow-toggle="tree"'));
+
+el._flowOpen.tree = true;
+const treeOpened = el._renderCard(treeCard, tsec);
+ok("aperto: una foglia per carico", (treeOpened.match(/class="ef-leaf ["a-z]/g) || []).length === 4, String((treeOpened.match(/class="ef-leaf ["a-z]/g) || []).length));
+ok("aperto: nodo non misurato tratteggiato", treeOpened.includes('class="ef-leaf other"'));
+ok("aperto: quote percentuali", treeOpened.includes("65%") && treeOpened.includes("24%"));
+ok("aperto: elenco piatto nascosto (niente doppioni)", !treeOpened.includes("ef-dev-bar"));
+ok("aperto: viewBox esteso", /viewBox="0 0 600 566"/.test(treeOpened), (treeOpened.match(/viewBox="[^"]+"/) || [])[0]);
+ok("aperto: le foglie reali sono cliccabili", treeOpened.includes('data-fp-badge="sensor.lav"'));
+ok("aperto: il nodo non misurato non e' cliccabile", !/ef-leaf other[^>]*data-fp-badge/.test(treeOpened));
+ok("aperto: nessun undefined", !/>undefined</.test(treeOpened) && !treeOpened.includes("[object"));
+
+// the sub-tree must react to a load changing, not freeze until something else does
+el._dashboard.pages[0].sections = [tsec];
+el._pageIndex = 0;
+const sigA = el._buildSignature();
+states["sensor.lav"] = S("120", { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
+ok("la firma segue i carichi del flusso", el._buildSignature() !== sigA);
+states["sensor.lav"] = S("820", { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
+
+// expansion is runtime state: clicking must never dirty the saved dashboard
+const before = JSON.stringify(el._dashboard);
+el._flowOpen.tree = false; el._flowOpen.tree = true;
+ok("l'apertura non sporca la configurazione salvata", JSON.stringify(el._dashboard) === before);
+el._flowOpen = {};
+
 console.log("\n== 12. LEGGIBILITA STATI ==");
 ok("porta on -> Aperta", stateWords("on", "door") === "Aperta");
 ok("porta off -> Chiusa", stateWords("off", "door") === "Chiusa");
