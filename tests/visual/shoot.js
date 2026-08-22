@@ -24,6 +24,8 @@ const DEFAULT_DASH = {
   await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
 
   const shots = [
+    ["10-sections",  { pageIndex: 0, autoCompose: true }],
+    ["11-sect-edit", { pageIndex: 0, autoCompose: true, editing: true }],
     ["01-map-3d",    { pageIndex: 1, autoRooms: true }],
     ["02-map-edit",  { pageIndex: 1, autoRooms: true, editing: true }],
     ["03-map-room",  { pageIndex: 1, autoRooms: true, editing: true, selectRoom: true }],

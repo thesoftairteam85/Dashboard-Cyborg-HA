@@ -227,8 +227,70 @@ function unprojectDelta(dx, dy, yawDeg, pitchDeg, zoom) {
   return { dx: k * (cP * cY * dx + sY * dy), dy: k * (-cP * sY * dx + cY * dy) };
 }
 
+const DEVICE_CLASS_LABELS = {
+  power: "Potenza", energy: "Energia", current: "Corrente", voltage: "Tensione",
+  temperature: "Temperatura", humidity: "Umidità", pressure: "Pressione",
+  battery: "Batteria", illuminance: "Luminosità", signal_strength: "Segnale",
+  door: "Porta", window: "Finestra", motion: "Movimento", smoke: "Fumo",
+  gas: "Gas", moisture: "Allagamento", occupancy: "Presenza",
+  connectivity: "Connessione", problem: "Anomalia", lock: "Serratura",
+  timestamp: "Orario", duration: "Durata", frequency: "Frequenza",
+  power_factor: "Fattore di potenza", apparent_power: "Potenza apparente",
+  reactive_power: "Potenza reattiva", water: "Acqua", volume: "Volume",
+};
+
+const DOMAIN_LABELS = {
+  light: "Luce", switch: "Interruttore", climate: "Clima", cover: "Tapparella",
+  fan: "Ventilazione", lock: "Serratura", media_player: "Media",
+  alarm_control_panel: "Allarme", camera: "Videocamera", person: "Persona",
+  device_tracker: "Dispositivo", siren: "Sirena", vacuum: "Aspirapolvere",
+  water_heater: "Scaldacqua", humidifier: "Umidificatore", scene: "Scena",
+  script: "Script", automation: "Automazione", update: "Aggiornamento",
+  weather: "Meteo", sun: "Sole", valve: "Valvola",
+};
+
+/**
+ * What to print under a card's title.
+ *
+ * Never the state: every card type already renders the state in its body, so
+ * echoing it here produced cards that said "760" and "760 W" one line apart.
+ * A descriptor (what the reading IS) carries information the body does not.
+ */
+function cardDescriptor(entityId, st) {
+  const dc = st && st.attributes && st.attributes.device_class;
+  if (dc && DEVICE_CLASS_LABELS[dc]) return DEVICE_CLASS_LABELS[dc];
+  const d = domainOf(entityId);
+  return DOMAIN_LABELS[d] || d.replace(/_/g, " ");
+}
+
 const SIZE_SPAN = { sm: 3, md: 4, lg: 6, xl: 12 };
 const SIZE_LABEL = { sm: "Piccola", md: "Media", lg: "Grande", xl: "Piena larghezza" };
+
+/* ==========================================================================
+ * ENERGY FLOW
+ *
+ * Rendered as inline SVG with SMIL <animateMotion> particles rather than a
+ * charting library or a requestAnimationFrame loop: the browser animates the
+ * particles off the main thread, so a wall tablet showing this card all day
+ * costs no JavaScript and no battery. Sign conventions differ between meters
+ * (some report export as negative, some as a separate entity), so each source
+ * has an explicit invert flag instead of a guess.
+ * ======================================================================== */
+
+const FLOW_SLOTS = [
+  { key: "solar",   label: "Solare",   icon: "mdi:solar-power-variant", color: "#ffd166" },
+  { key: "grid",    label: "Rete",     icon: "mdi:transmission-tower",  color: "#8ecae6" },
+  { key: "battery", label: "Batteria", icon: "mdi:home-battery",        color: "#06d6a0" },
+  { key: "home",    label: "Casa",     icon: "mdi:home-lightning-bolt", color: "#00e5ff" },
+];
+
+/** Format watts for display, switching to kW once the number gets long. */
+function fmtPower(w) {
+  if (w === null || w === undefined || !Number.isFinite(w)) return { v: "—", u: "" };
+  const a = Math.abs(w);
+  if (a >= 1000) return { v: (w / 1000).toFixed(a >= 10000 ? 0 : 2), u: "kW" };
+  return { v: a >= 100 ? String(Math.round(w)) : w.toFixed(1), u: "W" };
+}
 
 const CARD_TYPES = [
   ["entity", "Entità — icona, nome e stato"],
@@ -238,7 +300,26 @@ const CARD_TYPES = [
   ["climate", "Clima — temperatura e modalità"],
   ["gauge", "Gauge — indicatore percentuale"],
   ["chart", "Grafico — andamento 24h"],
+  ["energyflow", "Flusso energetico — schema animato"],
 ];
+
+const BINARY_WORDS = {
+  door: ["Aperta", "Chiusa"], window: ["Aperta", "Chiusa"],
+  garage_door: ["Aperto", "Chiuso"], opening: ["Aperto", "Chiuso"],
+  motion: ["Movimento", "Nessun movimento"], occupancy: ["Presente", "Vuoto"],
+  presence: ["In casa", "Fuori"], moisture: ["Allagamento", "Asciutto"],
+  smoke: ["Fumo", "Nessun fumo"], gas: ["Gas", "Nessun gas"],
+  problem: ["Anomalia", "Regolare"], safety: ["Pericolo", "Sicuro"],
+  connectivity: ["Connesso", "Disconnesso"], battery: ["Scarica", "Carica"],
+  lock: ["Sbloccata", "Bloccata"], tamper: ["Manomesso", "Integro"],
+};
+
+/** Human wording for a state, using the device class when it has one. */
+function stateWords(state, deviceClass) {
+  const pair = BINARY_WORDS[deviceClass];
+  if (pair && (state === "on" || state === "off")) return state === "on" ? pair[0] : pair[1];
+  return String(state).replace(/_/g, " ");
+}
 
 const ON_STATES = new Set(["on", "open", "unlocked", "home", "playing", "cleaning", "heat", "cool", "heat_cool", "dry", "fan_only", "auto"]);
 const ALERT_STATES = new Set(["armed_away", "armed_home", "armed_night", "armed_vacation", "triggered", "unlocked", "open", "on"]);
@@ -297,6 +378,7 @@ class CyborgDashboard extends HTMLElement {
     this._registry = null;      // {areas, byArea} from the HA registries
     this._registryLoading = false;
     this._drag = null;          // active room drag
+    this._flowSlot = null;      // which energy-flow slot the picker is filling
   }
 
   set hass(value) {
@@ -523,6 +605,21 @@ class CyborgDashboard extends HTMLElement {
       });
     }
 
+    // Lead the Energia section with a flow diagram and try to wire it up from
+    // the Energy dashboard straight away: requiring the user to know that a
+    // card type called "energyflow" exists would make the best card in the set
+    // effectively undiscoverable.
+    const energia = built.find((sec) => sec.title === "Energia");
+    if (energia) {
+      const flowCard = {
+        id: uid("card"), type: "energyflow", entity_id: "", name: "", size: "lg",
+        appearance: { icon: "mdi:transit-connection-variant" }, states: {}, actions: {},
+        flow: { grid: null, solar: null, battery: null, home: null, devices: [] },
+      };
+      energia.items.unshift(flowCard);
+      this._detectFlow(flowCard);
+    }
+
     page.sections = replace ? built : page.sections.concat(built);
     this._selected = null;
     this._touch();
@@ -692,7 +789,7 @@ class CyborgDashboard extends HTMLElement {
       text = on ? "ON" : "OFF";
       cls = on ? "on" : "off";
     } else if (kind === "binary") {
-      text = on ? (attrs.device_class === "door" || attrs.device_class === "window" ? "APERTO" : "ON") : "OK";
+      text = stateWords(state, attrs.device_class).toUpperCase();
       cls = on ? "alert" : "";
     } else if (kind === "cover") {
       const pos = attrs.current_position;
@@ -867,8 +964,127 @@ class CyborgDashboard extends HTMLElement {
     </aside>`;
   }
 
+  /**
+   * Resolve the live power at each node.
+   *
+   * Home consumption is derived rather than required: if you have a grid meter
+   * and a PV meter you already know what the house is drawing, and asking for a
+   * fourth sensor most installs do not have would leave the card empty.
+   */
+  _flowValues(flow) {
+    const raw = (id, invert) => {
+      const st = id && this._hass.states[id];
+      if (!st) return null;
+      const n = parseFloat(st.state);
+      if (!Number.isFinite(n)) return null;
+      return invert ? -n : n;
+    };
+    const solar = Math.max(0, raw(flow.solar, flow.invert_solar) || 0);
+    const grid = raw(flow.grid, flow.invert_grid);          // + import, - export
+    const batt = raw(flow.battery, flow.invert_battery);    // + discharge, - charge
+    const gridIn = grid === null ? 0 : Math.max(0, grid);
+    const gridOut = grid === null ? 0 : Math.max(0, -grid);
+    const battOut = batt === null ? 0 : Math.max(0, batt);
+    const battIn = batt === null ? 0 : Math.max(0, -batt);
+    const explicitHome = raw(flow.home, false);
+    const home = explicitHome !== null && explicitHome !== undefined
+      ? Math.max(0, explicitHome)
+      : Math.max(0, solar + gridIn + battOut - gridOut - battIn);
+    return { solar, grid, batt, gridIn, gridOut, battOut, battIn, home,
+      hasSolar: !!flow.solar, hasGrid: !!flow.grid, hasBattery: !!flow.battery };
+  }
+
+  _flowNode(x, y, slot, value, sub, labelBelow) {
+    const f = fmtPower(value);
+    // labelBelow is used for the house: its title would otherwise sit exactly
+    // where the grid and battery curves arrive at the node.
+    const labelY = labelBelow ? 50 : -46;
+    const subY = labelBelow ? 64 : 52;
+    return `<g class="ef-node" transform="translate(${x},${y})">
+        <circle r="34" class="ef-node-bg" style="--nc:${slot.color}"/>
+        <circle r="34" class="ef-node-ring" style="--nc:${slot.color}"/>
+        <text class="ef-node-label" y="${labelY}">${esc(slot.label.toUpperCase())}</text>
+        <text class="ef-node-val" y="2" style="--nc:${slot.color}">${esc(f.v)}</text>
+        <text class="ef-node-unit" y="17">${esc(f.u)}</text>
+        ${sub ? `<text class="ef-node-sub" y="${subY}">${esc(sub)}</text>` : ""}
+      </g>`;
+  }
+
+  /**
+   * One flow path plus its moving particles.
+   * Particle interval shortens as power rises, so the picture reads as a rate
+   * at a glance instead of needing the numbers to be compared.
+   */
+  _flowPath(id, d, watts, color, reverse) {
+    if (!watts || watts < 1) return `<path class="ef-path idle" d="${d}"/>`;
+    const dur = Math.max(0.9, Math.min(4.5, 2600 / Math.max(watts, 60)));
+    const n = watts > 2000 ? 4 : watts > 500 ? 3 : 2;
+    const dots = [];
+    for (let i = 0; i < n; i++) {
+      dots.push(`<circle r="4" class="ef-dot" style="--nc:${color}">
+        <animateMotion dur="${dur.toFixed(2)}s" repeatCount="indefinite"
+          begin="${((dur / n) * i).toFixed(2)}s"
+          keyPoints="${reverse ? "1;0" : "0;1"}" keyTimes="0;1" calcMode="linear">
+          <mpath href="#${id}"/></animateMotion></circle>`);
+    }
+    return `<path id="${id}" class="ef-path active" style="--nc:${color}" d="${d}"/>${dots.join("")}`;
+  }
+
+  _energyFlowBody(item) {
+    const flow = item.flow || {};
+    const configured = FLOW_SLOTS.some((s) => flow[s.key]);
+    if (!configured) {
+      return `<div class="ef-empty">
+          <ha-icon icon="mdi:transit-connection-variant"></ha-icon>
+          <strong>Flusso energetico non configurato</strong>
+          <span>Apri la card in modifica e collega almeno il sensore di potenza della rete.</span>
+        </div>`;
+    }
+    const v = this._flowValues(flow);
+    const S = FLOW_SLOTS.reduce((m, s) => (m[s.key] = s, m), {});
+
+    // Layout: solar above, grid left, battery right, house below-centre.
+    const solarNode = v.hasSolar ? this._flowNode(300, 62, S.solar, v.solar) : "";
+    const gridNode = v.hasGrid ? this._flowNode(74, 176, S.grid,
+      Math.abs(v.grid || 0), v.gridOut > 0 ? "IMMISSIONE" : "PRELIEVO") : "";
+    const battNode = v.hasBattery ? this._flowNode(526, 176, S.battery,
+      Math.abs(v.batt || 0), v.battIn > 0 ? "IN CARICA" : "IN SCARICA") : "";
+    const homeNode = this._flowNode(300, 286, S.home, v.home, null, true);
+
+    const paths = [
+      v.hasSolar ? this._flowPath("ef-s-h", "M300,102 L300,252", v.solar - v.gridOut, S.solar.color, false) : "",
+      v.hasGrid ? this._flowPath("ef-g-h", "M104,196 C160,250 200,272 262,282",
+        v.gridIn || v.gridOut, S.grid.color, v.gridOut > 0) : "",
+      v.hasBattery ? this._flowPath("ef-b-h", "M496,196 C440,250 400,272 338,282",
+        v.battOut || v.battIn, S.battery.color, v.battIn > 0) : "",
+    ].join("");
+
+    const devices = (flow.devices || []).map((d) => {
+      const st = this._hass.states[d.entity];
+      const n = st ? parseFloat(st.state) : NaN;
+      const f = fmtPower(Number.isFinite(n) ? n : null);
+      const share = v.home > 0 && Number.isFinite(n) ? Math.min(100, (n / v.home) * 100) : 0;
+      return `<div class="ef-dev" data-fp-badge="${esc(d.entity)}">
+          <ha-icon icon="${esc(d.icon || autoIcon(d.entity, st || { attributes: {} }))}"></ha-icon>
+          <div class="ef-dev-text">
+            <span>${esc(d.name || (st && st.attributes.friendly_name) || d.entity)}</span>
+            <div class="ef-dev-bar"><i style="width:${share.toFixed(1)}%"></i></div>
+          </div>
+          <strong>${esc(f.v)}<small>${esc(f.u)}</small></strong>
+        </div>`;
+    }).join("");
+
+    return `<div class="ef">
+        <svg class="ef-svg" viewBox="0 0 600 366" preserveAspectRatio="xMidYMid meet">
+          ${paths}${solarNode}${gridNode}${battNode}${homeNode}
+        </svg>
+        ${devices ? `<div class="ef-devs">${devices}</div>` : ""}
+      </div>`;
+  }
+
   _cardBody(item, st) {
     const type = item.type || "entity";
+    if (type === "energyflow") return this._energyFlowBody(item);
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
     const unit = attrs.unit_of_measurement || "";
@@ -884,7 +1100,7 @@ class CyborgDashboard extends HTMLElement {
       const alert = ALERT_STATES.has(state);
       return `<div class="status-badge ${alert ? "alert" : ""}">
           <ha-icon icon="${esc(alert ? "mdi:alert-circle" : "mdi:check-circle")}"></ha-icon>
-          <span>${esc(state.replace(/_/g, " "))}</span>
+          <span>${esc(stateWords(state, attrs.device_class))}</span>
         </div>`;
     }
     if (type === "climate") {
@@ -919,28 +1135,33 @@ class CyborgDashboard extends HTMLElement {
     if (type === "sensor") {
       return `<div class="value">${esc(state)}<span class="unit-inline">${esc(unit)}</span></div>`;
     }
-    return `<div class="value entity-value">${esc(String(state).replace(/_/g, " "))}${unit ? `<span class="unit-inline">${esc(unit)}</span>` : ""}</div>`;
+    return `<div class="value entity-value">${esc(stateWords(state, attrs.device_class))}${unit ? `<span class="unit-inline">${esc(unit)}</span>` : ""}</div>`;
   }
 
   _renderCard(item, section) {
+    const isFlow = item.type === "energyflow";
     const st = this._hass.states[item.entity_id];
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
-    const name = item.name || attrs.friendly_name || item.entity_id || "Card non configurata";
+    const name = item.name || (isFlow ? "Flusso energetico" : null)
+      || attrs.friendly_name || item.entity_id || "Card non configurata";
     const app = item.appearance || {};
     const stateStyle = (item.states && (item.states[state] || item.states.default)) || {};
     const accent = stateStyle.accent || app.accent || section.accent || (this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff";
-    const icon = stateStyle.icon || app.icon || autoIcon(item.entity_id, st || { attributes: {} });
-    const span = SIZE_SPAN[item.size] || SIZE_SPAN.md;
+    const icon = stateStyle.icon || app.icon
+      || (isFlow ? "mdi:transit-connection-variant" : autoIcon(item.entity_id, st || { attributes: {} }));
+    const span = SIZE_SPAN[item.size] || (isFlow ? SIZE_SPAN.lg : SIZE_SPAN.md);
     const glow = app.glow !== false;
     const pulse = stateStyle.animate ? " pulse" : "";
-    const missing = !item.entity_id ? " missing" : "";
+    const missing = (!item.entity_id && !isFlow) ? " missing" : "";
     const style = `--accent:${esc(accent)};grid-column:span ${span}`;
     const body = this._cardBody(item, st);
+    const sub = stateStyle.label
+      || (isFlow ? "Potenza in tempo reale" : cardDescriptor(item.entity_id, st));
     const head = `<div class="head">
         ${item.show_icon === false ? "" : `<ha-icon class="card-icon" icon="${esc(icon)}"></ha-icon>`}
         <div class="head-text"><strong>${esc(name)}</strong>${
-          item.show_state === false ? "" : `<small>${esc(stateStyle.label || String(state).replace(/_/g, " "))}</small>`}</div>
+          item.show_state === false ? "" : `<small>${esc(sub)}</small>`}</div>
       </div>`;
 
     if (this._editing) {
@@ -955,8 +1176,8 @@ class CyborgDashboard extends HTMLElement {
           </div>
         </article>`;
     }
-    return `<article class="item${pulse}${missing}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
-        data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}">${head}${body}</article>`;
+    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+        ${isFlow ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
   }
 
   _renderSection(section, index, total) {
@@ -994,13 +1215,15 @@ class CyborgDashboard extends HTMLElement {
 
   // -------------------------------------------------------------- editor ---
 
-  _entityResults() {
+  _entityResults(deviceClass) {
     const q = (this._entityQuery || "").trim().toLowerCase();
-    if (!q) return `<div class="entity-result-empty">Digita almeno due caratteri per cercare tra le ${Object.keys(this._hass.states).length} entità.</div>`;
+    if (!q) return `<div class="entity-result-empty">Digita almeno due caratteri per cercare${
+      deviceClass ? ` tra i sensori di ${esc(DEVICE_CLASS_LABELS[deviceClass] || deviceClass).toLowerCase()}` : ` tra le ${Object.keys(this._hass.states).length} entità`}.</div>`;
     if (q.length < 2) return `<div class="entity-result-empty">Continua a digitare...</div>`;
     const rows = [];
     for (const id of Object.keys(this._hass.states)) {
       const st = this._hass.states[id];
+      if (deviceClass && st.attributes.device_class !== deviceClass) continue;
       const fn = String(st.attributes.friendly_name || "");
       const hay = (fn + " " + id).toLowerCase();
       const at = hay.indexOf(q);
@@ -1017,6 +1240,102 @@ class CyborgDashboard extends HTMLElement {
       </div>`).join("");
   }
 
+  /**
+   * Propose flow entities from the Home Assistant Energy dashboard.
+   *
+   * energy/get_prefs (verified present in core 2026.8.3) stores *energy*
+   * statistics in kWh, but a live flow diagram needs *power* in W. So each
+   * energy statistic is used as a naming hint: look for a power-class sensor
+   * belonging to the same device name. Anything not matched is simply left for
+   * the user to pick, rather than guessed wrongly.
+   */
+  async _detectFlow(card) {
+    let prefs;
+    try {
+      prefs = await this._hass.callWS({ type: "energy/get_prefs" });
+    } catch (err) {
+      this._error = "Dashboard Energia non configurata in Home Assistant";
+      this._touch();
+      return;
+    }
+    const powerByHint = (hint) => {
+      if (!hint) return null;
+      const base = hint.replace(/^sensor\./, "").replace(/_(energia|energy)_?(totale|total)?$/i, "");
+      let best = null, bestLen = 0;
+      for (const id of Object.keys(this._hass.states)) {
+        if (!id.startsWith("sensor.")) continue;
+        const st = this._hass.states[id];
+        if (st.attributes.device_class !== "power") continue;
+        const name = id.replace(/^sensor\./, "");
+        if (!name.startsWith(base.slice(0, Math.max(6, base.length - 6)))) continue;
+        if (name.length > bestLen) { best = id; bestLen = name.length; }
+      }
+      return best;
+    };
+    const flow = Object.assign({}, card.flow || {});
+    for (const src of (prefs.energy_sources || [])) {
+      const guess = powerByHint(src.stat_energy_from);
+      if (!guess) continue;
+      if (src.type === "grid" && !flow.grid) flow.grid = guess;
+      if (src.type === "solar" && !flow.solar) flow.solar = guess;
+      if (src.type === "battery" && !flow.battery) flow.battery = guess;
+    }
+    const devices = (flow.devices || []).slice();
+    for (const d of (prefs.device_consumption || [])) {
+      const guess = powerByHint(d.stat_consumption);
+      if (guess && !devices.some((x) => x.entity === guess)) {
+        devices.push({ entity: guess, name: d.name || "", icon: "" });
+      }
+    }
+    flow.devices = devices.slice(0, 8);
+    card.flow = flow;
+    const found = FLOW_SLOTS.filter((sl) => flow[sl.key]).length;
+    this._error = found || devices.length
+      ? "" : "Nessun sensore di potenza corrispondente trovato — collegali a mano";
+    this._touch();
+  }
+
+  _flowEditor(card) {
+    const flow = card.flow || {};
+    const devices = flow.devices || [];
+    return `<div class="section">
+      <strong>SORGENTI DI POTENZA</strong>
+      <span class="hint">Collega i sensori di <em>potenza istantanea</em> (W o kW), non i contatori di energia in kWh.</span>
+      <button class="secondary wide" data-detect-flow><ha-icon icon="mdi:auto-fix"></ha-icon> RILEVA DALLA DASHBOARD ENERGIA</button>
+      ${FLOW_SLOTS.map((sl) => {
+        const id = flow[sl.key];
+        const st = id && this._hass.states[id];
+        const active = this._flowSlot === sl.key;
+        return `<div class="flow-slot ${active ? "active" : ""}" style="--nc:${sl.color}">
+            <div class="flow-slot-head">
+              <ha-icon icon="${esc(sl.icon)}"></ha-icon>
+              <div><strong>${esc(sl.label)}</strong>
+                <small>${id ? esc((st && st.attributes.friendly_name) || id) : "non collegato"}</small></div>
+              <button class="mini" data-flow-pick="${esc(sl.key)}">${active ? "CHIUDI" : id ? "CAMBIA" : "COLLEGA"}</button>
+              ${id ? `<button class="mini danger" data-flow-clear="${esc(sl.key)}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}
+            </div>
+            ${id && sl.key !== "home" ? `<label class="check"><input type="checkbox" data-flow-invert="${esc(sl.key)}" ${flow["invert_" + sl.key] ? "checked" : ""}> Inverti segno${
+              sl.key === "grid" ? " (se l'immissione risulta come prelievo)" : sl.key === "battery" ? " (se carica e scarica sono scambiate)" : ""}</label>` : ""}
+            ${active ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
+              <div class="entity-results" data-entity-results>${this._entityResults("power")}</div>` : ""}
+          </div>`;
+      }).join("")}
+      ${flow.home ? "" : '<span class="hint">Senza il sensore "Casa" il consumo domestico viene calcolato: solare + prelievo + scarica batteria − immissione − carica batteria.</span>'}
+    </div>
+    <div class="section">
+      <strong>CARICHI MONITORATI</strong>
+      <span class="hint">${devices.length} carichi mostrati sotto lo schema, con la quota sul consumo di casa.</span>
+      ${devices.map((d, i) => `<div class="room-ent">
+          <ha-icon icon="${esc(d.icon || autoIcon(d.entity, this._hass.states[d.entity] || { attributes: {} }))}"></ha-icon>
+          <span>${esc(d.name || (this._hass.states[d.entity] && this._hass.states[d.entity].attributes.friendly_name) || d.entity)}</span>
+          <button class="mini danger" data-flow-dev-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+        </div>`).join("")}
+      <button class="mini ${this._flowSlot === "__dev" ? "accentbtn" : ""}" data-flow-pick="__dev"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARICO</button>
+      ${this._flowSlot === "__dev" ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
+        <div class="entity-results" data-entity-results>${this._entityResults("power")}</div>` : ""}
+    </div>`;
+  }
+
   _renderCardEditor(card) {
     const st = this._hass.states[card.entity_id];
     const app = card.appearance || {};
@@ -1031,6 +1350,7 @@ class CyborgDashboard extends HTMLElement {
         <button class="icon" data-close-editor><ha-icon icon="mdi:close"></ha-icon></button>
       </div>
 
+      ${card.type === "energyflow" ? this._flowEditor(card) : `
       <div class="section">
         <strong>ENTITÀ</strong>
         ${card.entity_id ? `<div class="entity-current">
@@ -1040,7 +1360,7 @@ class CyborgDashboard extends HTMLElement {
           </div>` : `<div class="warn">Nessuna entità collegata — la card resterà vuota.</div>`}
         <label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
         <div class="entity-results" data-entity-results>${this._entityResults()}</div>
-      </div>
+      </div>`}
 
       <div class="section">
         <strong>PRESENTAZIONE</strong>
@@ -1323,6 +1643,15 @@ class CyborgDashboard extends HTMLElement {
 
     // --- card props
     if (card) {
+      const flowSearch = this._flowSlot ? q("[data-entity-search]") : null;
+      if (flowSearch) {
+        flowSearch.oninput = () => {
+          this._entityQuery = flowSearch.value;
+          const box = q("[data-entity-results]");
+          if (box) { box.innerHTML = this._entityResults("power"); this._bindEntityRows(); }
+        };
+        this._bindEntityRows();
+      }
       all("[data-prop]").forEach((el) => {
         el.onchange = () => {
           const path = el.getAttribute("data-prop");
@@ -1450,6 +1779,40 @@ class CyborgDashboard extends HTMLElement {
     });
     this._bindRoomDrag();
 
+    // --- energy flow editor
+    const detect = q("[data-detect-flow]");
+    if (detect && card) detect.onclick = () => this._detectFlow(card);
+    all("[data-flow-pick]").forEach((el) => {
+      el.onclick = () => {
+        const key = el.getAttribute("data-flow-pick");
+        this._flowSlot = this._flowSlot === key ? null : key;
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+    all("[data-flow-clear]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !card.flow) return;
+        delete card.flow[el.getAttribute("data-flow-clear")];
+        this._touch();
+      };
+    });
+    all("[data-flow-invert]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        card.flow = card.flow || {};
+        card.flow["invert_" + el.getAttribute("data-flow-invert")] = el.checked;
+        this._touch();
+      };
+    });
+    all("[data-flow-dev-remove]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !card.flow || !card.flow.devices) return;
+        card.flow.devices.splice(parseInt(el.getAttribute("data-flow-dev-remove"), 10), 1);
+        this._touch();
+      };
+    });
+
     // --- live icon preview (no full re-render: keeps the field focused)
     all("[data-icon-live]").forEach((el) => {
       el.oninput = () => {
@@ -1473,6 +1836,24 @@ class CyborgDashboard extends HTMLElement {
     Array.from(this.querySelectorAll("[data-pick-entity]")).forEach((row) => {
       row.onclick = () => {
         const id = row.getAttribute("data-pick-entity");
+        if (this._flowSlot) {
+          const c = this._selectedCard();
+          if (c) {
+            c.flow = c.flow || {};
+            if (this._flowSlot === "__dev") {
+              c.flow.devices = c.flow.devices || [];
+              if (!c.flow.devices.some((d) => d.entity === id)) {
+                c.flow.devices.push({ entity: id, name: "", icon: "" });
+              }
+            } else {
+              c.flow[this._flowSlot] = id;
+            }
+          }
+          this._flowSlot = null;
+          this._entityQuery = "";
+          this._touch();
+          return;
+        }
         if (this._isFloorplan()) {
           const room = this._room(this._selected && this._selected.roomId);
           if (!room || !Array.isArray(room.entities)) return;
@@ -1625,7 +2006,7 @@ button.mini.danger{color:#ff8091;border-color:rgba(255,61,113,.4);background:rgb
 button.mini.grow{flex:1;justify-content:center}
 
 .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:${theme.gap || 16}px}
-.item{--accent:#00e5ff;position:relative;display:flex;flex-direction:column;min-height:118px;padding:16px 17px;border-radius:${theme.radius || 16}px;background:linear-gradient(158deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);overflow:hidden;transition:transform .18s,border-color .18s}
+.item{--accent:#00e5ff;position:relative;display:flex;flex-direction:column;min-height:98px;padding:14px 16px;border-radius:${theme.radius || 16}px;background:linear-gradient(158deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);overflow:hidden;transition:transform .18s,border-color .18s}
 .item::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);opacity:.85}
 .item[data-tap]{cursor:pointer}
 .item[data-tap]:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
@@ -1637,22 +2018,23 @@ button.mini.grow{flex:1;justify-content:center}
 .head-text{min-width:0}
 .head-text strong{display:block;font-size:13px;font-weight:650;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .head-text small{display:block;margin-top:2px;font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.45;text-transform:uppercase}
-.value{margin-top:auto;padding-top:14px;font-size:30px;font-weight:750;line-height:1;color:var(--accent);letter-spacing:-.03em}
+.value{margin-top:auto;padding-top:10px;font-size:27px;font-weight:750;line-height:1;color:var(--accent);letter-spacing:-.03em}
 .entity-value{font-size:20px;text-transform:capitalize}
 .unit-inline{font-size:14px;font-weight:500;opacity:.55;margin-left:5px}
-.control-row{margin-top:auto;padding-top:16px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.control-row{margin-top:auto;padding-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
 .control-state{font:10px ui-monospace,monospace;letter-spacing:2px;opacity:.6}
 .switch{width:46px;height:26px;border-radius:13px;background:rgba(255,255,255,.14);position:relative;flex-shrink:0;transition:background .22s}
 .switch .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .22s;box-shadow:0 1px 3px rgba(0,0,0,.45)}
 .switch.on{background:var(--accent)}
 .switch.on .knob{left:23px}
-.status-badge{margin-top:auto;padding-top:16px;display:flex;align-items:center;gap:7px}
+.status-badge{margin-top:auto;padding-top:12px;display:flex;align-items:center;gap:7px}
 .status-badge ha-icon{--mdc-icon-size:17px;color:#06d6a0}
 .status-badge span{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#06d6a0}
 .status-badge.alert ha-icon,.status-badge.alert span{color:var(--accent)}
 .climate-body{margin-top:auto;padding-top:12px}
 .climate-body .value{margin-top:0;padding-top:0}
-.climate-meta{display:flex;gap:14px;margin-top:8px;font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.55}
+.climate-meta{display:flex;gap:12px;margin-top:8px;font:10px ui-monospace,monospace;letter-spacing:.5px;opacity:.8}
+.climate-meta span{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:99px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
 .climate-meta ha-icon{--mdc-icon-size:13px;vertical-align:-2px}
 .gauge{margin-top:auto;padding-top:14px}
 .gauge-track{height:6px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden}
@@ -1714,6 +2096,44 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .preset{--accent:#00e5ff;flex-direction:column;gap:5px;padding:12px 8px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);color:var(--primary-text-color);font-size:10px;letter-spacing:.06em}
 .preset ha-icon{--mdc-icon-size:20px;color:var(--accent)}
 
+
+.item.flow{cursor:default}
+.item.flow .value{display:none}
+.ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%}
+.ef-svg{display:block;width:100%;max-width:520px;margin:0 auto;height:auto;overflow:visible}
+.ef-node-bg{fill:color-mix(in srgb,var(--nc) 16%,#0a1119);stroke:none}
+.ef-node-ring{fill:none;stroke:var(--nc);stroke-width:1.5;opacity:.85}
+.ef-node-label{fill:currentColor;opacity:.45;font:600 10px ui-monospace,monospace;letter-spacing:2px;text-anchor:middle}
+.ef-node-val{fill:var(--nc);font:750 21px Inter,system-ui,sans-serif;text-anchor:middle;letter-spacing:-.02em}
+.ef-node-unit{fill:currentColor;opacity:.5;font:600 10px ui-monospace,monospace;text-anchor:middle}
+.ef-node-sub{fill:currentColor;opacity:.4;font:600 9px ui-monospace,monospace;letter-spacing:1.4px;text-anchor:middle}
+.ef-path{fill:none;stroke-width:2;stroke-linecap:round}
+.ef-path.idle{stroke:currentColor;opacity:.12;stroke-dasharray:4 6}
+.ef-path.active{stroke:var(--nc);opacity:.3}
+.ef-dot{fill:var(--nc);filter:drop-shadow(0 0 5px var(--nc))}
+.ef-empty{display:flex;flex-direction:column;align-items:center;gap:7px;padding:34px 18px;text-align:center;opacity:.6}
+.ef-empty ha-icon{--mdc-icon-size:30px;color:var(--accent)}
+.ef-empty strong{font-size:13px}
+.ef-empty span{font-size:11.5px;opacity:.7;max-width:320px;line-height:1.5}
+.ef-devs{display:flex;flex-direction:column;gap:5px;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.ef-dev{display:flex;align-items:center;gap:9px;padding:5px 2px;cursor:pointer;border-radius:8px}
+.ef-dev:hover{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.ef-dev ha-icon{--mdc-icon-size:16px;color:var(--accent);opacity:.8;flex-shrink:0}
+.ef-dev-text{flex:1;min-width:0}
+.ef-dev-text span{display:block;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ef-dev-bar{height:3px;margin-top:4px;border-radius:99px;background:rgba(255,255,255,.09);overflow:hidden}
+.ef-dev-bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .5s ease}
+.ef-dev strong{font:750 13px Inter,system-ui,sans-serif;color:var(--accent);flex-shrink:0}
+.ef-dev strong small{font-size:9px;opacity:.55;margin-left:2px;font-weight:600}
+.flow-slot{margin-top:9px;padding:10px;border-radius:11px;background:color-mix(in srgb,var(--nc) 8%,transparent);border:1px solid color-mix(in srgb,var(--nc) 26%,transparent)}
+.flow-slot.active{border-color:var(--nc)}
+.flow-slot-head{display:flex;align-items:center;gap:9px}
+.flow-slot-head>ha-icon{--mdc-icon-size:19px;color:var(--nc);flex-shrink:0}
+.flow-slot-head>div{flex:1;min-width:0}
+.flow-slot-head strong{display:block;font-size:12px}
+.flow-slot-head small{display:block;opacity:.5;font:10px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.flow-slot .check{margin-top:8px;font-size:10.5px}
+.flow-slot input[type=text]{margin-top:8px}
 
 .page-tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px}
 .page-tab{padding:9px 14px;border-radius:11px;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.55;font-size:11px}

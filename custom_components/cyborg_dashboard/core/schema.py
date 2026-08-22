@@ -144,6 +144,23 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["states"] = {}
     if not isinstance(result.get("actions"), dict):
         result["actions"] = {}
+    if result.get("type") == "energyflow":
+        flow = result.get("flow")
+        flow = dict(flow) if isinstance(flow, dict) else {}
+        for slot in ("grid", "solar", "battery", "home"):
+            value = flow.get(slot)
+            flow[slot] = value if isinstance(value, str) and value else None
+        for slot in ("grid", "solar", "battery"):
+            flow["invert_" + slot] = bool(flow.get("invert_" + slot))
+        devices = flow.get("devices")
+        flow["devices"] = [
+            {"entity": d["entity"],
+             "name": str(d.get("name") or ""),
+             "icon": str(d.get("icon") or "")}
+            for d in devices
+            if isinstance(d, dict) and isinstance(d.get("entity"), str) and d["entity"]
+        ][:8] if isinstance(devices, list) else []
+        result["flow"] = flow
     return result
 
 

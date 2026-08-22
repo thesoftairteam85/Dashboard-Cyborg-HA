@@ -41,6 +41,12 @@ const states={
  "sensor.cucina_potenza":S("23.4",{friendly_name:"Presa Cucina Potenza",device_class:"power",unit_of_measurement:"W"}),
  "switch.piano_induzione":S("off",{friendly_name:"Piano Induzione"}),
  "light.balcone_relay":S("off",{friendly_name:"Relè luce balcone"}),
+ "sensor.fotovoltaico_potenza":S("2840",{friendly_name:"Fotovoltaico Potenza",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.rete_potenza":S("-1120",{friendly_name:"Rete Potenza",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.batteria_potenza":S("-450",{friendly_name:"Batteria Potenza",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.lavatrice_potenza":S("820",{friendly_name:"Lavatrice",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.asciugatrice_potenza2":S("310",{friendly_name:"Asciugatrice",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.nas_potenza":S("64",{friendly_name:"NAS & Modem",device_class:"power",unit_of_measurement:"W"}),
  "sensor.balcone_temp":S("28.9",{friendly_name:"Balcone Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
 };
 const AREA=[["soggiorno","Soggiorno",null],["camera_da_letto","Camera da letto",null],
@@ -81,9 +87,23 @@ window.__mount=(dash,opts)=>{
       el._signature="";el.render();
       // the registry loads asynchronously; wait for it before generating rooms
       const wait=()=>{
-        if(!el._registry){setTimeout(wait,60);return;}
+        // only the floorplan page loads the registry; waiting for it on a
+        // sections page would spin forever
+        if((opts&&opts.autoRooms)&&!el._registry){setTimeout(wait,60);return;}
         if(opts&&opts.editing){el._editing=true;}
         if(opts&&opts.autoRooms){el._autoRooms();}
+        if(opts&&opts.autoCompose){el._autoCompose(true);}
+        if(opts&&opts.flowCard){
+          const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
+          sec.items.unshift({id:"flowcard",type:"energyflow",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},flow:{
+              solar:"sensor.fotovoltaico_potenza",grid:"sensor.rete_potenza",battery:"sensor.batteria_potenza",
+              invert_grid:false,invert_battery:false,
+              devices:[{entity:"sensor.lavatrice_potenza",name:"Lavatrice"},
+                       {entity:"sensor.asciugatrice_potenza2",name:"Asciugatrice"},
+                       {entity:"sensor.nas_potenza",name:"NAS & Modem"}]}});
+          if(opts.selectFlow){el._selected={kind:"card",sectionId:sec.id,itemId:"flowcard"};}
+        }
         if(opts&&opts.view){Object.assign(el._page().view,opts.view);}
         if(opts&&opts.selectRoom&&el._rooms().length){el._selected={kind:"room",roomId:el._rooms()[0].id};}
         el._signature="";el.render();

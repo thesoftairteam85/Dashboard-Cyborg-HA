@@ -60,3 +60,20 @@ assert schema.normalize_dashboard(r) == r, "v4 normalize must be idempotent"
 # unknown page type falls back to sections rather than rendering nothing
 assert schema.normalize_dashboard({"pages": [{"type": "wat"}]})["pages"][0]["type"] == "sections"
 print("schema v4: all tests passed")
+
+# ---- energyflow card -------------------------------------------------------
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "f", "type": "energyflow", "flow": {
+        "grid": "sensor.g", "solar": "", "battery": None, "invert_grid": "yes",
+        "devices": [{"entity": "sensor.a", "name": "A"}, {"entity": ""}, "junk",
+                    {"name": "no entity"}] + [{"entity": "sensor.x%d" % i} for i in range(12)]}},
+    {"id": "n", "type": "sensor", "entity_id": "sensor.z"}]}]}]})
+f = d["pages"][0]["sections"][0]["items"][0]["flow"]
+assert f["grid"] == "sensor.g" and f["solar"] is None and f["battery"] is None
+assert f["invert_grid"] is True and f["invert_solar"] is False
+assert len(f["devices"]) == 8, len(f["devices"])
+assert f["devices"][0] == {"entity": "sensor.a", "name": "A", "icon": ""}
+assert all(x["entity"] for x in f["devices"])
+assert "flow" not in d["pages"][0]["sections"][0]["items"][1], "non-flow card must not gain a flow key"
+assert schema.normalize_dashboard(d) == d, "energyflow normalize must be idempotent"
+print("energyflow schema: all tests passed")

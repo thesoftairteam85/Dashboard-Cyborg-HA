@@ -67,7 +67,7 @@ const secs = el._sections();
 ok("crea sezioni", secs.length >= 5, secs.length + " sezioni");
 console.log("     " + secs.map(s => s.title + "(" + s.items.length + ")").join("  "));
 
-const allEntities = secs.flatMap(s => s.items.map(i => i.entity_id));
+const allEntities = secs.flatMap(s => s.items.map(i => i.entity_id)).filter(Boolean);
 ok("nessun duplicato tra sezioni", new Set(allEntities).size === allEntities.length);
 ok("esclude unavailable/unknown",
   !allEntities.some(e => ["unavailable","unknown"].includes(states[e].state)),
@@ -75,16 +75,20 @@ ok("esclude unavailable/unknown",
 
 const byTitle = Object.fromEntries(secs.map(s => [s.title, s]));
 ok("allarme -> Sicurezza", byTitle.Sicurezza && byTitle.Sicurezza.items.some(i => i.entity_id === "alarm_control_panel.allarme"));
-ok("potenza -> Energia", byTitle.Energia && byTitle.Energia.items.every(i => states[i.entity_id].attributes.device_class.match(/power|energy|current|voltage/)));
+ok("potenza -> Energia", byTitle.Energia && byTitle.Energia.items.filter(i => i.entity_id)
+  .every(i => /power|energy|current|voltage/.test(states[i.entity_id].attributes.device_class || "")));
 ok("climate -> Clima", byTitle.Clima && byTitle.Clima.items.some(i => i.entity_id === "climate.thermostat"));
 ok("switch 'Luci scale' -> Illuminazione", byTitle.Illuminazione && byTitle.Illuminazione.items.some(i => i.entity_id === "switch.luci_scale"));
 ok("person -> Presenza", byTitle.Presenza && byTitle.Presenza.items.some(i => i.entity_id === "person.oscar"));
 ok("cpu temp -> Sistema (non Clima)", byTitle.Sistema && byTitle.Sistema.items.some(i => i.entity_id === "sensor.system_monitor_processor_temperature"));
 ok("climate card = tipo climate", byTitle.Clima.items.find(i=>i.entity_id==="climate.thermostat").type === "climate");
-ok("power card = tipo sensor", byTitle.Energia.items[0].type === "sensor");
+ok("power card = tipo sensor", byTitle.Energia.items.filter(i => i.entity_id)[0].type === "sensor");
 ok("luce card = tipo control", byTitle.Illuminazione.items[0].type === "control");
-ok("ogni card ha id univoco", new Set(secs.flatMap(s=>s.items.map(i=>i.id))).size === allEntities.length);
+ok("ogni card ha id univoco", new Set(secs.flatMap(s=>s.items.map(i=>i.id))).size === secs.flatMap(s=>s.items).length);
 ok("ogni card ha icona", secs.every(s => s.items.every(i => i.appearance.icon && i.appearance.icon.startsWith("mdi:"))));
+const energiaSec = secs.find(s => s.title === "Energia");
+ok("la sezione Energia guida con il flusso energetico", energiaSec && energiaSec.items[0].type === "energyflow");
+ok("il flusso non conta come entita duplicata", !allEntities.includes(""));
 
 console.log("\n== 2. RENDERING CARD PER TIPO ==");
 const sec = { id: "s1", title: "Test", icon: "mdi:x", accent: "#ff0000", items: [] };
@@ -281,6 +285,76 @@ ok("tap badge sensore non chiama servizi", wsCalls.length === 0);
 el._pageIndex = 0; el._editing = false; el._selected = null;
 el.render();
 ok("ritorno alla pagina sezioni", !el.innerHTML.includes(String.fromCharCode(34) + "fp-viewport"));
+
+console.log("\n== 11. FLUSSO ENERGETICO ==");
+el._pageIndex = 0; el._editing = false; el._selected = null;
+states["sensor.pv"]   = S("2840", { friendly_name: "Fotovoltaico", device_class: "power", unit_of_measurement: "W" });
+states["sensor.rete"] = S("-1120",{ friendly_name: "Rete", device_class: "power", unit_of_measurement: "W" });
+states["sensor.batt"] = S("-450", { friendly_name: "Batteria", device_class: "power", unit_of_measurement: "W" });
+states["sensor.lav"]  = S("820",  { friendly_name: "Lavatrice", device_class: "power", unit_of_measurement: "W" });
+
+let v = el._flowValues({ solar: "sensor.pv", grid: "sensor.rete", battery: "sensor.batt" });
+ok("solare letto", v.solar === 2840);
+ok("rete negativa = immissione", v.gridOut === 1120 && v.gridIn === 0);
+ok("batteria negativa = in carica", v.battIn === 450 && v.battOut === 0);
+ok("casa calcolata = 2840-1120-450", v.home === 1270, String(v.home));
+
+v = el._flowValues({ solar: "sensor.pv", grid: "sensor.rete", battery: "sensor.batt", invert_grid: true, invert_battery: true });
+ok("invert rete -> prelievo", v.gridIn === 1120 && v.gridOut === 0);
+ok("invert batteria -> scarica", v.battOut === 450);
+ok("casa con segni invertiti = 2840+1120+450", v.home === 4410, String(v.home));
+
+v = el._flowValues({ solar: "sensor.pv", grid: "sensor.rete", home: "sensor.lav" });
+ok("sensore casa esplicito ha precedenza", v.home === 820, String(v.home));
+v = el._flowValues({ grid: "sensor.non_esiste" });
+ok("entita mancante non rompe il calcolo", v.home === 0 && v.grid === null);
+v = el._flowValues({});
+ok("configurazione vuota -> casa 0", v.home === 0);
+
+ok("fmtPower W sotto 1000", fmtPower(760).u === "W" && fmtPower(760).v === "760");
+ok("fmtPower kW sopra 1000", fmtPower(2840).u === "kW" && fmtPower(2840).v === "2.84");
+ok("fmtPower null -> trattino", fmtPower(null).v === "\u2014");
+ok("fmtPower negativo usa il valore assoluto per la scala", fmtPower(-1120).v === "-1.12");
+
+const flowCard = { id: "f", type: "energyflow", entity_id: "", name: "", size: "lg",
+  appearance: {}, states: {}, actions: {},
+  flow: { solar: "sensor.pv", grid: "sensor.rete", battery: "sensor.batt",
+          devices: [{ entity: "sensor.lav", name: "Lavatrice" }] } };
+const fsec = { id: "s", title: "Energia", icon: "mdi:flash", accent: "#ffd166", items: [flowCard] };
+const fhtml = el._renderCard(flowCard, fsec);
+ok("4 nodi disegnati", (fhtml.match(/class="ef-node"/g) || []).length === 4);
+ok("3 percorsi attivi", (fhtml.match(/class="ef-path active"/g) || []).length === 3);
+ok("particelle animate", fhtml.includes("animateMotion") && fhtml.includes("<mpath"));
+ok("immissione etichettata", fhtml.includes("IMMISSIONE"));
+ok("batteria in carica etichettata", fhtml.includes("IN CARICA"));
+ok("carico elencato con quota", fhtml.includes("ef-dev-bar") && fhtml.includes("Lavatrice"));
+ok("nessun tap sull'intero diagramma", !fhtml.includes("data-tap"));
+ok("flow: nessun undefined", !/>undefined</.test(fhtml) && !fhtml.includes("[object"));
+ok("flow: div bilanciati", (fhtml.match(/<div/g) || []).length === (fhtml.match(/<\/div>/g) || []).length);
+
+const empty = el._renderCard({ id: "e", type: "energyflow", entity_id: "", appearance: {}, states: {}, actions: {}, flow: {} }, fsec);
+ok("flow non configurato -> messaggio, non card rotta", empty.includes("non configurato") && !empty.includes("missing"));
+
+el._editing = true;
+el._dashboard.pages[0].sections = [fsec];
+el._selected = { kind: "card", sectionId: "s", itemId: "f" };
+el.render();
+ok("editor flusso: 4 slot", (el.innerHTML.match(/class="flow-slot-head"/g) || []).length === 4,
+   String((el.innerHTML.match(/class="flow-slot-head"/g) || []).length));
+ok("editor flusso: rilevamento automatico", el.innerHTML.includes("data-detect-flow"));
+ok("editor flusso: inverti segno", el.innerHTML.includes("data-flow-invert"));
+ok("editor flusso: nessun picker entita singola", !el.innerHTML.includes("ENTIT\u00c0 SELEZIONATA"));
+el._editing = false; el._selected = null;
+
+console.log("\n== 12. LEGGIBILITA STATI ==");
+ok("porta on -> Aperta", stateWords("on", "door") === "Aperta");
+ok("porta off -> Chiusa", stateWords("off", "door") === "Chiusa");
+ok("movimento on", stateWords("on", "motion") === "Movimento");
+ok("senza device_class resta lo stato", stateWords("heat_cool", null) === "heat cool");
+ok("descrittore non ripete il valore", cardDescriptor("sensor.pv", states["sensor.pv"]) === "Potenza");
+ok("descrittore per dominio senza device_class", cardDescriptor("light.x", { attributes: {} }) === "Luce");
+const dupe = el._renderCard({ id: "d", type: "sensor", entity_id: "sensor.pv", appearance: {}, states: {}, actions: {} }, fsec);
+ok("card sensore non stampa il valore due volte", (dupe.match(/2840/g) || []).length === 1, String((dupe.match(/2840/g) || []).length));
 
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");

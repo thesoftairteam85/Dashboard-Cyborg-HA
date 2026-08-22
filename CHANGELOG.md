@@ -4,6 +4,55 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.7.0] - 2026-08-22
+
+Rifinitura della dashboard a sezioni e nuova card Flusso energetico.
+
+### Novità
+- **Card "Flusso energetico".** Schema animato di Solare / Rete / Batteria /
+  Casa, con particelle che scorrono lungo i percorsi a velocità proporzionale
+  alla potenza, più l'elenco dei carichi monitorati con la loro quota sul
+  consumo di casa. È SVG inline con `<animateMotion>`: l'animazione la gestisce
+  il browser fuori dal thread principale, quindi un tablet a parete che tiene
+  la card aperta tutto il giorno non spende JavaScript né batteria. Nessuna
+  libreria grafica, nessuna dipendenza.
+- **Il consumo di casa è calcolato, non richiesto:** solare + prelievo +
+  scarica batteria − immissione − carica batteria. Chi ha il contatore di rete
+  e quello del fotovoltaico sa già cosa assorbe la casa; pretendere un quarto
+  sensore che quasi nessun impianto ha avrebbe lasciato la card vuota. Se il
+  sensore "Casa" c'è, ha la precedenza.
+- **Segni configurabili per sorgente.** Le convenzioni cambiano da contatore a
+  contatore, quindi ogni sorgente ha una spunta "inverti segno" invece di una
+  supposizione: immissione e prelievo, carica e scarica, si raddrizzano senza
+  toccare i template.
+- **Rilevamento dalla Dashboard Energia.** `energy/get_prefs` conserva
+  statistiche in kWh, ma uno schema dal vivo vuole potenze in W: le statistiche
+  vengono usate come indizio di nome per trovare il sensore di potenza dello
+  stesso dispositivo. Quello che non si aggancia resta da collegare a mano,
+  invece di essere indovinato male.
+- **La composizione automatica mette il flusso in testa alla sezione Energia**
+  e prova subito ad agganciarlo: un tipo di card chiamato "energyflow" che
+  bisogna sapere di dover aggiungere sarebbe stato di fatto invisibile.
+
+### Correzioni
+- **Lo stato era stampato due volte.** Sotto il titolo di una card compariva il
+  valore, che il corpo della card ripeteva subito sotto: un sensore di potenza
+  diceva "760" e poi "760 W". La riga ora dice *che cosa* è la lettura
+  (Potenza, Temperatura, Luce...), non di nuovo il numero.
+- **Card troppo alte e vuote:** altezza minima da 118 a 98 px e spaziature
+  ridotte; una card sensore era per un terzo aria.
+- **Stati leggibili da un essere umano:** una porta ora dice "Aperta"/"Chiusa"
+  invece di "ON"/"OFF", e lo stesso vale per movimento, presenza, allagamento,
+  fumo, gas, serratura — sia sulle card sia sulle targhette della mappa 3D.
+- Le pastiglie della card Clima erano illeggibili: contrasto alzato.
+
+### Verifica
+- `tests/frontend.test.js`: 139 asserzioni (37 nuove su flusso energetico e
+  leggibilità degli stati, incluso il calcolo del consumo di casa con segni
+  diritti e invertiti, entità mancanti e configurazione vuota).
+- `tests/visual/`: rendering reale in Chromium headless, 9 asserzioni
+  geometriche, zero errori di console.
+
 ## [0.6.0] - 2026-08-22
 
 Mappa 3D della casa, costruita dentro Cyborg senza alcuna dipendenza esterna.
