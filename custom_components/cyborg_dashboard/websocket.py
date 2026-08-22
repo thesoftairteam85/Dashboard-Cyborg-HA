@@ -15,9 +15,25 @@ TYPE_SAVE = "cyborg_dashboard/save"
 
 
 def async_register_websocket(hass: HomeAssistant) -> None:
-    """Register Cyborg Dashboard WebSocket commands."""
-    websocket_api.async_register_command(hass, TYPE_GET, _ws_get)
-    websocket_api.async_register_command(hass, TYPE_SAVE, _ws_save)
+    """Register Cyborg Dashboard WebSocket commands.
+
+    IMPORTANT: must be called as async_register_command(hass, handler) —
+    the two-argument form. websocket_api.websocket_command() (the
+    decorator on _ws_get/_ws_save below) stamps _ws_command/_ws_schema
+    onto the handler function; async_register_command reads those two
+    attributes ONLY in the two-arg form. Calling it as
+    async_register_command(hass, TYPE_GET, _ws_get) — three args — takes
+    a completely different code path that leaves schema=None in the
+    registered (handler, schema) tuple. HA's dispatcher
+    (websocket_api/connection.py) then unconditionally does
+    `handler(hass, connection, schema(msg))`, and `None(msg)` blows up
+    with `TypeError: 'NoneType' object is not callable` on every single
+    call. That was the actual cause of "Impossibile caricare la
+    dashboard" in the frontend: cyborg_dashboard/get was silently
+    failing on every invocation, not just occasionally.
+    """
+    websocket_api.async_register_command(hass, _ws_get)
+    websocket_api.async_register_command(hass, _ws_save)
 
 
 @websocket_api.websocket_command({"type": TYPE_GET})
