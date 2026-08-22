@@ -4,6 +4,21 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.4.2] - 2026-08-22
+
+Fix del fix precedente (0.4.1), individuato subito dopo il deploy leggendo
+i log reali dell'istanza invece di assumere che il reload fosse pulito.
+
+### Fix
+- **Chiamata bloccante nell'event loop durante la registrazione del
+  pannello.** `_integration_version()` (introdotta in 0.4.1 per il
+  cache-busting del modulo JS) leggeva `manifest.json` da disco in modo
+  sincrono dentro `async_register_panel`, una coroutine eseguita
+  nell'event loop di Home Assistant. Il core lo segnalava con
+  `Detected blocking call to open ... inside the event loop` — un warning
+  oggi, un errore bloccante nelle versioni future di HA. La lettura ora
+  passa da `hass.async_add_executor_job()`, eseguita nel thread pool.
+
 ## [0.4.1] - 2026-08-22
 
 Fix di caching del pannello: dopo un aggiornamento via HACS, il browser

@@ -48,14 +48,20 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     )
     if frontend.async_panel_exists(hass, PANEL_PATH):
         frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)
+    # _integration_version() reads manifest.json from disk. Home Assistant's
+    # event loop forbids blocking file I/O directly in an async def (it logs
+    # "Detected blocking call to open ... inside the event loop" and future
+    # core versions turn this into a hard error) - so it must run in the
+    # executor thread pool, not be called inline here.
+    version = await hass.async_add_executor_job(_integration_version)
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_PATH,
         webcomponent_name=WEB_COMPONENT,
         sidebar_title="Cyborg Dashboard",
         sidebar_icon="mdi:view-dashboard-edit",
-        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={_integration_version()}",
-        config={"version": _integration_version()},
+        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={version}",
+        config={"version": version},
         require_admin=False,
     )
 
