@@ -4,6 +4,46 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.23.0] - 2026-08-23
+
+L'ordine delle schede e delle sezioni lo decidi tu.
+
+### Novità
+- **Riordino delle schede in alto trascinandole.** In modifica ogni scheda
+  della barra (Dashboard, Mappa 3D, Energia, …) diventa afferrabile: la
+  trascini dove vuoi e un segno luminoso mostra in anticipo dove finirà. Il
+  rilascio è un **inserimento**, non uno scambio: portare Energia in prima
+  posizione fa scalare le altre di uno invece di scambiarla con quella che
+  c'era. Restando sulla pagina che stavi guardando, non su quella che ha
+  ereditato il suo numero.
+- **Frecce ◀ ▶ sulla scheda attiva.** Gli eventi di trascinamento HTML5 non
+  esistono su uno schermo touch, quindi da telefono e da tablet il riordino
+  passa dalle frecce. Sono solo sulla scheda attiva: una coppia su ogni scheda
+  trasformerebbe la barra in una fila di frecce senza più i titoli.
+- **Riordino delle sezioni dentro una pagina, sempre trascinando.** La maniglia
+  è l'intestazione della sezione, come la barra del titolo di una finestra —
+  non l'intera sezione, altrimenti si porterebbe dietro anche le card, che
+  hanno già un loro riordino.
+- Il pannello **PAGINE** dice ora esplicitamente che quell'ordine è l'ordine
+  della barra in alto e che la prima pagina è quella che si apre all'avvio.
+
+### Correzioni
+- **La suite visiva stava testando una copia vecchia del pannello.** Il file
+  che il banco di prova carica in Chromium era una copia aggiornata a mano, e
+  una copia aggiornata a mano prima o poi è vecchia: la suite dichiarava verde
+  del codice che non era quello in spedizione. È il falso negativo più caro che
+  esista, ed è la stessa classe di problema della risorsa Lovelace non
+  versionata di 0.21.0. Ora la copia viene rifatta dal sorgente **a ogni
+  esecuzione**, e la build usata viene stampata in testa al log.
+
+### Verifiche
+- 686 asserzioni frontend, suite schema completa, **119 asserzioni misurate**
+  in Chromium (18 nuove sull'ordine): fra queste un vero trascinamento HTML5
+  con `DataTransfer`, la verifica che il rilascio sulla metà sinistra inserisca
+  davanti e non scambi, che il segno di inserimento sia visibile, che le frecce
+  siano larghe almeno 24 px e che fuori modifica non resti nessuna maniglia.
+
+
 ## [0.22.0] - 2026-08-23
 
 Tre richieste, tutte e tre chiuse: entità libere nell'illuminazione, la mappa

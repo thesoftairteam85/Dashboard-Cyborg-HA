@@ -2,6 +2,21 @@ const { chromium } = require("playwright");
 const path = require("path");
 const fs = require("fs");
 
+// The harness imports ./panel.js, which used to be a COPY refreshed by hand.
+// A copy refreshed by hand is a copy that is eventually stale, and a stale
+// copy makes the visual suite report green on code that is not the code being
+// shipped — the single most expensive kind of false negative there is. So the
+// copy is made here, every run, from the real source. If this ever fails the
+// suite must not start.
+{
+  const SRC = path.resolve(__dirname, "../../custom_components/cyborg_dashboard/www/cyborg-dashboard.js");
+  const DEST = path.resolve(__dirname, "panel.js");
+  const code = fs.readFileSync(SRC, "utf8");
+  fs.writeFileSync(DEST, code);
+  const build = (code.match(/const CYBORG_BUILD = "([^"]+)"/) || [])[1] || "?";
+  console.log("panel.js allineato al sorgente (build " + build + ", " + code.length + " byte)");
+}
+
 const DEFAULT_DASH = {
   version: 5, revision: 0, theme: { accent: "#00e5ff", gap: 16, radius: 16 },
   pages: [
@@ -684,6 +699,122 @@ const DEFAULT_DASH = {
      list.rows.every((r, i) => i === 0 || r.t >= list.rows[i - 1].t + list.rows[i - 1].h - 1));
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
+
+  console.log("\n== ORDINE DELLE SCHEDE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, editing: true, extraPages: ["Energia", "Luci"],
+      manySections: ["Clima", "Sicurezza", "Consumi"] });
+  await page.waitForTimeout(400);
+
+  const barGeom = await page.evaluate(() => {
+    const nav = document.querySelector("nav.page-tabs");
+    const wraps = Array.from(document.querySelectorAll(".page-tab-wrap")).map((w) => {
+      const b = w.getBoundingClientRect();
+      return { title: (w.querySelector(".page-tab span") || {}).textContent,
+        left: Math.round(b.left), right: Math.round(b.right), top: Math.round(b.top),
+        h: Math.round(b.height),
+        nudges: w.querySelectorAll(".pt-nudge").length };
+    });
+    return { navW: nav ? Math.round(nav.getBoundingClientRect().width) : 0,
+      bodyW: document.body.clientWidth, wraps };
+  });
+  ok("ogni pagina ha la sua scheda trascinabile", barGeom.wraps.length === 4,
+     String(barGeom.wraps.length));
+  ok("la barra non deborda", barGeom.navW <= barGeom.bodyW,
+     barGeom.navW + " vs " + barGeom.bodyW);
+  ok("le schede sono in fila, non impilate",
+     new Set(barGeom.wraps.map((w) => w.top)).size === 1,
+     barGeom.wraps.map((w) => w.top).join());
+  ok("le schede non si sovrappongono",
+     barGeom.wraps.every((w, i) => i === 0 || w.left >= barGeom.wraps[i - 1].right - 1),
+     barGeom.wraps.map((w) => w.left + "-" + w.right).join(" "));
+  ok("solo la scheda attiva porta le frecce",
+     barGeom.wraps[0].nudges === 2 && barGeom.wraps.slice(1).every((w) => w.nudges === 0),
+     barGeom.wraps.map((w) => w.nudges).join());
+  ok("le frecce sono grandi abbastanza da toccarle",
+     await page.evaluate(() => Array.from(document.querySelectorAll(".pt-nudge"))
+       .every((n) => n.getBoundingClientRect().width >= 24)));
+
+  // A real HTML5 drag: mouse simulation does not produce dragstart/drop in
+  // Chromium via CDP, so the events are dispatched with a genuine DataTransfer.
+  const dropped = await page.evaluate(() => {
+    const wraps = Array.from(document.querySelectorAll(".page-tab-wrap"));
+    const from = wraps[2];                       // "Energia"
+    const target = wraps[0];                     // "Dashboard"
+    const dt = new DataTransfer();
+    const box = target.getBoundingClientRect();
+    const fire = (node, type, x) => {
+      const ev = new DragEvent(type, { bubbles: true, cancelable: true, clientX: x,
+        clientY: Math.round(box.top + box.height / 2), dataTransfer: dt });
+      node.dispatchEvent(ev);
+      return ev;
+    };
+    fire(from, "dragstart", 0);
+    const leftHalf = Math.round(box.left + box.width * 0.25);
+    const over = fire(target, "dragover", leftHalf);
+    const marker = getComputedStyle(target, "::before").backgroundColor;
+    const hasBefore = target.classList.contains("drop-before");
+    fire(target, "drop", leftHalf);
+    return { prevented: over.defaultPrevented, hasBefore, marker,
+      order: Array.from(document.querySelectorAll(".page-tab span")).map((s) => s.textContent) };
+  });
+  ok("la scheda sotto il puntatore accetta il rilascio", dropped.prevented);
+  ok("compare il segno di inserimento a sinistra", dropped.hasBefore);
+  ok("il segno di inserimento è visibile",
+     dropped.marker !== "rgba(0, 0, 0, 0)" && dropped.marker !== "transparent", dropped.marker);
+  ok("rilasciare sulla metà sinistra porta la pagina davanti a tutte",
+     dropped.order[0] === "Energia", dropped.order.join(">"));
+  ok("le altre pagine scalano di uno, nessuna scambiata",
+     dropped.order.join(">") === "Energia>Cyborg>Mappa 3D>Luci", dropped.order.join(">"));
+
+  const secDrop = await page.evaluate(() => {
+    const el = window.__EL__;
+    el._pageIndex = el._dashboard.pages.findIndex((p) => p.title === "Cyborg");
+    el._signature = ""; el.render();
+    const heads = Array.from(document.querySelectorAll("[data-sec-drag]"));
+    const hosts = Array.from(document.querySelectorAll("[data-sec-drop]"));
+    if (heads.length < 3) return { heads: heads.length };
+    const dt = new DataTransfer();
+    const target = hosts[0];
+    const box = target.getBoundingClientRect();
+    const fire = (node, type, y) => {
+      const ev = new DragEvent(type, { bubbles: true, cancelable: true,
+        clientX: Math.round(box.left + 10), clientY: y, dataTransfer: dt });
+      node.dispatchEvent(ev);
+      return ev;
+    };
+    fire(heads[2], "dragstart", 0);
+    const topHalf = Math.round(box.top + box.height * 0.25);
+    const over = fire(target, "dragover", topHalf);
+    const above = target.classList.contains("drop-above");
+    fire(target, "drop", topHalf);
+    return { heads: heads.length, prevented: over.defaultPrevented, above,
+      order: Array.from(document.querySelectorAll(".dash-section h3")).map((h) => h.textContent) };
+  });
+  ok("l'intestazione di ogni sezione è una maniglia", secDrop.heads === 3, String(secDrop.heads));
+  ok("la sezione bersaglio accetta il rilascio", secDrop.prevented);
+  ok("compare il segno di inserimento sopra", secDrop.above);
+  ok("la sezione trascinata sale in cima",
+     secDrop.order.join(">") === "Consumi>Clima>Sicurezza", (secDrop.order || []).join(">"));
+
+  const clean = await page.evaluate(() => {
+    const el = window.__EL__;
+    el._editing = false; el._signature = ""; el.render();
+    return { drags: document.querySelectorAll("[data-page-drag]").length,
+      nudges: document.querySelectorAll(".pt-nudge").length,
+      secDrags: document.querySelectorAll("[data-sec-drag]").length,
+      tabs: document.querySelectorAll("[data-page-tab]").length,
+      grab: Array.from(document.querySelectorAll(".sec-head"))
+        .every((h) => getComputedStyle(h).cursor !== "grab") };
+  });
+  ok("fuori modifica niente maniglie di trascinamento",
+     clean.drags === 0 && clean.nudges === 0 && clean.secDrags === 0,
+     [clean.drags, clean.nudges, clean.secDrags].join());
+  ok("fuori modifica le schede restano navigabili", clean.tabs === 4, String(clean.tabs));
+  ok("fuori modifica il cursore non promette un trascinamento", clean.grab);
 
   console.log("\n" + (errors.length ? "ERRORS:\n" + errors.join("\n") : "nessun errore console/pagina"));
   console.log(pass + " passati, " + fail + " falliti");

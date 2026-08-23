@@ -1996,6 +1996,104 @@ console.log("\n== 25. LUCI LIBERE, COMFORT, STANZE SELEZIONABILI ==");
   ok("stato ripristinato dopo la sezione 25", !el._isFloorplan());
 }
 
+console.log("\n== 26. ORDINE DECISO DALL'UTENTE: PAGINE E SEZIONI ==");
+{
+  const P = (id, title) => ({ id, type: "sections", title, icon: "mdi:x", sections: [] });
+  el._registry = null;
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    P("a", "Dashboard"), P("b", "Mappa 3D"), P("c", "Energia"), P("d", "Luci")] };
+  el._pageIndex = 0; el._editing = true; el._selected = null; el._focus = null;
+  const titles = () => el._dashboard.pages.map(p => p.title);
+
+  // A drop is an insertion, not a swap: moving Energia to the front must slide
+  // the others right, not trade places with Dashboard.
+  el._reorderPage(2, 0);
+  ok("trascinare una pagina la inserisce, non la scambia",
+     titles().join(">") === "Energia>Dashboard>Mappa 3D>Luci", titles().join(">"));
+
+  // The user was on "Dashboard" (index 0). After the move it is index 1, and
+  // they must still be looking at Dashboard.
+  ok("dopo il riordino resti sulla pagina che stavi guardando",
+     el._dashboard.pages[el._pageIndex].title === "Dashboard",
+     el._dashboard.pages[el._pageIndex].title);
+
+  el._reorderPage(0, 3);
+  ok("una pagina può finire in fondo",
+     titles().join(">") === "Dashboard>Mappa 3D>Luci>Energia", titles().join(">"));
+  ok("l'indice corrente segue ancora la stessa pagina",
+     el._dashboard.pages[el._pageIndex].title === "Dashboard");
+
+  const before = titles().join(">");
+  el._reorderPage(1, 1);
+  ok("lasciare cadere una pagina su se stessa non fa niente", titles().join(">") === before);
+  el._reorderPage(9, 0);
+  ok("un indice fuori intervallo viene ignorato", titles().join(">") === before);
+
+  // The arrows still work and are what a touch screen has: HTML5 drag events
+  // never fire on a phone.
+  el._pageIndex = 3;
+  el._movePage(3, -1);
+  ok("le frecce spostano la pagina attiva",
+     titles().join(">") === "Dashboard>Mappa 3D>Energia>Luci", titles().join(">"));
+  ok("la freccia porta con sé la pagina attiva",
+     el._dashboard.pages[el._pageIndex].title === "Energia", el._dashboard.pages[el._pageIndex].title);
+
+  el._pageIndex = 0;
+  el.render();
+  const h = el.innerHTML;
+  // Scope every assertion to the <nav>: the stylesheet is inlined in innerHTML
+  // and mentions .pt-nudge, and the PAGINE side panel emits its own
+  // data-page-move buttons for every page. Matching the whole document would
+  // pass (or fail) for the wrong reason.
+  const nav = (html) => (html.match(/<nav class="page-tabs[\s\S]*?<\/nav>/) || [""])[0];
+  const bar = nav(h);
+  ok("in modifica ogni scheda è trascinabile",
+     bar.length > 0 && [0,1,2,3].every(i => bar.includes(`data-page-drag="${i}"`)));
+  ok("solo la scheda attiva mostra le frecce",
+     (bar.match(/data-page-move="0:/g) || []).length === 2
+     && !bar.includes('data-page-move="1:'));
+  ok("la prima scheda non può andare più a sinistra",
+     bar.includes('data-page-move="0:-1" disabled'));
+
+  el._editing = false; el._signature = ""; el.render();
+  const bar2 = nav(el.innerHTML);
+  ok("fuori modifica la barra torna pulita",
+     bar2.length > 0 && !bar2.includes("data-page-drag") && !bar2.includes("pt-nudge"));
+  ok("ma le schede restano cliccabili", bar2.includes('data-page-tab="2"'));
+
+  // -- sections inside a page --
+  el._editing = true;
+  const S2 = (id, title) => ({ id, title, icon: "mdi:x", accent: null, collapsed: true, items: [] });
+  el._dashboard.pages[0].sections = [S2("s1", "Clima"), S2("s2", "Sicurezza"), S2("s3", "Energia")];
+  el._pageIndex = 0; el._signature = ""; el.render();
+  const st = () => el._dashboard.pages[0].sections.map(s => s.title);
+  el._reorderSection(2, 0);
+  ok("anche le sezioni si riordinano trascinandole",
+     st().join(">") === "Energia>Clima>Sicurezza", st().join(">"));
+  el._reorderSection(0, 2);
+  ok("una sezione può scendere in fondo",
+     st().join(">") === "Clima>Sicurezza>Energia", st().join(">"));
+  el._moveSection("s3", -1);
+  ok("le frecce della sezione funzionano ancora",
+     st().join(">") === "Clima>Energia>Sicurezza", st().join(">"));
+
+  el._signature = ""; el.render();
+  const hs = el.innerHTML;
+  ok("l'intestazione della sezione è la maniglia",
+     hs.includes('data-sec-drag="0"') && hs.includes('data-sec-drop="0"'));
+  ok("le card dentro la sezione non sono trascinabili",
+     !hs.includes('<article class="item editor-item" draggable'));
+
+  el._editing = false; el._signature = ""; el.render();
+  ok("fuori modifica le sezioni non sono trascinabili",
+     !el.innerHTML.includes("data-sec-drag"));
+
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0; el._editing = false; el._selected = null;
+  ok("stato ripristinato dopo la sezione 26", el._dashboard.pages.length === 1);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

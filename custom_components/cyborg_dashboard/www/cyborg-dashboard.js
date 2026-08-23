@@ -1767,12 +1767,39 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /**
+   * Move a page to an arbitrary position.
+   *
+   * `_movePage` swaps with the neighbour, which is the right primitive for a
+   * button but the wrong one for a drop: dropping "Energia" onto the first
+   * slot must slide everything else right, not swap Energia with whatever
+   * happened to be there. Splice-out-then-splice-in is the only version that
+   * matches what the user saw while dragging.
+   *
+   * The current page is tracked by IDENTITY, not by index. Reordering changes
+   * every index after the moved one, so remembering the number would leave the
+   * user staring at a different page than the one they were on — the classic
+   * off-by-one that makes a reorder feel broken even when the data is right.
+   */
+  _reorderPage(from, to) {
+    const pages = this._dashboard.pages;
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+    if (from < 0 || from >= pages.length || from === to) return;
+    const current = pages[this._pageIndex];
+    const [moved] = pages.splice(from, 1);
+    pages.splice(Math.max(0, Math.min(pages.length, to)), 0, moved);
+    const at = pages.indexOf(current);
+    this._pageIndex = at < 0 ? pages.indexOf(moved) : at;
+    this._dirty = true;
+    this._touch();
+  }
+
   _pageManager() {
     const pages = this._dashboard.pages;
     const hasMap = pages.some((p) => p.type === "floorplan");
     return `<div class="section">
       <strong>PAGINE</strong>
-      <span class="hint">${pages.length} pagine · la prima è quella che si apre per prima.</span>
+      <span class="hint">${pages.length} pagine · l'ordine qui è l'ordine delle schede in alto, e la prima è quella che si apre all'avvio. Puoi anche trascinare le schede direttamente nella barra.</span>
       <div class="page-list">${pages.map((pg, i) => `
         <div class="page-row ${i === this._pageIndex ? "current" : ""}">
           <ha-icon icon="${esc(pg.icon || "mdi:view-dashboard-outline")}"></ha-icon>
@@ -1855,6 +1882,17 @@ class CyborgDashboard extends HTMLElement {
     const j = i + delta;
     if (i < 0 || j < 0 || j >= list.length) return;
     [list[i], list[j]] = [list[j], list[i]];
+    this._touch();
+  }
+
+  /** Drop a section at an arbitrary position. Same splice reasoning as
+   *  `_reorderPage`: a drop is an insertion, not a swap. */
+  _reorderSection(from, to) {
+    const list = this._page().sections;
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+    if (from < 0 || from >= list.length || from === to) return;
+    const [moved] = list.splice(from, 1);
+    list.splice(Math.max(0, Math.min(list.length, to)), 0, moved);
     this._touch();
   }
 
@@ -5381,8 +5419,12 @@ class CyborgDashboard extends HTMLElement {
       ? `<button class="section-empty" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus-circle-outline"></ha-icon> Aggiungi la prima entità a “${esc(section.title)}”</button>`
       : "";
 
-    return `<section class="dash-section${selected ? " sec-selected" : ""}" style="--accent:${esc(accent)}">
-        <header class="sec-head">
+    // Only the HEADER is draggable, not the whole section: making the
+    // <section> draggable would also capture every card inside it, and the
+    // cards have their own reordering. The header doubles as the grab handle
+    // the same way a window title bar does.
+    return `<section class="dash-section${selected ? " sec-selected" : ""}" style="--accent:${esc(accent)}" ${this._editing ? `data-sec-drop="${index}"` : ""}>
+        <header class="sec-head${this._editing ? " draggable" : ""}" ${this._editing ? `draggable="true" data-sec-drag="${index}"` : ""}>
           <button class="sec-toggle" data-sec-collapse data-sec="${esc(section.id)}" title="${section.collapsed ? "Espandi" : "Comprimi"}">
             <ha-icon icon="${section.collapsed ? "mdi:chevron-right" : "mdi:chevron-down"}"></ha-icon>
           </button>
@@ -6447,11 +6489,25 @@ class CyborgDashboard extends HTMLElement {
     const total = sections.reduce((n, s) => n + s.items.length, 0);
     const pages = this._dashboard.pages;
 
-    const tabs = pages.length > 1 ? `<nav class="page-tabs">${pages.map((pg, i) =>
-      `<button class="page-tab ${i === this._pageIndex ? "active" : ""}" data-page-tab="${i}">
+    // The order of the top-level tabs is the user's decision, not a byproduct
+    // of the order pages happened to be created in. Two ways to change it,
+    // because one is not enough: drag a tab (fast, mouse) and arrows on the
+    // active tab (works on a touch screen, where HTML5 drag events never
+    // fire at all). The arrows are on the ACTIVE tab only — putting a pair on
+    // every tab turns the bar into a row of chevrons and hides the titles.
+    const tabs = pages.length > 1 ? `<nav class="page-tabs${this._editing ? " editing" : ""}">${pages.map((pg, i) => {
+      const active = i === this._pageIndex;
+      const tab = `<button class="page-tab ${active ? "active" : ""}" data-page-tab="${i}">
          <ha-icon icon="${esc(pg.icon || "mdi:view-dashboard-outline")}"></ha-icon>
          <span>${esc(pg.title || "Pagina " + (i + 1))}</span>
-       </button>`).join("")}</nav>` : "";
+       </button>`;
+      if (!this._editing) return tab;
+      const nudges = active ? `
+        <button class="pt-nudge" data-page-move="${i}:-1" ${i === 0 ? "disabled" : ""} title="Sposta a sinistra"><ha-icon icon="mdi:chevron-left"></ha-icon></button>` : "";
+      const nudgesR = active ? `
+        <button class="pt-nudge" data-page-move="${i}:1" ${i === pages.length - 1 ? "disabled" : ""} title="Sposta a destra"><ha-icon icon="mdi:chevron-right"></ha-icon></button>` : "";
+      return `<div class="page-tab-wrap ${active ? "active" : ""}" draggable="true" data-page-drag="${i}">${nudges}${tab}${nudgesR}</div>`;
+    }).join("")}${this._editing ? `<span class="pt-hint">trascina le schede per riordinarle</span>` : ""}</nav>` : "";
 
     const subtitle = floorplan
       ? `${this._rooms().length} STANZE · ${this._editing ? "MODIFICA ATTIVA" : "MAPPA 3D"}`
@@ -6575,6 +6631,50 @@ class CyborgDashboard extends HTMLElement {
     // --- section controls
     all("[data-sec-move]").forEach((el) => {
       el.onclick = () => this._moveSection(el.getAttribute("data-sec"), parseInt(el.getAttribute("data-sec-move"), 10));
+    });
+
+    // --- reordering sections by dragging their header
+    all("[data-sec-drag]").forEach((el) => {
+      const index = parseInt(el.getAttribute("data-sec-drag"), 10);
+      el.ondragstart = (ev) => {
+        this._dragSection = index;
+        const host = el.closest(".dash-section");
+        if (host) host.classList.add("dragging");
+        if (ev.dataTransfer) {
+          ev.dataTransfer.effectAllowed = "move";
+          try { ev.dataTransfer.setData("text/plain", "sec:" + index); } catch (e) { /* ignore */ }
+        }
+      };
+      el.ondragend = () => {
+        this._dragSection = null;
+        all(".dash-section").forEach((n) => n.classList.remove("dragging", "drop-above", "drop-below"));
+      };
+    });
+    all("[data-sec-drop]").forEach((el) => {
+      const index = parseInt(el.getAttribute("data-sec-drop"), 10);
+      // Vertical stack, so the midpoint that decides above/below is on Y.
+      const half = (ev) => {
+        const box = el.getBoundingClientRect();
+        return ev.clientY > box.top + box.height / 2;
+      };
+      el.ondragover = (ev) => {
+        if (this._dragSection === null || this._dragSection === undefined || this._dragSection === index) return;
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+        const below = half(ev);
+        el.classList.toggle("drop-above", !below);
+        el.classList.toggle("drop-below", below);
+      };
+      el.ondragleave = () => el.classList.remove("drop-above", "drop-below");
+      el.ondrop = (ev) => {
+        ev.preventDefault();
+        const from = this._dragSection;
+        this._dragSection = null;
+        if (from === null || from === undefined || from === index) return;
+        let to = index + (half(ev) ? 1 : 0);
+        if (from < to) to -= 1;
+        this._reorderSection(from, to);
+      };
     });
     all("[data-sec-remove]").forEach((el) => {
       el.onclick = () => this._removeSection(el.getAttribute("data-sec"));
@@ -6713,6 +6813,54 @@ class CyborgDashboard extends HTMLElement {
         this._roomPicker = false;
         this._fitKey = null;
         this._touch(true);
+      };
+    });
+
+    // --- reordering the tabs by dragging one onto another
+    //
+    // The drop index is computed from the pointer position relative to the
+    // MIDPOINT of the tab under the cursor, not from the tab's index: dropping
+    // on the left half means "before this one", on the right half "after". A
+    // drop that ignores which half you released on lands one slot off roughly
+    // half the time, and the user reads that as the feature not working.
+    all("[data-page-drag]").forEach((el) => {
+      const index = parseInt(el.getAttribute("data-page-drag"), 10);
+      el.ondragstart = (ev) => {
+        this._dragPage = index;
+        el.classList.add("dragging");
+        if (ev.dataTransfer) {
+          ev.dataTransfer.effectAllowed = "move";
+          // Firefox refuses to start a drag with an empty data payload.
+          try { ev.dataTransfer.setData("text/plain", String(index)); } catch (e) { /* ignore */ }
+        }
+      };
+      el.ondragend = () => {
+        this._dragPage = null;
+        all(".page-tab-wrap").forEach((n) => n.classList.remove("dragging", "drop-before", "drop-after"));
+      };
+      el.ondragover = (ev) => {
+        if (this._dragPage === null || this._dragPage === undefined || this._dragPage === index) return;
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+        const box = el.getBoundingClientRect();
+        const after = ev.clientX > box.left + box.width / 2;
+        el.classList.toggle("drop-before", !after);
+        el.classList.toggle("drop-after", after);
+      };
+      el.ondragleave = () => el.classList.remove("drop-before", "drop-after");
+      el.ondrop = (ev) => {
+        ev.preventDefault();
+        const from = this._dragPage;
+        this._dragPage = null;
+        if (from === null || from === undefined || from === index) return;
+        const box = el.getBoundingClientRect();
+        const after = ev.clientX > box.left + box.width / 2;
+        // Removing the dragged page first shifts every later index down by
+        // one, so a drop to the RIGHT of its original position needs the
+        // target index decremented — otherwise the page lands one slot too far.
+        let to = index + (after ? 1 : 0);
+        if (from < to) to -= 1;
+        this._reorderPage(from, to);
       };
     });
 
@@ -8233,8 +8381,16 @@ button:disabled{opacity:.28;cursor:default}
 .workspace.editing{grid-template-columns:minmax(0,1fr) 380px}
 main{display:flex;flex-direction:column;gap:30px;min-width:0}
 
-.dash-section{--accent:#00e5ff}
+.dash-section{--accent:#00e5ff;position:relative}
+.dash-section.dragging{opacity:.4}
+/* Insertion marker on the section stack. Pseudo-element for the same reason as
+   the tabs: a real node would push the target away from the pointer. */
+.dash-section.drop-above::before,.dash-section.drop-below::after{content:"";position:absolute;left:0;right:0;height:3px;border-radius:3px;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+.dash-section.drop-above::before{top:-9px}
+.dash-section.drop-below::after{bottom:-9px}
 .sec-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.sec-head.draggable{cursor:grab}
+.sec-head.draggable:active{cursor:grabbing}
 .sec-toggle{background:transparent;border:0;padding:2px;color:var(--accent);cursor:pointer}
 .sec-toggle ha-icon{--mdc-icon-size:20px}
 .sec-icon{--mdc-icon-size:20px;color:var(--accent);filter:drop-shadow(0 0 8px color-mix(in srgb,var(--accent) 55%,transparent))}
@@ -8807,6 +8963,22 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .page-tab ha-icon{--mdc-icon-size:16px}
 .page-tab:hover{opacity:.85}
 .page-tab.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.page-tabs.editing{align-items:center}
+.page-tab-wrap{display:flex;align-items:center;gap:3px;padding:2px;border-radius:13px;border:1px dashed transparent;position:relative;cursor:grab}
+.page-tab-wrap.active{border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.page-tab-wrap.dragging{opacity:.35;cursor:grabbing}
+/* The drop marker is a pseudo-element so that inserting it cannot reflow the
+   bar: a real element between the tabs would shift everything sideways as the
+   pointer moves, and the target would run away from the cursor. */
+.page-tab-wrap.drop-before::before,.page-tab-wrap.drop-after::after{content:"";position:absolute;top:2px;bottom:2px;width:3px;border-radius:3px;background:var(--accent);box-shadow:0 0 9px var(--accent)}
+.page-tab-wrap.drop-before::before{left:-5px}
+.page-tab-wrap.drop-after::after{right:-5px}
+.pt-nudge{display:flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border-radius:8px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);opacity:.7}
+.pt-nudge ha-icon{--mdc-icon-size:16px}
+.pt-nudge:hover:not(:disabled){opacity:1;border-color:var(--accent);color:var(--accent)}
+.pt-nudge:disabled{opacity:.2}
+.pt-hint{font:10px ui-monospace,monospace;opacity:.4;letter-spacing:.5px;align-self:center}
+@media (max-width:700px){.pt-hint{display:none}}
 
 .fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:var(--persp,1900px);perspective-origin:50% 42%}
 .fp-stage{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d}
@@ -9301,7 +9473,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.22.0";
+const CYBORG_BUILD = "0.23.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

@@ -282,6 +282,18 @@ window.__mount=(dash,opts)=>{
           el._signature="";el.render();
           el._focusRoom(el._rooms()[0].id);
         }
+        if(opts&&opts.extraPages){
+          opts.extraPages.forEach(function(t,i){
+            el._dashboard.pages.push({id:"xp"+i,type:"sections",title:t,
+              icon:"mdi:view-dashboard-outline",layout:{type:"grid",columns:12,gap:16},sections:[]});
+          });
+        }
+        if(opts&&opts.manySections){
+          var pg=el._dashboard.pages[el._pageIndex];
+          pg.sections=opts.manySections.map(function(t,i){
+            return {id:"xs"+i,title:t,icon:"mdi:shape-outline",accent:null,collapsed:true,items:[]};
+          });
+        }
         el._signature="";el.render();
         setTimeout(()=>r(true),350);
       };
