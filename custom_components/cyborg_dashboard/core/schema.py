@@ -8,6 +8,10 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v5  pages[].rooms[].level                a room sits on a storey; the map became
+    pages[].rooms[].points               genuinely three-dimensional. Rooms also
+    pages[].rooms[].spots                gained a free polygon footprint and a
+                                         per-device position inside the room.
 
 v2 documents are migrated to v3 on load (see ``_migrate_page_v2``), so an
 existing stored dashboard keeps its cards and its section grouping without
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,
@@ -51,7 +55,15 @@ PAGE_TYPES = ("sections", "floorplan")
 # classic architectural-render angle: high enough to read the floor layout,
 # shallow enough that extruded walls still communicate height.
 DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
-                "show_walls": True, "show_labels": True}
+                "show_walls": True, "show_labels": True, "level_gap": 150,
+                "active_level": None}
+
+# A storey index is deliberately signed and bounded: -3 covers cellars and
+# garages below grade, +8 is far past any residential building. Bounding it at
+# all matters because ``level`` multiplies the vertical offset in the CSS 3D
+# scene, and an unbounded value from a hand-edited store would push a room
+# millions of pixels out of the perspective frustum and simply vanish.
+MIN_LEVEL, MAX_LEVEL = -3, 8
 
 
 def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
@@ -74,10 +86,74 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
             result[key] = default
     result["w"] = max(40, result["w"])
     result["h"] = max(40, result["h"])
+
+    # Storey. 0 is the entrance floor; the renderer lifts the room by
+    # level * view.level_gap along the vertical axis of the scene.
+    try:
+        result["level"] = max(MIN_LEVEL, min(MAX_LEVEL, int(float(result.get("level", 0)))))
+    except (TypeError, ValueError):
+        result["level"] = 0
+
+    result["points"] = _normalize_points(result.get("points"))
+    result["spots"] = _normalize_spots(result.get("spots"))
+
     # entities: None/"auto" means "derive from the area registry at render time"
     entities = result.get("entities")
     result["entities"] = entities if isinstance(entities, list) else None
     return result
+
+
+def _normalize_points(points: Any) -> list[list[float]] | None:
+    """Validate a polygon footprint.
+
+    Vertices are stored as fractions of the room bounding box (0..1), not as
+    plan units. That decoupling is what makes a resize handle work on a
+    non-rectangular room: dragging a corner only changes ``w``/``h`` and the
+    polygon follows by construction, with no per-vertex rescaling pass that
+    could accumulate rounding drift over dozens of gestures.
+
+    ``None`` means "plain rectangle" and is the common case, so it stays the
+    cheapest possible representation instead of four redundant vertices.
+    """
+    if not isinstance(points, list) or len(points) < 3:
+        return None
+    out: list[list[float]] = []
+    for pt in points:
+        if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+            continue
+        try:
+            fx = max(0.0, min(1.0, float(pt[0])))
+            fy = max(0.0, min(1.0, float(pt[1])))
+        except (TypeError, ValueError):
+            continue
+        out.append([round(fx, 4), round(fy, 4)])
+    if len(out) < 3:
+        return None
+    return out[:24]
+
+
+def _normalize_spots(spots: Any) -> dict[str, list[float]]:
+    """Per-entity position inside a room, as fractions of its bounding box.
+
+    Only entities the user actually placed are stored; everything else is
+    auto-arranged at render time. Storing a position for every entity would
+    freeze the layout of devices that come and go from an area.
+    """
+    if not isinstance(spots, dict):
+        return {}
+    out: dict[str, list[float]] = {}
+    for key, value in spots.items():
+        if not isinstance(key, str) or "." not in key:
+            continue
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            continue
+        try:
+            fx = max(0.0, min(1.0, float(value[0])))
+            fy = max(0.0, min(1.0, float(value[1])))
+        except (TypeError, ValueError):
+            continue
+        out[key] = [round(fx, 4), round(fy, 4)]
+    return out
 
 
 def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
@@ -100,6 +176,19 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
         result["wall_height"] = max(0, min(200, int(float(result["wall_height"]))))
     except (TypeError, ValueError):
         result["wall_height"] = DEFAULT_VIEW["wall_height"]
+    try:
+        result["level_gap"] = max(40, min(400, int(float(result.get("level_gap", 150)))))
+    except (TypeError, ValueError):
+        result["level_gap"] = DEFAULT_VIEW["level_gap"]
+    # active_level: None shows the whole building, an int isolates one storey.
+    active = result.get("active_level")
+    if active is None or active == "":
+        result["active_level"] = None
+    else:
+        try:
+            result["active_level"] = max(MIN_LEVEL, min(MAX_LEVEL, int(float(active))))
+        except (TypeError, ValueError):
+            result["active_level"] = None
     result["show_walls"] = bool(result.get("show_walls", True))
     result["show_labels"] = bool(result.get("show_labels", True))
     return result

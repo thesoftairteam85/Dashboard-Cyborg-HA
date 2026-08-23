@@ -940,6 +940,185 @@ ok("i tipi autonomi sono marcati", ALL_TYPES.filter(k => cardTypeInfo(k).solo).s
 ok("un tipo sconosciuto non rompe l'editor", cardTypeInfo("inesistente").k === "entity");
 el._editing = false; el._selected = null;
 
+console.log("\n== 16. MAPPA 3D: PIANI, FORMA, DISPOSITIVI ==");
+
+// -- geometry helpers (function declarations DO escape a direct eval) --------
+ok("stanza senza poligono = rettangolo", JSON.stringify(roomPoints({})) === "[[0,0],[1,0],[1,1],[0,1]]");
+const L = [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]];
+ok("poligono valido conservato", JSON.stringify(roomPoints({points:L})) === JSON.stringify(L));
+ok("poligono con 2 vertici -> rettangolo", roomPoints({points:[[0,0],[1,1]]}).length === 4);
+ok("poligono spazzatura -> rettangolo", roomPoints({points:"boh"}).length === 4);
+ok("vertici fuori scala vengono limitati",
+   JSON.stringify(roomPoints({points:[[-5,0],[1,0],[1,9]]})) === "[[0,0],[1,0],[1,1]]");
+
+// The four generated walls must be identical to the four that were hard-coded
+// while the map could only draw rectangles: this is the regression guard for
+// the whole polygon rewrite.
+const rectEdges = roomEdges({ w: 200, h: 160 });
+ok("rettangolo -> 4 muri", rectEdges.length === 4, String(rectEdges.length));
+ok("muro nord: lungo quanto la stanza, angolo 0",
+   Math.abs(rectEdges[0].len - 200) < 0.01 && Math.abs(rectEdges[0].angle) < 0.01,
+   rectEdges[0].len + "@" + rectEdges[0].angle);
+ok("muro est: parte da x=w, angolo 90",
+   Math.abs(rectEdges[1].x - 200) < 0.01 && Math.abs(rectEdges[1].angle - 90) < 0.01 && Math.abs(rectEdges[1].len - 160) < 0.01,
+   JSON.stringify(rectEdges[1]));
+ok("muro sud: angolo 180", Math.abs(Math.abs(rectEdges[2].angle) - 180) < 0.01, String(rectEdges[2].angle));
+ok("muro ovest: angolo -90", Math.abs(rectEdges[3].angle + 90) < 0.01, String(rectEdges[3].angle));
+ok("i muri paralleli hanno la stessa luce",
+   Math.abs(rectEdges[0].shade - rectEdges[2].shade) < 1e-9 && rectEdges[0].shade > rectEdges[1].shade,
+   rectEdges.map(e => e.shade.toFixed(3)).join());
+ok("i muri perpendicolari hanno luce diversa", Math.abs(rectEdges[0].shade - rectEdges[1].shade) > 0.15);
+ok("la L genera 6 muri", roomEdges({ w: 200, h: 160, points: L }).length === 6);
+ok("nessun muro di lunghezza zero",
+   roomEdges({ w: 200, h: 160, points: [[0,0],[0,0],[1,0],[1,1],[0,1]] }).every(e => e.len > 0.5));
+ok("muri di una stanza minima restano calcolabili",
+   roomEdges({ w: 40, h: 40 }).every(e => Number.isFinite(e.len) && Number.isFinite(e.angle)));
+
+const cR = polygonCentroid(roomPoints({}));
+ok("baricentro del rettangolo al centro", Math.abs(cR[0]-0.5) < 1e-6 && Math.abs(cR[1]-0.5) < 1e-6, cR.join());
+const cL = polygonCentroid(L);
+ok("baricentro della L dentro la L", pointInPolygon(L, cL[0], cL[1]), cL.map(n=>n.toFixed(3)).join());
+ok("l'incavo della L e' fuori dalla stanza", !pointInPolygon(L, 0.8, 0.8));
+ok("il pieno della L e' dentro", pointInPolygon(L, 0.2, 0.8) && pointInPolygon(L, 0.8, 0.2));
+ok("baricentro di un poligono degenere non produce NaN",
+   polygonCentroid([[0.5,0.5],[0.5,0.5],[0.5,0.5]]).every(Number.isFinite));
+
+// -- fit zoom ---------------------------------------------------------------
+ok("zoom di dettaglio: stanza piccola -> piu' zoom",
+   fitZoom(100, 100, 32, 56, 900, 560, 0.6) > fitZoom(400, 400, 32, 56, 900, 560, 0.6));
+ok("zoom di dettaglio limitato a 3x", fitZoom(1, 1, 32, 56, 900, 560, 0.6) === 3);
+ok("zoom di dettaglio limitato a 0.3x", fitZoom(90000, 90000, 32, 56, 900, 560, 0.6) === 0.3);
+// with the camera flat and unrotated the projection is the identity, so the
+// fit is exactly the margin times the smaller ratio - anything else means the
+// projected bounding box is being computed wrongly
+ok("a camera piatta il fit e' esatto",
+   Math.abs(fitZoom(200, 200, 0, 0, 800, 400, 0.6) - (400/200)*0.6) < 1e-9,
+   String(fitZoom(200, 200, 0, 0, 800, 400, 0.6)));
+ok("ruotando di 90 gradi il fit resta sensato",
+   fitZoom(300, 100, 90, 56, 900, 560, 0.6) > 0.3 && fitZoom(300, 100, 90, 56, 900, 560, 0.6) < 3);
+ok("il fit non esplode con pitch 85", Number.isFinite(fitZoom(200, 200, 32, 85, 900, 560, 0.6)));
+
+// -- auto placement + storey names ------------------------------------------
+ok("posizioni automatiche dentro la stanza",
+   [0,1,2,3,4,5,6].every(i => { const s2 = autoSpot(i, 7); return s2[0] > 0 && s2[0] < 1 && s2[1] > 0 && s2[1] < 1; }));
+ok("posizioni automatiche tutte diverse",
+   new Set([0,1,2,3,4,5,6].map(i => autoSpot(i,7).join())).size === 7);
+ok("un solo dispositivo finisce al centro", autoSpot(0,1).join() === "0.5,0.5");
+ok("nomi dei piani", levelName(0) === "Piano terra" && levelName(1) === "Piano 1"
+   && levelName(-1) === "Seminterrato" && levelName(-2) === "Interrato 2");
+
+// -- rendering --------------------------------------------------------------
+el._dashboard = { version: 5, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+    view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true,
+            show_labels: true, level_gap: 150, active_level: null },
+    rooms: [
+      { id: "r-terra", area_id: "soggiorno", title: "Soggiorno", icon: "mdi:sofa", color: "#00e5ff",
+        x: 0, y: 0, w: 240, h: 180, level: 0, points: null, spots: {}, entities: null },
+      { id: "r-sopra", area_id: "camera_da_letto", title: "Camera", icon: "mdi:bed", color: "#c77dff",
+        x: 0, y: 0, w: 240, h: 180, level: 1, points: L.map(p => p.slice()), spots: {}, entities: ["light.soggiorno"] }]}]};
+el._pageIndex = 0; el._editing = false; el._selected = null; el._focus = null; el._roomPicker = false;
+el.render();
+let html = el.innerHTML;
+ok("il piano terra non viene sollevato", html.includes("translateZ(0.00px)"));
+ok("il primo piano viene sollevato di un interpiano", html.includes("translateZ(150.00px)"));
+ok("due piani -> selettore dei piani", html.includes('data-level-pick="1"') && html.includes('data-level-pick="all"'));
+ok("il pavimento e' ritagliato sulla forma", html.includes("clip-path:polygon("));
+ok("il contorno e' un poligono svg", html.includes("fp-outline") && html.includes("<polygon"));
+ok("la stanza a L ha 6 muri",
+   (html.split('data-room="r-sopra"')[1] || "").split("fp-wall").length - 1 === 6,
+   String((html.split('data-room="r-sopra"')[1] || "").split("fp-wall").length - 1));
+ok("il nome della stanza porta dentro la stanza", html.includes('data-room-focus="r-terra"'));
+ok("il piano e' scritto sull'etichetta", html.includes('fp-lv">+1'));
+ok("senza selezione non ci sono maniglie", !html.includes("data-resize="));
+
+el._page().view.active_level = 0;
+el.render(); html = el.innerHTML;
+ok("isolando un piano gli altri diventano fantasma", html.includes("fp-room ghost") || / class="fp-room[^"]*ghost/.test(html));
+ok("il piano isolato resta pieno", /data-room="r-terra"/.test(html) && !/fp-room[^"]*ghost[^"]*"\s*\n?\s*data-room="r-terra"/.test(html));
+el._page().view.active_level = null;
+
+el._editing = true; el._selected = { kind: "room", roomId: "r-terra" };
+el.render(); html = el.innerHTML;
+ok("la stanza selezionata ha 8 maniglie", (html.match(/data-resize="/g) || []).length === 8,
+   String((html.match(/data-resize="/g) || []).length));
+ok("le maniglie coprono angoli e lati",
+   ["nw","n","ne","e","se","s","sw","w"].every(k => html.includes(`data-resize="${k}"`)));
+ok("una stanza rettangolare non mostra vertici", !html.includes('data-vertex="'));
+ok("l'editor stanza offre le forme pronte", html.includes('data-room-shape="l"') && html.includes('data-room-shape="rect"'));
+ok("l'editor stanza offre il cambio piano", html.includes('data-room-level="1"') && html.includes('data-room-level="-1"'));
+ok("l'editor stanza offre di aggiungere un dispositivo", html.includes('data-room-add-device="r-terra"'));
+
+el._selected = { kind: "room", roomId: "r-sopra" };
+el.render(); html = el.innerHTML;
+ok("la stanza poligonale mostra i suoi vertici", (html.match(/data-vertex="/g) || []).length === 6,
+   String((html.match(/data-vertex="/g) || []).length));
+ok("ogni lato offre di aggiungere un vertice", (html.match(/data-vertex-add="/g) || []).length === 6);
+ok("l'elenco dei vertici e' nell'editor", html.includes("vertex-list") && html.includes('data-vertex-remove="0"'));
+
+// -- mutations --------------------------------------------------------------
+const rSopra = el._room("r-sopra");
+rSopra.points.splice(1, 0, [1, 0.25]);
+ok("un vertice aggiunto e' subito parte della forma", roomPoints(rSopra).length === 7);
+rSopra.points = null;
+ok("tornare rettangolo azzera i vertici", roomPoints(rSopra).length === 4 && rSopra.points === null);
+
+const rTerra = el._room("r-terra");
+// r-sopra is on level 1 throughout, so the storey list is the union of both
+rTerra.level = 2;
+ok("una stanza puo' salire di piano", el._levels().join() === "0,1,2", el._levels().join());
+rTerra.level = -1;
+ok("una stanza puo' scendere sotto il piano terra", el._levels().join() === "-1,0,1", el._levels().join());
+rTerra.level = 0;
+ok("il piano terra c'e' sempre", el._levels().includes(0));
+
+// devices in a room, from the map
+rTerra.entities = null;
+ok("in automatico la stanza pesca dall'area", el._roomAllEntities(rTerra).length > 0);
+ok("la mappa mostra al massimo 6 targhette", el._roomEntities(rTerra).length <= 6);
+ok("dentro la stanza si vede tutto",
+   el._roomAllEntities(rTerra).length >= el._roomEntities(rTerra).length);
+rTerra.entities = ["light.soggiorno"];
+rTerra.entities.push("switch.luci_scale");
+ok("un dispositivo aggiunto compare nella stanza", el._roomAllEntities(rTerra).length === 2);
+ok("un dispositivo inesistente non viene mostrato",
+   (rTerra.entities.push("light.fantasma"), el._roomAllEntities(rTerra).length === 2));
+rTerra.entities = ["light.soggiorno", "switch.luci_scale"];
+
+ok("senza posizione salvata il dispositivo si dispone da solo",
+   el._spotFor(rTerra, "light.soggiorno", 0, 2).join() === autoSpot(0, 2).join());
+rTerra.spots = { "light.soggiorno": [0.2, 0.8] };
+ok("la posizione salvata vince sull'automatico", el._spotFor(rTerra, "light.soggiorno", 0, 2).join() === "0.2,0.8");
+ok("gli altri restano automatici", el._spotFor(rTerra, "switch.luci_scale", 1, 2).join() === autoSpot(1, 2).join());
+
+// -- focus ------------------------------------------------------------------
+el._editing = false; el._selected = null;
+el._focusRoom("r-terra");
+ok("entrando nella stanza si calcola una camera dedicata",
+   el._focus && el._focus.roomId === "r-terra" && el._focus.zoom > 0.3);
+ok("la camera si sposta sulla stanza",
+   Math.abs(el._focus.dx - (el._planBounds().w/2 - (rTerra.x + rTerra.w/2))) < 1e-9);
+ok("la camera segue anche il piano", el._focus.dz === -((rTerra.level || 0) * 150));
+ok("lo zoom salvato della pagina non viene toccato", el._page().view.zoom === 1);
+el.render(); html = el.innerHTML;
+ok("la stanza aperta mostra i dispositivi posizionati", (html.match(/data-spot="/g) || []).length === 2,
+   String((html.match(/data-spot="/g) || []).length));
+ok("la posizione salvata finisce nel DOM", html.includes("left:20.000%"));
+ok("compare la barra della stanza", html.includes("fp-focus-bar") && html.includes("data-focus-exit"));
+ok("le altre stanze sfumano", html.includes("fp-room dim") || /class="fp-room[^"]*dim/.test(html));
+ok("la vista e' traslata sulla stanza", html.includes("translate3d("));
+el._focusRoom("r-terra");
+ok("ritoccare il nome esce dalla stanza", el._focus === null);
+el._focusRoom("r-inesistente");
+ok("una stanza inesistente non apre nulla", el._focus === null);
+el._focus = null; el._editing = false; el._selected = null;
+
+// restore the sections dashboard so later assertions are unaffected
+el._dashboard = { version: 5, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+el._pageIndex = 0;
+ok("stato ripristinato per i test successivi", !el._isFloorplan());
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

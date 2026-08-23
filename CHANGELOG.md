@@ -4,6 +4,74 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.16.0] - 2026-08-23
+
+La mappa 3D diventa un edificio: si ridimensiona, cambia forma, sale e scende
+di piano, e ci si entra dentro a vedere dove sta ogni dispositivo.
+
+### Mappa: piani veri
+- Ogni stanza ha un **piano**. Dal pannello della stanza la alzi o l'abbassi
+  di un piano alla volta, da -3 (interrato) a +8, e nella scena viene
+  sollevata davvero: i piani si impilano uno sopra l'altro.
+- **Selettore dei piani** sulla mappa quando l'edificio ne ha più di uno:
+  isola un piano e gli altri restano visibili in trasparenza, come riferimento,
+  invece di sparire.
+- **Distanza tra i piani** regolabile (40-400) dal pannello della pagina.
+- La prospettiva della scena si adatta all'altezza dell'edificio. Con la
+  vecchia prospettiva fissa un palazzo di otto piani avrebbe attraversato il
+  piano della camera e i piani alti si sarebbero rovesciati.
+- La **configurazione guidata** ora chiede a che piano si trova ogni stanza, e
+  dispone ciascun piano sulla propria griglia.
+
+### Mappa: dimensione e forma
+- **Otto maniglie** sulla stanza selezionata: quattro angoli e quattro lati.
+  Si trascinano direttamente sulla mappa, anche con la vista ruotata, e la
+  stanza si ridimensiona con passo di 5 unità.
+- **Forme pronte**: rettangolo, due varianti a L, a T, trapezio, smussata.
+- **Vertici trascinabili** uno per uno per le stanze non rettangolari, con i
+  pallini vuoti a metà lato che aggiungono un vertice dove serve.
+- I muri non sono più quattro fissi: ne viene generato uno per ogni lato del
+  perimetro, con una luce diversa a seconda dell'orientamento, altrimenti una
+  stanza a L si legge come una macchia informe.
+- La stanza in modifica nasconde le sue targhette di stato: coprivano proprio
+  la geometria che stai spostando.
+
+### Mappa: dispositivi
+- **AGGIUNGI DISPOSITIVO** direttamente dalla stanza. Prima bisognava trovare
+  e togliere una spunta "automatiche dall'area" prima che il pulsante di
+  ricerca comparisse: chi non la trovava concludeva, correttamente, che il
+  sistema non permettesse di aggiungere niente.
+- La ricerca propone **per prime le entità dell'area della stanza**, senza
+  digitare nulla.
+- Scegliere un dispositivo converte da solo la stanza da automatica a manuale,
+  invece di ignorare il clic.
+
+### Mappa: dentro la stanza
+- Toccando il **nome di una stanza** la vista ci entra dentro: zoom calcolato
+  sulla stanza e sulla dimensione reale del riquadro, camera traslata sulla
+  stanza, gli altri ambienti sfumano e i muri diventano trasparenti, come una
+  casa delle bambole aperta.
+- Dentro si vedono **tutti** i dispositivi (non i primi sei), ciascuno al
+  proprio posto, con nome e valore.
+- In modifica, ogni dispositivo si **trascina** dove sta davvero nella stanza.
+  La posizione viene salvata; chi non è stato posizionato si dispone da solo.
+  Un dispositivo trascinato fuori dal perimetro di una stanza a L viene
+  rifiutato.
+- Le icone dei dispositivi mantengono la loro dimensione a qualsiasi zoom:
+  scalavano con la scena e a zoom 3× diventavano dischi da 110px sovrapposti.
+
+### Schema
+- Versione 5. Una dashboard salvata con la versione precedente viene migrata
+  senza perdere nulla: le stanze esistenti restano dove sono, al piano terra,
+  rettangolari.
+
+### Verifica
+- 425 asserzioni sulla logica del pannello, tutti i test di schema, **38
+  asserzioni geometriche misurate** in Chromium headless: salto verticale tra
+  i piani, simmetria fra salita e discesa, assenza di derive laterali, muri
+  generati per una stanza a L, posizione reale delle maniglie, dimensione
+  delle icone dentro la stanza.
+
 ## [0.15.0] - 2026-08-23
 
 Le azioni al tocco ora fanno davvero quello che promettono, e l'editor spiega

@@ -25,11 +25,16 @@ mostra quanto consumo non è attribuito a nulla. Configurazione guidata passo
 passo, con rilevamento dalla Dashboard Energia di Home Assistant e gerarchia dei
 consumi (un carico può essere dichiarato compreso dentro un altro).
 
-**Mappa 3D** — Pianta isometrica della casa in CSS 3D: stanze come volumi
-estrusi, targhette di stato sempre frontali alla camera, controllo al tocco.
-Le stanze si generano dalle aree di Home Assistant o si scrivono a mano, e si
-dispongono trascinandole. Configurazione guidata che chiede quali stanze
-esistono e cosa c'è dentro ciascuna.
+**Mappa 3D** — Edificio isometrico in CSS 3D: stanze come volumi estrusi su
+più piani, targhette di stato sempre frontali alla camera, controllo al tocco.
+Le stanze si generano dalle aree di Home Assistant o si scrivono a mano, si
+dispongono trascinandole, si ridimensionano con otto maniglie e cambiano forma
+(rettangolo, L, T, trapezio, o vertici liberi trascinabili). Ogni stanza vive
+su un piano — da -3 a +8 — e la scena la solleva davvero, con un selettore per
+isolare un piano alla volta. Toccando il nome di una stanza la vista ci entra
+dentro: muri trasparenti, tutti i dispositivi al loro posto, trascinabili dove
+stanno davvero. Configurazione guidata che chiede quali stanze esistono, a che
+piano, e cosa c'è dentro ciascuna.
 
 **Panoramica** — Meteo con previsioni, presenze, notifiche persistenti,
 dispositivi accesi e flusso energetico in una schermata sola.

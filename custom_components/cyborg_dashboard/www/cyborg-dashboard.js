@@ -266,6 +266,153 @@ function unprojectDelta(dx, dy, yawDeg, pitchDeg, zoom) {
   return { dx: k * (cP * cY * dx + sY * dy), dy: k * (-cP * sY * dx + cY * dy) };
 }
 
+/** Winding of a plain rectangular room, in bounding-box fractions. */
+const RECT_POINTS = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/**
+ * Footprint of a room as a closed polygon in bounding-box fractions.
+ *
+ * Storing vertices as fractions rather than plan units is what lets a resize
+ * handle stay trivial: it only writes w/h, and any shape follows. A room with
+ * no explicit polygon is a rectangle, which is the overwhelming majority, so
+ * that case allocates nothing beyond the shared constant.
+ */
+function roomPoints(room) {
+  const pts = room && room.points;
+  if (!Array.isArray(pts) || pts.length < 3) return RECT_POINTS;
+  const out = [];
+  for (const p of pts) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const x = Number(p[0]), y = Number(p[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    out.push([Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))]);
+  }
+  return out.length >= 3 ? out : RECT_POINTS;
+}
+
+/** CSS clip-path / SVG polygon string for a footprint, in percent units. */
+function pointsToCss(points) {
+  return points.map((p) => `${(p[0] * 100).toFixed(3)}% ${(p[1] * 100).toFixed(3)}%`).join(",");
+}
+function pointsToSvg(points) {
+  return points.map((p) => `${(p[0] * 100).toFixed(3)},${(p[1] * 100).toFixed(3)}`).join(" ");
+}
+
+/**
+ * One extruded wall per polygon edge.
+ *
+ * Each wall is a flat div hinged along its own edge: it is placed at the first
+ * vertex, turned in the floor plane by the edge bearing (rotateZ) and then
+ * folded up out of that plane (rotateX(90deg)). transform-origin sits on the
+ * hinge, otherwise the wall would pivot about its centre and end up half
+ * buried under the floor. This generalises the four hard-coded walls the map
+ * had while it could only draw rectangles, and reproduces them exactly for a
+ * rectangular footprint.
+ *
+ * The per-edge brightness is not decoration: with a single flat colour an
+ * L-shaped room reads as a blob, because the eye needs different shading on
+ * differently-oriented faces to resolve the corner.
+ */
+function roomEdges(room) {
+  const pts = roomPoints(room);
+  const w = room.w, h = room.h;
+  const edges = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const x1 = a[0] * w, y1 = a[1] * h;
+    const dx = b[0] * w - x1, dy = b[1] * h - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.5) continue;
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    edges.push({ x: x1, y: y1, len, angle,
+      shade: 1 - 0.2 * Math.abs(Math.sin((angle * Math.PI) / 180)) });
+  }
+  return edges;
+}
+
+/** Area-weighted centre of a footprint, used to place the room label. */
+function polygonCentroid(points) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i], q = points[(i + 1) % points.length];
+    const cross = p[0] * q[1] - q[0] * p[1];
+    a += cross;
+    cx += (p[0] + q[0]) * cross;
+    cy += (p[1] + q[1]) * cross;
+  }
+  if (Math.abs(a) < 1e-6) {
+    let sx = 0, sy = 0;
+    for (const p of points) { sx += p[0]; sy += p[1]; }
+    return [sx / points.length, sy / points.length];
+  }
+  return [cx / (3 * a), cy / (3 * a)];
+}
+
+/** Even-odd point-in-polygon, so a dropped device cannot land outside its room. */
+function pointInPolygon(points, x, y) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const xi = points[i][0], yi = points[i][1], xj = points[j][0], yj = points[j][1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** Ready-made footprints, because nobody wants to type sixteen coordinates. */
+const SHAPE_PRESETS = [
+  { k: "rect", l: "Rettangolo", icon: "mdi:square-outline", points: null },
+  { k: "l", l: "A L", icon: "mdi:vector-square", points: [[0, 0], [1, 0], [1, 0.55], [0.45, 0.55], [0.45, 1], [0, 1]] },
+  { k: "l2", l: "A L specchiata", icon: "mdi:vector-square", points: [[0, 0], [1, 0], [1, 1], [0.55, 1], [0.55, 0.55], [0, 0.55]] },
+  { k: "t", l: "A T", icon: "mdi:format-align-center", points: [[0, 0], [1, 0], [1, 0.5], [0.7, 0.5], [0.7, 1], [0.3, 1], [0.3, 0.5], [0, 0.5]] },
+  { k: "trap", l: "Trapezio", icon: "mdi:triangle-outline", points: [[0.18, 0], [0.82, 0], [1, 1], [0, 1]] },
+  { k: "oct", l: "Smussata", icon: "mdi:octagon-outline", points: [[0.22, 0], [0.78, 0], [1, 0.22], [1, 0.78], [0.78, 1], [0.22, 1], [0, 0.78], [0, 0.22]] },
+];
+
+/** Human name of a storey, so the UI never shows a bare signed integer. */
+function levelName(level) {
+  if (level === 0) return "Piano terra";
+  if (level === -1) return "Seminterrato";
+  if (level < 0) return `Interrato ${Math.abs(level)}`;
+  return `Piano ${level}`;
+}
+
+/** The eight grips of a bounding box, as fractions of it. */
+const RESIZE_HANDLES = [
+  { k: "nw", x: 0, y: 0, t: "Angolo", c: "nwse-resize" },
+  { k: "n", x: 0.5, y: 0, t: "Lato", c: "ns-resize" },
+  { k: "ne", x: 1, y: 0, t: "Angolo", c: "nesw-resize" },
+  { k: "e", x: 1, y: 0.5, t: "Lato", c: "ew-resize" },
+  { k: "se", x: 1, y: 1, t: "Angolo", c: "nwse-resize" },
+  { k: "s", x: 0.5, y: 1, t: "Lato", c: "ns-resize" },
+  { k: "sw", x: 0, y: 1, t: "Angolo", c: "nesw-resize" },
+  { k: "w", x: 0, y: 0.5, t: "Lato", c: "ew-resize" },
+];
+
+/**
+ * Zoom that makes one room fill the viewport at the current camera.
+ *
+ * The isometric projection turns a w x h footprint into a parallelogram whose
+ * screen bounding box is w|cosY| + h|sinY| wide and cosP(w|sinY| + h|cosY|)
+ * tall. Fitting that box, rather than the raw footprint, is why the zoom is
+ * right at every yaw instead of only when the room happens to face the camera.
+ */
+function fitZoom(w, h, yawDeg, pitchDeg, vpW, vpH, margin) {
+  const y = (yawDeg * Math.PI) / 180, p = (pitchDeg * Math.PI) / 180;
+  const cY = Math.abs(Math.cos(y)), sY = Math.abs(Math.sin(y));
+  const projW = w * cY + h * sY;
+  const projH = Math.max(0.08, Math.cos(p)) * (w * sY + h * cY);
+  const k = Math.min(vpW / Math.max(1, projW), vpH / Math.max(1, projH)) * (margin || 0.62);
+  return Math.min(3, Math.max(0.3, k));
+}
+
+/** Grid arrangement for devices the user has not positioned by hand. */
+function autoSpot(index, total) {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(total)));
+  const rows = Math.max(1, Math.ceil(total / cols));
+  const c = index % cols, r = Math.floor(index / cols);
+  return [(c + 0.5) / cols, (r + 0.5) / rows];
+}
+
 const DEVICE_CLASS_LABELS = {
   power: "Potenza", energy: "Energia", current: "Corrente", voltage: "Tensione",
   temperature: "Temperatura", humidity: "Umidità", pressure: "Pressione",
@@ -690,6 +837,8 @@ class CyborgDashboard extends HTMLElement {
     this._flowOpen = {};        // per-card: is the load sub-tree expanded?
     this._wizard = null;        // {cardId, step} guided energy setup
     this._mapWizard = null;     // {step, rooms[]} guided 3D map setup
+    this._focus = null;         // {roomId, zoom, dx, dy, dz} room close-up (not persisted)
+    this._roomPicker = false;   // room editor: entity picker open
   }
 
   set hass(value) {
@@ -754,8 +903,18 @@ class CyborgDashboard extends HTMLElement {
     parts.push(JSON.stringify(this._flowOpen || {}));
     if (this._isFloorplan()) {
       parts.push(this._registry ? "reg" : "noreg");
+      parts.push(JSON.stringify(this._focus || null));
+      parts.push(this._roomPicker ? "pick" : "-");
+      const view = this._page().view || {};
+      parts.push("lv" + String(view.active_level) + ":" + String(view.level_gap));
+      const focusId = this._focus && this._focus.roomId;
       for (const room of this._rooms()) {
-        for (const id of this._roomEntities(room)) {
+        // Geometry belongs in the signature: resizing a room or moving it to
+        // another storey changes nothing about entity state, and without this
+        // the map would only repaint on the next unrelated state update.
+        parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length}`);
+        const ids = room.id === focusId ? this._roomAllEntities(room) : this._roomEntities(room);
+        for (const id of ids) {
           const st = this._hass.states[id];
           parts.push(id + "=" + (st ? st.state : "?"));
         }
@@ -1191,6 +1350,7 @@ class CyborgDashboard extends HTMLElement {
       x: (i % cols) * (W + GAP),
       y: Math.floor(i / cols) * (H + GAP),
       w: W, h: H,
+      level: 0, points: null, spots: {},
       entities: null,
     }));
     this._selected = null;
@@ -1203,7 +1363,9 @@ class CyborgDashboard extends HTMLElement {
     const maxX = rooms.reduce((m, r) => Math.max(m, r.x + r.w), 0);
     const room = { id: uid("room"), area_id: null, title: "Nuova stanza",
       icon: "mdi:floor-plan", color: ROOM_COLORS[rooms.length % ROOM_COLORS.length],
-      x: maxX + 18, y: 0, w: 200, h: 160, entities: null };
+      x: maxX + 18, y: 0, w: 200, h: 160,
+      level: this._page().view && this._page().view.active_level != null ? this._page().view.active_level : 0,
+      points: null, spots: {}, entities: null };
     rooms.push(room);
     this._selected = { kind: "room", roomId: room.id };
     this._touch();
@@ -1261,35 +1423,128 @@ class CyborgDashboard extends HTMLElement {
       </button>`;
   }
 
+  /** Entities to draw inside a room when it is focused: the full list, uncapped. */
+  _roomAllEntities(room) {
+    if (Array.isArray(room.entities)) return room.entities.filter((e) => this._hass.states[e]);
+    if (!room.area_id || !this._registry) return [];
+    return (this._registry.byArea[room.area_id] || []).filter((e) => this._hass.states[e]);
+  }
+
+  /** Where a device sits inside its room, in footprint fractions. */
+  _spotFor(room, entityId, index, total) {
+    const spots = room.spots || {};
+    const saved = spots[entityId];
+    if (Array.isArray(saved) && saved.length >= 2) return [Number(saved[0]) || 0, Number(saved[1]) || 0];
+    return autoSpot(index, total);
+  }
+
+  /** One positioned device marker for the focused room. */
+  _spotMarkup(room, entityId, index, total) {
+    const st = this._hass.states[entityId];
+    if (!st) return "";
+    const [fx, fy] = this._spotFor(room, entityId, index, total);
+    const on = ON_STATES.has(st.state);
+    const name = st.attributes.friendly_name || entityId;
+    const kind = this._badgeKind(entityId);
+    const unit = st.attributes.unit_of_measurement || "";
+    let value;
+    if (kind === "toggle") value = on ? "acceso" : "spento";
+    else if (kind === "binary") value = stateWords(st.state, st.attributes.device_class);
+    else if (kind === "climate") value = (st.attributes.current_temperature !== undefined
+      ? st.attributes.current_temperature + "°" : stateWords(st.state));
+    else if (kind === "cover") value = (st.attributes.current_position !== undefined
+      ? st.attributes.current_position + "%" : stateWords(st.state));
+    else {
+      const n = parseFloat(st.state);
+      value = (Number.isFinite(n) ? (Math.abs(n) >= 100 ? Math.round(n) : n.toFixed(1)) : stateWords(st.state))
+        + (unit ? " " + unit : "");
+    }
+    return `<div class="fp-spot${on ? " on" : ""}${this._editing ? " movable" : ""}" data-spot="${esc(entityId)}"
+        style="left:${(fx * 100).toFixed(3)}%;top:${(fy * 100).toFixed(3)}%">
+        <div class="fp-spot-pin" style="transform:translateZ(26px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1)) scale(calc(1 / var(--zoom)))">
+          <button class="fp-spot-btn" ${this._editing ? "" : `data-fp-badge="${esc(entityId)}"`} title="${esc(name)}">
+            <ha-icon icon="${esc(autoIcon(entityId, st))}"></ha-icon>
+          </button>
+          <div class="fp-spot-tip"><strong>${esc(name)}</strong><span>${esc(value)}</span></div>
+        </div>
+      </div>`;
+  }
+
   _renderRoom(room, view) {
-    const entities = this._roomEntities(room);
+    const focusId = this._focus && this._focus.roomId;
+    const focused = focusId === room.id;
+    const dim = !!focusId && !focused;
+    const level = room.level || 0;
+    const gap = view.level_gap || 150;
+    const activeLevel = view.active_level;
+    const ghost = activeLevel !== null && activeLevel !== undefined && activeLevel !== level;
     const selected = this._selected && this._selected.kind === "room" && this._selected.roomId === room.id;
     const wallH = view.show_walls ? view.wall_height : 0;
+    const pts = roomPoints(room);
+    const poly = pointsToCss(pts);
+
+    // Focus mode replaces the badge strip with positioned device markers: the
+    // point of zooming into a room is to see *where* things are, so a floating
+    // list of chips would defeat the whole gesture.
+    const allEnts = focused ? this._roomAllEntities(room) : [];
+    const entities = focused ? [] : this._roomEntities(room);
     const badges = entities.map((e) => this._badgeMarkup(e, room)).join("");
-
-    // Walls are extruded from each edge of the floor. transform-origin sits on
-    // the edge itself so the wall hinges up out of the floor plane instead of
-    // rotating about its own centre and ending up half-buried.
-    const walls = view.show_walls ? `
-      <div class="fp-wall" style="width:${room.w}px;height:${wallH}px;left:0;top:0;transform-origin:0 0;transform:rotateX(90deg)"></div>
-      <div class="fp-wall" style="width:${room.w}px;height:${wallH}px;left:0;top:${room.h}px;transform-origin:0 0;transform:rotateX(90deg)"></div>
-      <div class="fp-wall side" style="width:${room.h}px;height:${wallH}px;left:0;top:0;transform-origin:0 0;transform:rotateZ(90deg) rotateX(90deg)"></div>
-      <div class="fp-wall side" style="width:${room.h}px;height:${wallH}px;left:${room.w}px;top:0;transform-origin:0 0;transform:rotateZ(90deg) rotateX(90deg)"></div>` : "";
-
-    const label = view.show_labels
-      ? `<div class="fp-label"><ha-icon icon="${esc(room.icon)}"></ha-icon><span>${esc(room.title)}</span></div>`
+    const spots = focused
+      ? `<div class="fp-spots">${allEnts.map((e, i) => this._spotMarkup(room, e, i, allEnts.length)).join("")}</div>`
       : "";
-    const badgeLayer = badges ? `<div class="fp-badges">${badges}</div>` : "";
-    const tag = (label || badgeLayer) ? `
-      <div class="fp-anchor" style="transform:translateZ(${wallH + 14}px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1))">
+
+    const walls = view.show_walls && !ghost ? roomEdges(room).map((e) => `
+      <div class="fp-wall" style="width:${e.len.toFixed(2)}px;height:${wallH}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
+        transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);filter:brightness(${e.shade.toFixed(3)})"></div>`).join("") : "";
+
+    const [cx, cy] = polygonCentroid(pts);
+    const label = view.show_labels && !ghost
+      ? `<div class="fp-label" data-room-focus="${esc(room.id)}" title="Ingrandisci ${esc(room.title)}">
+           <ha-icon icon="${esc(room.icon)}"></ha-icon><span>${esc(room.title)}</span>
+           ${level ? `<em class="fp-lv">${level > 0 ? "+" : ""}${level}</em>` : ""}
+         </div>` : "";
+    // Handles and vertices are useless if a stack of status badges is sitting
+    // on top of the geometry they move, so the room being edited shows its
+    // name and nothing else until it is deselected.
+    const editable = this._editing && selected && !ghost;
+    const badgeLayer = badges && !editable ? `<div class="fp-badges">${badges}</div>` : "";
+    const tag = (label || badgeLayer) && !dim && !focused ? `
+      <div class="fp-anchor" style="left:${(cx * 100).toFixed(3)}%;top:${(cy * 100).toFixed(3)}%;transform:translateZ(${wallH + 14}px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1))">
         <div class="fp-tag">${label}${badgeLayer}</div>
       </div>` : "";
 
-    return `<div class="fp-room${selected ? " selected" : ""}${this._editing ? " editable" : ""}"
-        data-room="${esc(room.id)}"
-        style="--rc:${esc(room.color)};left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px">
-        <div class="fp-floor"></div>
+    // Handles live in the floor plane on purpose. A billboarded handle would
+    // stay readable but would stop looking attached to the corner it moves,
+    // and direct manipulation needs the grab point to be where the geometry is.
+    const handles = editable ? RESIZE_HANDLES.map((hd) => `
+      <button class="fp-handle" data-resize="${hd.k}" title="${hd.t}"
+        style="left:${hd.x * 100}%;top:${hd.y * 100}%;cursor:${hd.c}"></button>`).join("") : "";
+    const vertices = editable && Array.isArray(room.points) ? pts.map((pt, i) => `
+      <button class="fp-vertex" data-vertex="${i}" title="Vertice ${i + 1}"
+        style="left:${(pt[0] * 100).toFixed(3)}%;top:${(pt[1] * 100).toFixed(3)}%"></button>`).join("")
+      + pts.map((pt, i) => {
+        const nx = pts[(i + 1) % pts.length];
+        return `<button class="fp-vertex add" data-vertex-add="${i}" title="Aggiungi un vertice"
+          style="left:${(((pt[0] + nx[0]) / 2) * 100).toFixed(3)}%;top:${(((pt[1] + nx[1]) / 2) * 100).toFixed(3)}%"></button>`;
+      }).join("") : "";
+
+    const cls = ["fp-room"];
+    if (selected) cls.push("selected");
+    if (this._editing && !ghost) cls.push("editable");
+    if (focused) cls.push("focused");
+    if (dim) cls.push("dim");
+    if (ghost) cls.push("ghost");
+
+    return `<div class="${cls.join(" ")}"
+        data-room="${esc(room.id)}" data-level="${level}"
+        style="--rc:${esc(room.color)};left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px;
+          transform:translateZ(${(level * gap).toFixed(2)}px)">
+        <div class="fp-floor" style="clip-path:polygon(${poly})"></div>
+        <svg class="fp-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${pointsToSvg(pts)}"></polygon></svg>
         ${walls}
+        ${spots}
+        ${handles}
+        ${vertices}
         ${tag}
       </div>`;
   }
@@ -1317,27 +1572,127 @@ class CyborgDashboard extends HTMLElement {
     }
 
     const bounds = this._planBounds();
-    return `<div class="fp-viewport${this._editing ? " editing" : ""}" data-fp-viewport
-        style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${view.zoom}">
+    const levels = this._levels();
+    const gap = view.level_gap || 150;
+    const focus = this._focus && this._room(this._focus.roomId) ? this._focus : null;
+    const froom = focus ? this._room(focus.roomId) : null;
+
+    // Focus is a camera state, not a stored one: it overrides zoom and slides
+    // the world so the chosen room lands on the stage origin. Writing it into
+    // page.view instead would make "zoom into the kitchen" a persisted setting
+    // and leave the map stuck there on the next load.
+    const zoom = focus ? focus.zoom : view.zoom;
+    const shift = focus
+      ? ` translate3d(${focus.dx.toFixed(2)}px,${focus.dy.toFixed(2)}px,${focus.dz.toFixed(2)}px)`
+      : "";
+
+    // Perspective has to grow with the building.
+    //
+    // The scene is scale(zoom) rotateX rotateZ translateZ(level*gap), so the
+    // scale multiplies the storey offset too. With a fixed 1900px perspective
+    // an eight-storey plan at a 400-unit interfloor would push the top rooms
+    // through the camera plane and render them inside out. Keeping the camera
+    // at least three times as far away as the building is tall bounds the
+    // foreshortening between floors to something that reads as depth instead
+    // of distortion, and a single-storey plan keeps the original 1900px so the
+    // common case looks exactly as it did.
+    const span = ((levels[levels.length - 1] - levels[0]) * gap + (view.wall_height || 0))
+      * Math.max(1, zoom);
+    const persp = Math.max(1900, Math.round(span * 3));
+
+    // Only the entrance floor gets a full slab. Repeating it at every storey
+    // turned the stack into three opaque grey planes that hid the rooms below;
+    // upper and lower storeys get a thin outline instead, which still says
+    // "there is a floor here" without becoming the loudest thing on screen.
+    const grounds = levels.map((lv) => `
+      <div class="fp-ground${lv === 0 ? " base" : " deck"}" data-ground="${lv}"
+        style="width:${bounds.w + 80}px;height:${bounds.h + 80}px;left:-40px;top:-40px;transform:translateZ(${(lv * gap).toFixed(2)}px);
+          opacity:${view.active_level !== null && view.active_level !== undefined && view.active_level !== lv
+            ? 0.06 : (lv === 0 ? 1 : Math.max(0.25, 0.6 - Math.abs(lv) * 0.08)).toFixed(2)}"></div>`).join("");
+
+    const levelBar = levels.length > 1 ? `
+      <div class="fp-levels">
+        <button class="fp-hud-btn ${view.active_level === null || view.active_level === undefined ? "active" : ""}" data-level-pick="all" title="Tutti i piani"><ha-icon icon="mdi:layers-triple-outline"></ha-icon></button>
+        ${levels.slice().reverse().map((lv) => `<button class="fp-hud-btn ${view.active_level === lv ? "active" : ""}" data-level-pick="${lv}" title="${esc(levelName(lv))}">${lv > 0 ? "+" : ""}${lv}</button>`).join("")}
+      </div>` : "";
+
+    const focusBar = froom ? `
+      <div class="fp-focus-bar">
+        <ha-icon icon="${esc(froom.icon)}"></ha-icon>
+        <div class="ffb-text">
+          <strong>${esc(froom.title)}</strong>
+          <small>${this._roomAllEntities(froom).length} dispositivi · ${esc(levelName(froom.level || 0))}${this._editing ? " · trascina le icone per posizionarle" : ""}</small>
+        </div>
+        ${this._editing ? `<button class="ffb-add" data-room-add-device="${esc(froom.id)}"><ha-icon icon="mdi:plus"></ha-icon> DISPOSITIVO</button>` : ""}
+        <button class="ffb-exit" data-focus-exit><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>` : "";
+
+    return `<div class="fp-viewport${this._editing ? " editing" : ""}${focus ? " focusing" : ""}" data-fp-viewport
+        style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${zoom};--persp:${persp}px">
         <div class="fp-stage">
-          <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px">
-            <div class="fp-ground" style="width:${bounds.w + 80}px;height:${bounds.h + 80}px;left:-40px;top:-40px"></div>
+          <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px;
+            transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw))${shift}">
+            ${grounds}
             ${rooms.map((r) => this._renderRoom(r, view)).join("")}
           </div>
         </div>
+        ${focusBar}
+        ${levelBar}
         <div class="fp-hud">
           <button class="fp-hud-btn" data-view-nudge="yaw:-15" title="Ruota a sinistra"><ha-icon icon="mdi:rotate-left"></ha-icon></button>
           <button class="fp-hud-btn" data-view-nudge="yaw:15" title="Ruota a destra"><ha-icon icon="mdi:rotate-right"></ha-icon></button>
           <button class="fp-hud-btn" data-view-nudge="pitch:-6" title="Abbassa la camera"><ha-icon icon="mdi:angle-acute"></ha-icon></button>
           <button class="fp-hud-btn" data-view-nudge="pitch:6" title="Alza la camera"><ha-icon icon="mdi:cube-outline"></ha-icon></button>
-          <button class="fp-hud-btn" data-view-nudge="zoom:-0.15" title="Riduci"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
-          <button class="fp-hud-btn" data-view-nudge="zoom:0.15" title="Ingrandisci"><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="zoom:-0.15" title="Riduci"${focus ? " disabled" : ""}><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
+          <button class="fp-hud-btn" data-view-nudge="zoom:0.15" title="Ingrandisci"${focus ? " disabled" : ""}><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></button>
           <button class="fp-hud-btn ${view.show_walls ? "active" : ""}" data-view-toggle="show_walls" title="Mostra/nascondi muri"><ha-icon icon="mdi:wall"></ha-icon></button>
           <button class="fp-hud-btn ${view.show_labels ? "active" : ""}" data-view-toggle="show_labels" title="Mostra/nascondi nomi stanze"><ha-icon icon="mdi:label-outline"></ha-icon></button>
           <button class="fp-hud-btn" data-view-flat title="Vista dall'alto (pianta)"><ha-icon icon="mdi:crop-free"></ha-icon></button>
         </div>
-        ${this._editing ? '<div class="fp-hint">Trascina una stanza per spostarla · clicca per configurarla</div>' : ""}
+        ${this._editing
+          ? '<div class="fp-hint">Trascina per spostare · maniglie per ridimensionare · tocca il nome per entrare nella stanza</div>'
+          : '<div class="fp-hint">Tocca il nome di una stanza per entrarci</div>'}
       </div>`;
+  }
+
+  /** Every storey that actually holds a room, low to high, always including 0. */
+  _levels() {
+    const set = new Set([0]);
+    for (const r of this._rooms()) set.add(r.level || 0);
+    return Array.from(set).sort((a, b) => a - b);
+  }
+
+  /**
+   * Enter or leave the room close-up.
+   *
+   * The fit is computed here, against the measured viewport, rather than at
+   * render time: the viewport is a min(74vh, 760px) box, so its real size is
+   * only known once it is laid out, and guessing it would make the zoom right
+   * on a desktop and wrong on a tablet.
+   */
+  _focusRoom(roomId) {
+    const room = this._room(roomId);
+    if (!room) return;
+    if (this._focus && this._focus.roomId === roomId) { this._exitFocus(); return; }
+    const view = this._page().view || {};
+    const vp = this.querySelector("[data-fp-viewport]");
+    const rect = vp ? vp.getBoundingClientRect() : { width: 900, height: 560 };
+    const bounds = this._planBounds();
+    const gap = view.level_gap || 150;
+    this._focus = {
+      roomId,
+      zoom: fitZoom(room.w, room.h, view.yaw, view.pitch, rect.width || 900, rect.height || 560, 0.6),
+      dx: bounds.w / 2 - (room.x + room.w / 2),
+      dy: bounds.h / 2 - (room.y + room.h / 2),
+      dz: -((room.level || 0) * gap),
+    };
+    if (this._editing) { this._selected = { kind: "room", roomId }; this._entityQuery = ""; }
+    this._touch(true);
+  }
+
+  _exitFocus() {
+    this._focus = null;
+    this._touch(true);
   }
 
   /**
@@ -1421,6 +1776,11 @@ class CyborgDashboard extends HTMLElement {
           <div class="wiz-hint">${room.area_id
             ? `Queste sono le entità dell'area <strong>${esc(room.title)}</strong>. Lasciando l'automatico, la stanza mostra sempre le più utili e si aggiorna da sola quando aggiungi dispositivi in Home Assistant.`
             : "Questa stanza non è collegata a un'area, quindi le entità vanno scelte a mano."}</div>
+          <div class="level-picker">
+            <button class="mini" data-mw-level="-1" ${(room.level || 0) <= -3 ? "disabled" : ""} title="Un piano più in basso"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+            <div class="level-now"><strong>${esc(levelName(room.level || 0))}</strong><small>a che piano si trova</small></div>
+            <button class="mini" data-mw-level="1" ${(room.level || 0) >= 8 ? "disabled" : ""} title="Un piano più in alto"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+          </div>
           ${room.area_id ? `<label class="check"><input type="checkbox" data-mw-auto ${auto ? "checked" : ""}> Automatico dall'area (consigliato)</label>` : ""}
           ${auto && room.area_id ? `<div class="wiz-list">${[...chosen].map((id) => {
             const st = this._hass.states[id];
@@ -1442,12 +1802,14 @@ class CyborgDashboard extends HTMLElement {
     const rr = this._mapWizardRooms();
     return `<div class="wiz-step">
         <div class="wiz-q">Tutto pronto</div>
-        <div class="wiz-hint">Cyborg disporrà le ${rr.length} stanze su una griglia ordinata. Da lì le <strong>trascini</strong> sulla mappa per farle somigliare alla pianta vera, e dai controlli in basso ruoti la vista o passi alla pianta dall'alto.</div>
+        <div class="wiz-hint">Cyborg disporrà le ${rr.length} stanze su una griglia ordinata, un piano alla volta. Da lì le <strong>trascini</strong> sulla mappa per farle somigliare alla pianta vera, le <strong>ridimensioni</strong> con le maniglie bianche e ne cambi la <strong>forma</strong> dal pannello di destra.${
+          new Set(rr.map((r) => r.level || 0)).size > 1
+            ? ` L'edificio ha ${new Set(rr.map((r) => r.level || 0)).size} piani: il selettore a destra sulla mappa ne isola uno alla volta.` : ""}</div>
         <div class="wiz-list">${rr.map((r) => `<div class="wiz-opt sel" style="pointer-events:none;--nc:${esc(r.color)}">
             <ha-icon icon="${esc(r.icon)}"></ha-icon>
-            <div><strong>${esc(r.title)}</strong><small>${esc(r.entities === null
+            <div><strong>${esc(r.title)}</strong><small>${esc(levelName(r.level || 0) + " · " + (r.entities === null
               ? this._roomEntities({ area_id: r.area_id, entities: null }).length + " entità automatiche"
-              : r.entities.length + " entità scelte")}</small></div>
+              : r.entities.length + " entità scelte"))}</small></div>
           </div>`).join("")}</div>
       </div>`;
   }
@@ -1479,19 +1841,30 @@ class CyborgDashboard extends HTMLElement {
   _finishMapWizard() {
     const page = this._page();
     const rooms = this._mapWizardRooms();
-    const cols = Math.max(1, Math.ceil(Math.sqrt(rooms.length)));
     const W = 230, H = 180, GAP = 18;
-    page.rooms = rooms.map((r, i) => ({
-      id: uid("room"),
-      area_id: r.area_id,
-      title: r.title,
-      icon: r.icon,
-      color: r.color,
-      x: (i % cols) * (W + GAP),
-      y: Math.floor(i / cols) * (H + GAP),
-      w: W, h: H,
-      entities: r.entities,
-    }));
+    // Each storey gets its own grid. Packing every room into one grid would
+    // stack a first-floor bedroom directly above a ground-floor one only by
+    // accident, and would leave holes on the floor that has fewer rooms.
+    const perLevel = {};
+    page.rooms = rooms.map((r) => {
+      const lv = r.level || 0;
+      const n = (perLevel[lv] = (perLevel[lv] || 0));
+      perLevel[lv] = n + 1;
+      const count = rooms.filter((x) => (x.level || 0) === lv).length;
+      const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+      return {
+        id: uid("room"),
+        area_id: r.area_id,
+        title: r.title,
+        icon: r.icon,
+        color: r.color,
+        x: (n % cols) * (W + GAP),
+        y: Math.floor(n / cols) * (H + GAP),
+        w: W, h: H,
+        level: lv, points: null, spots: {},
+        entities: r.entities,
+      };
+    });
     this._mapWizard = null;
     this._selected = null;
     this._entityQuery = "";
@@ -1501,7 +1874,14 @@ class CyborgDashboard extends HTMLElement {
   _renderRoomEditor(room) {
     const areas = (this._registry && this._registry.areas) || [];
     const derived = this._roomEntities(room);
+    const all = this._roomAllEntities(room);
     const custom = Array.isArray(room.entities);
+    const level = room.level || 0;
+    const shape = Array.isArray(room.points) ? room.points : null;
+    const activePreset = !shape ? "rect"
+      : (SHAPE_PRESETS.find((sp) => sp.points && sp.points.length === shape.length
+          && sp.points.every((pt, i) => Math.abs(pt[0] - shape[i][0]) < 0.01 && Math.abs(pt[1] - shape[i][1]) < 0.01)) || { k: "custom" }).k;
+    const placed = Object.keys(room.spots || {}).length;
     return `<aside class="editor">
       ${this._editorHead("STANZA", room.title)}
       <div class="section">
@@ -1510,7 +1890,7 @@ class CyborgDashboard extends HTMLElement {
           <option value="">— nessuna —</option>
           ${areas.map((a) => `<option value="${esc(a.area_id)}" ${room.area_id === a.area_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
         </select></label>
-        <span class="hint">Collegando l'area, le entità di quella stanza compaiono da sole sulla mappa. ${derived.length} entità trovate ora.</span>
+        <span class="hint">Collegando l'area, le entità di quella stanza compaiono da sole sulla mappa. ${all.length} entità trovate ora.</span>
         <label>COLORE<input type="color" data-room-prop="color" value="${esc(room.color)}"></label>
         <label>ICONA
           <div class="icon-editor-row">
@@ -1521,9 +1901,35 @@ class CyborgDashboard extends HTMLElement {
             `<button type="button" class="icon-swatch" data-icon-pick="${esc(i)}" title="${esc(i)}"><ha-icon icon="${esc(i)}"></ha-icon></button>`).join("")}</div>
         </label>
       </div>
+
+      <div class="section">
+        <strong>PIANO</strong>
+        <span class="hint">La mappa è un edificio, non una pianta: ogni stanza vive su un piano e viene sollevata di conseguenza.</span>
+        <div class="level-picker">
+          <button class="mini" data-room-level="-1" ${level <= -3 ? "disabled" : ""} title="Abbassa di un piano"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+          <div class="level-now"><strong>${esc(levelName(level))}</strong><small>quota ${level > 0 ? "+" : ""}${level}</small></div>
+          <button class="mini" data-room-level="1" ${level >= 8 ? "disabled" : ""} title="Alza di un piano"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+        </div>
+      </div>
+
+      <div class="section">
+        <strong>FORMA</strong>
+        <span class="hint">Le maniglie bianche sulla mappa ridimensionano la stanza. Con una forma non rettangolare compaiono anche i vertici, trascinabili uno per uno.</span>
+        <div class="shape-grid">${SHAPE_PRESETS.map((sp) => `
+          <button class="shape-btn ${activePreset === sp.k ? "active" : ""}" data-room-shape="${sp.k}" title="${esc(sp.l)}">
+            <span class="shape-prev" style="clip-path:polygon(${pointsToCss(sp.points || RECT_POINTS)})"></span>
+            <small>${esc(sp.l)}</small>
+          </button>`).join("")}</div>
+        ${shape ? `<div class="vertex-list">
+          ${shape.map((pt, i) => `<div class="vertex-row"><span>V${i + 1}</span>
+            <em>${Math.round(pt[0] * 100)}% · ${Math.round(pt[1] * 100)}%</em>
+            <button class="mini danger" data-vertex-remove="${i}" ${shape.length <= 3 ? "disabled" : ""}><ha-icon icon="mdi:close"></ha-icon></button></div>`).join("")}
+        </div>
+        <span class="hint">${shape.length} vertici. Sulla mappa, i pallini pieni si trascinano e quelli vuoti a metà lato aggiungono un vertice.</span>` : ""}
+      </div>
+
       <div class="section">
         <strong>GEOMETRIA</strong>
-        <span class="hint">Puoi anche trascinare la stanza direttamente sulla mappa.</span>
         <div class="two">
           <label>X<input type="number" step="10" data-room-prop="x" value="${room.x}"></label>
           <label>Y<input type="number" step="10" data-room-prop="y" value="${room.y}"></label>
@@ -1533,19 +1939,62 @@ class CyborgDashboard extends HTMLElement {
           <label>PROFONDITÀ<input type="number" step="10" min="40" data-room-prop="h" value="${room.h}"></label>
         </div>
       </div>
+
       <div class="section">
-        <strong>ENTITÀ MOSTRATE</strong>
-        <label class="check"><input type="checkbox" data-room-auto ${custom ? "" : "checked"}> Automatiche dall'area</label>
-        <div class="room-entities">${derived.length
-          ? derived.map((e) => `<div class="room-ent"><ha-icon icon="${esc(autoIcon(e, this._hass.states[e]))}"></ha-icon>
+        <strong>DISPOSITIVI NELLA STANZA</strong>
+        <div class="seg">
+          <button class="${custom ? "" : "active"}" data-room-mode="auto">Automatici dall'area</button>
+          <button class="${custom ? "active" : ""}" data-room-mode="manual">Scelti da me</button>
+        </div>
+        <span class="hint">${custom
+          ? `${all.length} dispositivi scelti a mano. Sulla mappa ne vedi al massimo ${MAX_BADGES_PER_ROOM}: entra nella stanza per vederli tutti.`
+          : `Presi dall'area collegata. Sulla mappa compaiono i ${Math.min(derived.length, MAX_BADGES_PER_ROOM)} più significativi, dentro la stanza li vedi tutti.`}</span>
+        <button class="wide" data-room-add-device="${esc(room.id)}"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI DISPOSITIVO</button>
+        ${this._roomPicker ? `<label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off" data-autofocus></label>
+          <div class="entity-results" data-entity-results>${this._roomEntityResults(room)}</div>
+          <button class="secondary wide" data-room-picker-close>CHIUDI RICERCA</button>` : ""}
+        <div class="room-entities">${all.length
+          ? all.map((e) => `<div class="room-ent"><ha-icon icon="${esc(autoIcon(e, this._hass.states[e]))}"></ha-icon>
               <span>${esc((this._hass.states[e] && this._hass.states[e].attributes.friendly_name) || e)}</span>
+              ${(room.spots || {})[e] ? '<em class="room-ent-pos" title="Posizionato a mano">●</em>' : ""}
               ${custom ? `<button class="mini danger" data-room-ent-remove="${esc(e)}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}</div>`).join("")
-          : '<div class="entity-result-empty">Nessuna entità. Collega un\'area, oppure disattiva l\'automatico e aggiungile a mano.</div>'}</div>
-        ${custom ? `<label>AGGIUNGI ENTITÀ<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
-          <div class="entity-results" data-entity-results>${this._entityResults()}</div>` : ""}
+          : '<div class="entity-result-empty">Nessun dispositivo. Collega un\'area oppure aggiungili a mano.</div>'}</div>
+        <button class="secondary wide" data-room-focus-btn="${esc(room.id)}"><ha-icon icon="mdi:magnify-scan"></ha-icon> ENTRA NELLA STANZA E POSIZIONA</button>
+        <span class="hint">${placed} dispositivi posizionati a mano; gli altri si dispongono da soli.</span>
       </div>
+
       <button class="delete" data-room-remove="${esc(room.id)}">ELIMINA STANZA</button>
     </aside>`;
+  }
+
+  /**
+   * Entity search for a room, biased towards the room's own area.
+   *
+   * A generic search over 380 entities makes "add the ceiling light to the
+   * kitchen" a typing exercise. Listing the area's own entities first, with no
+   * query at all, turns it into one tap in the common case.
+   */
+  _roomEntityResults(room) {
+    const q = (this._entityQuery || "").trim().toLowerCase();
+    const already = new Set(this._roomAllEntities(room));
+    if (!q) {
+      const pool = (room.area_id && this._registry && this._registry.byArea[room.area_id]) || [];
+      const free = pool.filter((id) => !already.has(id) && this._hass.states[id]);
+      if (!free.length) {
+        return `<div class="entity-result-empty">${room.area_id
+          ? "Tutti i dispositivi dell'area sono già nella stanza. Cerca per aggiungerne altri."
+          : "Digita per cercare tra tutte le entità di Home Assistant."}</div>`;
+      }
+      return `<div class="entity-result-head">DALL'AREA DI QUESTA STANZA</div>` + free.slice(0, 14).map((id) => {
+        const st = this._hass.states[id];
+        return `<div class="entity-result-row" data-pick-entity="${esc(id)}">
+          <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+          <div class="err-text"><strong>${esc(st.attributes.friendly_name || id)}</strong><small>${esc(id)}</small></div>
+          <span class="err-state">${esc(st.state)}</span>
+        </div>`;
+      }).join("");
+    }
+    return this._entityResults();
   }
 
   _renderFloorplanPageEditor() {
@@ -1570,11 +2019,25 @@ class CyborgDashboard extends HTMLElement {
         <button class="secondary wide danger-outline" data-auto-rooms><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DALLE AREE</button>
       </div>
       <div class="section">
+        <strong>PIANI</strong>
+        <span class="hint">${this._levels().length > 1
+          ? "L'edificio ha più piani. Il selettore in alto a destra sulla mappa isola un piano alla volta."
+          : "Tutte le stanze sono al piano terra. Apri una stanza e usa le frecce per portarla a un altro piano."}</span>
+        <div class="level-rows">${this._levels().slice().reverse().map((lv) => {
+          const on = this._rooms().filter((r) => (r.level || 0) === lv);
+          return `<button class="level-row ${view.active_level === lv ? "active" : ""}" data-level-pick="${lv}">
+            <strong>${esc(levelName(lv))}</strong><small>${on.length} ${on.length === 1 ? "stanza" : "stanze"}</small></button>`;
+        }).join("")}</div>
+        ${view.active_level !== null && view.active_level !== undefined
+          ? '<button class="secondary wide" data-level-pick="all">MOSTRA TUTTI I PIANI</button>' : ""}
+      </div>
+      <div class="section">
         <strong>CAMERA</strong>
         <label>ROTAZIONE · ${Math.round(view.yaw)}°<input type="range" min="0" max="359" step="1" data-view-prop="yaw" value="${view.yaw}"></label>
         <label>INCLINAZIONE · ${Math.round(view.pitch)}°<input type="range" min="0" max="85" step="1" data-view-prop="pitch" value="${view.pitch}"></label>
         <label>ZOOM · ${Number(view.zoom).toFixed(2)}×<input type="range" min="0.3" max="3" step="0.05" data-view-prop="zoom" value="${view.zoom}"></label>
         <label>ALTEZZA MURI · ${view.wall_height}<input type="range" min="0" max="200" step="2" data-view-prop="wall_height" value="${view.wall_height}"></label>
+        <label>DISTANZA TRA I PIANI · ${view.level_gap}<input type="range" min="40" max="400" step="5" data-view-prop="level_gap" value="${view.level_gap}"></label>
         <label class="check"><input type="checkbox" data-view-prop="show_walls" ${view.show_walls ? "checked" : ""}> Mostra muri</label>
         <label class="check"><input type="checkbox" data-view-prop="show_labels" ${view.show_labels ? "checked" : ""}> Mostra nomi stanze</label>
       </div>
@@ -3442,7 +3905,9 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => {
         this._pageIndex = parseInt(el.getAttribute("data-page-tab"), 10) || 0;
         this._selected = null;
-        this._touch();
+        this._focus = null;
+        this._roomPicker = false;
+        this._touch(true);
       };
     });
 
@@ -3518,7 +3983,7 @@ class CyborgDashboard extends HTMLElement {
         const room = this._room(this._selected && this._selected.roomId);
         if (!room) return;
         const key = el.getAttribute("data-room-prop");
-        const numeric = ["x", "y", "w", "h"].includes(key);
+        const numeric = ["x", "y", "w", "h", "level"].includes(key);
         let value = numeric ? parseInt(el.value, 10) || 0 : el.value;
         if (key === "w" || key === "h") value = Math.max(40, value);
         if (key === "area_id" && !value) value = null;
@@ -3535,6 +4000,79 @@ class CyborgDashboard extends HTMLElement {
       room.entities = roomAuto.checked ? null : this._roomEntities(room).slice();
       this._touch();
     };
+    // --- storey, shape, focus and device management
+    all("[data-level-pick]").forEach((el) => {
+      el.onclick = () => {
+        const raw = el.getAttribute("data-level-pick");
+        const view = this._page().view;
+        view.active_level = raw === "all" ? null : parseInt(raw, 10);
+        this._touch();
+      };
+    });
+    all("[data-room-level]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const next = Math.max(-3, Math.min(8, (room.level || 0) + parseInt(el.getAttribute("data-room-level"), 10)));
+        room.level = next;
+        // Following the room to its new storey: leaving the view filtered on
+        // the old floor would make the room the user just moved disappear.
+        const view = this._page().view;
+        if (view.active_level !== null && view.active_level !== undefined) view.active_level = next;
+        if (this._focus && this._focus.roomId === room.id) this._focusRoom(room.id);
+        else this._touch();
+      };
+    });
+    all("[data-room-shape]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const preset = SHAPE_PRESETS.find((sp) => sp.k === el.getAttribute("data-room-shape"));
+        if (!preset) return;
+        room.points = preset.points ? preset.points.map((pt) => pt.slice()) : null;
+        this._touch();
+      };
+    });
+    all("[data-vertex-remove]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room || !Array.isArray(room.points) || room.points.length <= 3) return;
+        room.points.splice(parseInt(el.getAttribute("data-vertex-remove"), 10), 1);
+        this._touch();
+      };
+    });
+    all("[data-room-mode]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        // Switching to manual freezes whatever the area currently yields, so
+        // the user starts from a populated list instead of an empty one.
+        room.entities = el.getAttribute("data-room-mode") === "auto" ? null : this._roomAllEntities(room).slice();
+        this._touch();
+      };
+    });
+    all("[data-room-add-device]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(el.getAttribute("data-room-add-device"));
+        if (!room) return;
+        if (!Array.isArray(room.entities)) room.entities = this._roomAllEntities(room).slice();
+        this._selected = { kind: "room", roomId: room.id };
+        this._roomPicker = true;
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+    const pickerClose = q("[data-room-picker-close]");
+    if (pickerClose) pickerClose.onclick = () => { this._roomPicker = false; this._entityQuery = ""; this._touch(true); };
+    all("[data-room-focus]").forEach((el) => {
+      el.onclick = (ev) => { ev.stopPropagation(); this._focusRoom(el.getAttribute("data-room-focus")); };
+    });
+    all("[data-room-focus-btn]").forEach((el) => {
+      el.onclick = () => this._focusRoom(el.getAttribute("data-room-focus-btn"));
+    });
+    const focusExit = q("[data-focus-exit]");
+    if (focusExit) focusExit.onclick = () => this._exitFocus();
+
     all("[data-room-ent-remove]").forEach((el) => {
       el.onclick = () => {
         const room = this._room(this._selected && this._selected.roomId);
@@ -3686,13 +4224,21 @@ class CyborgDashboard extends HTMLElement {
       };
     });
     const mwNew = q("[data-mw-newroom]");
+    all("[data-mw-level]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._mapWizardRooms()[this._mapWizard.step - 1];
+        if (!room) return;
+        room.level = Math.max(-3, Math.min(8, (room.level || 0) + parseInt(el.getAttribute("data-mw-level"), 10)));
+        this._touch();
+      };
+    });
     if (mwNew) mwNew.oninput = () => { this._mapWizard.newRoom = mwNew.value; };
     const mwAdd = q("[data-mw-addroom]");
     if (mwAdd) mwAdd.onclick = () => {
       const name = (this._mapWizard.newRoom || "").trim();
       if (!name) return;
       this._mapWizard.rooms.push({
-        area_id: null, title: name, icon: roomIconFor(name),
+        area_id: null, title: name, icon: roomIconFor(name), level: 0,
         color: ROOM_COLORS[this._mapWizard.rooms.length % ROOM_COLORS.length],
         on: true, entities: [],
       });
@@ -3889,7 +4435,12 @@ class CyborgDashboard extends HTMLElement {
         }
         if (this._isFloorplan()) {
           const room = this._room(this._selected && this._selected.roomId);
-          if (!room || !Array.isArray(room.entities)) return;
+          if (!room) return;
+          // Picking a device implies "I want this one here", so a room still on
+          // automatic is converted rather than refusing the click: the old
+          // behaviour silently did nothing unless you first found and unticked
+          // a checkbox, which is exactly the dead end being reported.
+          if (!Array.isArray(room.entities)) room.entities = this._roomAllEntities(room).slice();
           if (!room.entities.includes(id)) room.entities.push(id);
           this._entityQuery = "";
           this._touch();
@@ -3924,11 +4475,20 @@ class CyborgDashboard extends HTMLElement {
    * destroy the element being dragged mid-gesture.
    */
   _bindRoomDrag() {
-    if (!this._editing || !this._isFloorplan()) return;
+    if (!this._isFloorplan()) return;
     const view = this._page().view;
+    const un = (sdx, sdy) => unprojectDelta(sdx, sdy, view.yaw, view.pitch,
+      this._focus ? this._focus.zoom : view.zoom);
+
+    // Devices are draggable even outside edit mode's room selection, so
+    // positioning a room's contents does not require hunting for the room in
+    // the sidebar first.
+    if (this._editing) this._bindSpotDrag(un);
+    if (!this._editing) return;
+
     Array.from(this.querySelectorAll(".fp-room.editable")).forEach((el) => {
       el.onpointerdown = (ev) => {
-        if (ev.target.closest("[data-fp-badge]")) return;
+        if (ev.target.closest("[data-fp-badge],[data-resize],[data-vertex],[data-vertex-add],[data-spot],[data-room-focus]")) return;
         const room = this._room(el.getAttribute("data-room"));
         if (!room) return;
         ev.preventDefault();
@@ -3939,7 +4499,7 @@ class CyborgDashboard extends HTMLElement {
           const sdx = mv.clientX - start.x, sdy = mv.clientY - start.y;
           if (!start.moved && Math.hypot(sdx, sdy) < 4) return;
           start.moved = true;
-          const d = unprojectDelta(sdx, sdy, view.yaw, view.pitch, view.zoom);
+          const d = un(sdx, sdy);
           room.x = Math.round((start.rx + d.dx) / 5) * 5;
           room.y = Math.round((start.ry + d.dy) / 5) * 5;
           el.style.left = room.x + "px";
@@ -3952,7 +4512,160 @@ class CyborgDashboard extends HTMLElement {
           try { el.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
           if (start.moved) { this._touch(); return; }
           this._selected = { kind: "room", roomId: room.id };
+          this._roomPicker = false;
           this._entityQuery = "";
+          this._touch();
+        };
+      };
+    });
+
+    this._bindResize(un);
+    this._bindVertexDrag(un);
+  }
+
+  /**
+   * Resize a room by its eight grips.
+   *
+   * During the gesture only the room box is written; the walls are hidden by
+   * the .resizing class instead of being recomputed on every pointermove. The
+   * floor and its outline are inset:0 with percentage geometry, so they follow
+   * the box for free and any footprint - rectangle or polygon - stays correct
+   * without a single recalculation. Everything is rebuilt once, on release.
+   */
+  _bindResize(un) {
+    Array.from(this.querySelectorAll("[data-resize]")).forEach((h) => {
+      h.onpointerdown = (ev) => {
+        const el = h.closest(".fp-room");
+        const room = el && this._room(el.getAttribute("data-room"));
+        if (!room) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.setPointerCapture(ev.pointerId);
+        const k = h.getAttribute("data-resize");
+        const s0 = { x: ev.clientX, y: ev.clientY, rx: room.x, ry: room.y, rw: room.w, rh: room.h };
+        el.classList.add("resizing");
+
+        h.onpointermove = (mv) => {
+          const d = un(mv.clientX - s0.x, mv.clientY - s0.y);
+          const snap = (v) => Math.round(v / 5) * 5;
+          let x = s0.rx, y = s0.ry, w = s0.rw, hh = s0.rh;
+          if (k.includes("w")) { const nx = snap(s0.rx + d.dx); w = Math.max(40, s0.rx + s0.rw - nx); x = s0.rx + s0.rw - w; }
+          if (k.includes("e")) { w = Math.max(40, snap(s0.rw + d.dx)); }
+          if (k.includes("n")) { const ny = snap(s0.ry + d.dy); hh = Math.max(40, s0.ry + s0.rh - ny); y = s0.ry + s0.rh - hh; }
+          if (k.includes("s")) { hh = Math.max(40, snap(s0.rh + d.dy)); }
+          room.x = x; room.y = y; room.w = w; room.h = hh;
+          el.style.left = x + "px"; el.style.top = y + "px";
+          el.style.width = w + "px"; el.style.height = hh + "px";
+        };
+
+        h.onpointerup = () => {
+          h.onpointermove = null; h.onpointerup = null;
+          try { h.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+          el.classList.remove("resizing");
+          this._touch();
+        };
+      };
+    });
+  }
+
+  /** Drag one polygon vertex, or split an edge by its midpoint marker. */
+  _bindVertexDrag(un) {
+    Array.from(this.querySelectorAll("[data-vertex-add]")).forEach((h) => {
+      h.onclick = (ev) => {
+        ev.stopPropagation();
+        const el = h.closest(".fp-room");
+        const room = el && this._room(el.getAttribute("data-room"));
+        if (!room || !Array.isArray(room.points) || room.points.length >= 24) return;
+        const i = parseInt(h.getAttribute("data-vertex-add"), 10);
+        const a = room.points[i], b = room.points[(i + 1) % room.points.length];
+        room.points.splice(i + 1, 0, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+        this._touch();
+      };
+    });
+
+    Array.from(this.querySelectorAll("[data-vertex]")).forEach((h) => {
+      h.onpointerdown = (ev) => {
+        const el = h.closest(".fp-room");
+        const room = el && this._room(el.getAttribute("data-room"));
+        if (!room || !Array.isArray(room.points)) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.setPointerCapture(ev.pointerId);
+        const i = parseInt(h.getAttribute("data-vertex"), 10);
+        const p0 = room.points[i].slice();
+        const s0 = { x: ev.clientX, y: ev.clientY };
+        const floor = el.querySelector(".fp-floor");
+        const poly = el.querySelector(".fp-outline polygon");
+        el.classList.add("resizing");
+
+        h.onpointermove = (mv) => {
+          const d = un(mv.clientX - s0.x, mv.clientY - s0.y);
+          const fx = Math.min(1, Math.max(0, p0[0] + d.dx / room.w));
+          const fy = Math.min(1, Math.max(0, p0[1] + d.dy / room.h));
+          room.points[i] = [Math.round(fx * 1000) / 1000, Math.round(fy * 1000) / 1000];
+          const pts = roomPoints(room);
+          if (floor) floor.style.clipPath = `polygon(${pointsToCss(pts)})`;
+          if (poly) poly.setAttribute("points", pointsToSvg(pts));
+          h.style.left = (fx * 100) + "%";
+          h.style.top = (fy * 100) + "%";
+        };
+
+        h.onpointerup = () => {
+          h.onpointermove = null; h.onpointerup = null;
+          try { h.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+          el.classList.remove("resizing");
+          this._touch();
+        };
+      };
+    });
+  }
+
+  /**
+   * Place a device inside its room.
+   *
+   * The drop point is rejected if it falls outside the footprint: on an
+   * L-shaped room the bounding box contains a notch that is not part of the
+   * room, and a lamp floating in that notch would be plainly wrong.
+   */
+  _bindSpotDrag(un) {
+    Array.from(this.querySelectorAll(".fp-spot.movable")).forEach((h) => {
+      h.onpointerdown = (ev) => {
+        if (ev.target.closest("[data-fp-badge]") && ev.pointerType === "mouse" && ev.button !== 0) return;
+        const el = h.closest(".fp-room");
+        const room = el && this._room(el.getAttribute("data-room"));
+        if (!room) return;
+        const id = h.getAttribute("data-spot");
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.setPointerCapture(ev.pointerId);
+        const p0 = [parseFloat(h.style.left) / 100, parseFloat(h.style.top) / 100];
+        const s0 = { x: ev.clientX, y: ev.clientY, moved: false };
+
+        h.onpointermove = (mv) => {
+          const sdx = mv.clientX - s0.x, sdy = mv.clientY - s0.y;
+          if (!s0.moved && Math.hypot(sdx, sdy) < 5) return;
+          s0.moved = true;
+          const d = un(sdx, sdy);
+          const fx = Math.min(1, Math.max(0, p0[0] + d.dx / room.w));
+          const fy = Math.min(1, Math.max(0, p0[1] + d.dy / room.h));
+          h.style.left = (fx * 100) + "%";
+          h.style.top = (fy * 100) + "%";
+          h.dataset.fx = fx; h.dataset.fy = fy;
+        };
+
+        h.onpointerup = () => {
+          h.onpointermove = null; h.onpointerup = null;
+          try { h.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+          if (!s0.moved) { this._badgeTap(id); return; }
+          const fx = parseFloat(h.dataset.fx), fy = parseFloat(h.dataset.fy);
+          const pts = roomPoints(room);
+          if (!pointInPolygon(pts, fx, fy) && room.points) {
+            this._error = "Il dispositivo deve restare dentro la stanza";
+            this._touch(true);
+            return;
+          }
+          room.spots = room.spots || {};
+          room.spots[id] = [Math.round(fx * 1000) / 1000, Math.round(fy * 1000) / 1000];
           this._touch();
         };
       };
@@ -4435,22 +5148,113 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .page-tab:hover{opacity:.85}
 .page-tab.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
 
-.fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:1900px;perspective-origin:50% 42%}
+.fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:var(--persp,1900px);perspective-origin:50% 42%}
 .fp-stage{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d}
 .fp-world{position:absolute;transform-style:preserve-3d;transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw));transition:transform .28s cubic-bezier(.4,0,.2,1)}
+.fp-ground.deck{background:none;border:1px dashed rgba(255,255,255,.16);box-shadow:none}
 .fp-ground{position:absolute;border-radius:14px;background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),rgba(255,255,255,.02);box-shadow:0 0 70px rgba(0,0,0,.6)}
 .fp-room{position:absolute;transform-style:preserve-3d}
 .fp-room.editable{cursor:grab}
 .fp-room.editable:active{cursor:grabbing}
-.fp-floor{position:absolute;inset:0;border-radius:3px;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a));border:1px solid color-mix(in srgb,var(--rc) 55%,transparent);box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent)}
-.fp-room.selected .fp-floor{border:2px solid #fff;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 52%,#0d141d),color-mix(in srgb,var(--rc) 26%,#0b111a));box-shadow:inset 0 0 60px color-mix(in srgb,var(--rc) 45%,transparent),0 0 40px color-mix(in srgb,var(--rc) 70%,transparent)}
-.fp-room.selected .fp-wall{border-color:#fff;filter:brightness(1.35)}
+.fp-floor{position:absolute;inset:0;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a));box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent)}
+/* The floor outline is an SVG polygon rather than a CSS border: a border is
+   clipped away by clip-path, so a non-rectangular room would lose its edge. */
+.fp-outline{position:absolute;inset:0;overflow:visible;pointer-events:none}
+.fp-outline polygon{fill:none;stroke:color-mix(in srgb,var(--rc) 60%,transparent);stroke-width:1;vector-effect:non-scaling-stroke}
+.fp-room.selected .fp-outline polygon{stroke:#fff;stroke-width:2}
+.fp-room.selected .fp-floor{background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 52%,#0d141d),color-mix(in srgb,var(--rc) 26%,#0b111a));box-shadow:inset 0 0 60px color-mix(in srgb,var(--rc) 45%,transparent),0 0 40px color-mix(in srgb,var(--rc) 70%,transparent)}
+.fp-room.selected .fp-wall{border-color:#fff}
+.fp-room{transition:opacity .3s ease}
+.fp-room.ghost{opacity:.09;pointer-events:none}
+.fp-room.dim{opacity:.1;pointer-events:none}
+.fp-room.focused .fp-floor{box-shadow:inset 0 0 90px color-mix(in srgb,var(--rc) 30%,transparent)}
+/* Open-dollhouse presentation: the walls stay as spatial reference but stop
+   occluding the devices standing inside the room, which is the entire point
+   of zooming in. */
+.fp-room.focused .fp-wall{opacity:.24}
+.fp-room.focused .fp-outline polygon{stroke-width:2}
+.fp-room.resizing .fp-wall,.fp-room.resizing .fp-anchor,.fp-room.resizing .fp-spots{opacity:0}
+
+/* Grips live in the floor plane so they stay attached to the geometry they
+   move; the counter-rotation trick used for labels would detach them. */
+.fp-handle{position:absolute;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;padding:0;border-radius:3px;
+  background:#fff;border:1.5px solid color-mix(in srgb,var(--rc) 80%,#000);box-shadow:0 0 0 1px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.6);z-index:3}
+.fp-handle:hover{background:var(--rc);transform:scale(1.25)}
+.fp-vertex{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;padding:0;border-radius:50%;
+  background:var(--rc);border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.6);z-index:4;cursor:move}
+.fp-vertex.add{background:transparent;border-style:dashed;border-color:rgba(255,255,255,.7);width:12px;height:12px;margin:-6px 0 0 -6px;cursor:copy}
+.fp-vertex:hover{transform:scale(1.3)}
+
+.fp-spots{position:absolute;inset:0;transform-style:preserve-3d}
+.fp-spot{position:absolute;width:0;height:0;transform-style:preserve-3d}
+.fp-spot.movable{cursor:move;pointer-events:auto}
+.fp-spot-pin{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;gap:4px;width:max-content;transform-origin:0 0}
+.fp-spot-btn{display:grid;place-items:center;width:38px;height:38px;margin-left:-19px;padding:0;border-radius:50%;
+  background:rgba(8,14,22,.9);border:1.5px solid color-mix(in srgb,var(--rc) 60%,transparent);color:#cfe6f5;
+  box-shadow:0 6px 18px rgba(0,0,0,.55);backdrop-filter:blur(6px);transition:transform .18s,box-shadow .18s}
+.fp-spot-btn ha-icon{--mdc-icon-size:20px}
+.fp-spot.on .fp-spot-btn{background:linear-gradient(180deg,#ffd98a,#ffc247);border-color:#ffdb8f;color:#0a1017;box-shadow:0 6px 22px rgba(255,194,71,.5)}
+.fp-spot-btn:hover{transform:translateY(-3px) scale(1.06)}
+.fp-spot-tip{transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;padding:3px 9px;border-radius:9px;
+  background:rgba(6,12,20,.9);border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(6px);white-space:nowrap;line-height:1.25}
+.fp-spot-tip strong{font-size:10.5px;font-weight:650;color:#e8f4ff;max-width:132px;overflow:hidden;text-overflow:ellipsis}
+.fp-spot-tip span{font:9.5px ui-monospace,monospace;opacity:.62;letter-spacing:.04em;text-transform:uppercase}
+
+.fp-focus-bar{position:absolute;left:14px;right:14px;top:14px;display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:14px;
+  background:rgba(8,14,22,.86);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);backdrop-filter:blur(10px);
+  box-shadow:0 12px 34px rgba(0,0,0,.5);animation:cyFocusIn .26s cubic-bezier(.32,.72,0,1)}
+@keyframes cyFocusIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.fp-focus-bar>ha-icon{--mdc-icon-size:22px;color:var(--accent);flex-shrink:0}
+.ffb-text{flex:1;min-width:0}
+.ffb-text strong{display:block;font-size:13px;letter-spacing:.04em}
+.ffb-text small{display:block;font:10px ui-monospace,monospace;opacity:.5;letter-spacing:.06em}
+.ffb-add{display:inline-flex;align-items:center;gap:5px;padding:7px 11px;border-radius:9px;font-size:10.5px;letter-spacing:.08em;
+  background:color-mix(in srgb,var(--accent) 16%,transparent);border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent)}
+.ffb-add ha-icon{--mdc-icon-size:15px}
+.ffb-exit{padding:7px;border-radius:9px;background:transparent;border:1px solid rgba(255,255,255,.14);color:#cfe6f5}
+.ffb-exit:hover{background:rgba(255,255,255,.09)}
+.fp-levels{position:absolute;right:14px;bottom:14px;display:flex;flex-direction:column;gap:5px;padding:6px;border-radius:13px;
+  background:rgba(8,14,22,.8);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(8px)}
+.fp-levels .fp-hud-btn{min-width:32px;font:11px ui-monospace,monospace;font-weight:700}
+
+.level-picker{display:flex;align-items:center;gap:10px;margin-top:8px}
+.level-picker .mini{flex-shrink:0}
+.level-now{flex:1;text-align:center;padding:7px;border-radius:9px;background:color-mix(in srgb,var(--accent) 8%,transparent);border:1px solid color-mix(in srgb,var(--accent) 20%,transparent)}
+.level-now strong{display:block;font-size:12px}
+.level-now small{display:block;font:9.5px ui-monospace,monospace;opacity:.5}
+.level-rows{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.level-row{display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:9px;text-align:left;
+  background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent);color:var(--primary-text-color)}
+.level-row.active{border-color:color-mix(in srgb,var(--accent) 60%,transparent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.level-row strong{flex:1;font-size:12px}
+.level-row small{font:10px ui-monospace,monospace;opacity:.5}
+
+.shape-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:8px}
+.shape-btn{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px;border-radius:10px;
+  background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent);color:var(--primary-text-color)}
+.shape-btn.active{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.shape-prev{display:block;width:34px;height:26px;background:color-mix(in srgb,var(--accent) 62%,transparent)}
+.shape-btn small{font-size:9.5px;letter-spacing:.03em;opacity:.75;text-align:center;line-height:1.15}
+.vertex-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.vertex-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;background:rgba(255,255,255,.03);font-size:11px}
+.vertex-row span{font-weight:700;color:var(--accent);width:26px}
+.vertex-row em{flex:1;font:10px ui-monospace,monospace;opacity:.55;font-style:normal}
+
+.seg{display:flex;gap:0;margin-top:8px;border-radius:10px;overflow:hidden;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent)}
+.seg button{flex:1;padding:9px 6px;font-size:10.5px;letter-spacing:.05em;background:transparent;border:0;color:var(--primary-text-color);opacity:.55}
+.seg button.active{opacity:1;color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
+.entity-result-head{font:9.5px ui-monospace,monospace;letter-spacing:.14em;opacity:.45;padding:8px 4px 4px}
+.room-ent-pos{color:var(--accent);font-size:9px;flex-shrink:0}
 .fp-wall{position:absolute;background:linear-gradient(to top,color-mix(in srgb,var(--rc) 34%,#0a1017) 0%,color-mix(in srgb,var(--rc) 12%,#0a1017) 65%,color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0}
 .fp-wall.side{filter:brightness(.82)}
 .fp-anchor{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d;pointer-events:none}
 .fp-tag{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:5px;width:max-content}
 .fp-label{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:99px;background:rgba(6,12,20,.82);border:1px solid color-mix(in srgb,var(--rc) 50%,transparent);backdrop-filter:blur(6px);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--rc);white-space:nowrap}
 .fp-label ha-icon{--mdc-icon-size:15px}
+.fp-label{pointer-events:auto;cursor:zoom-in;transition:transform .16s,box-shadow .16s}
+.fp-label:hover{transform:scale(1.07);box-shadow:0 0 22px color-mix(in srgb,var(--rc) 55%,transparent)}
+.fp-lv{font-style:normal;font-size:9px;padding:1px 5px;border-radius:99px;background:color-mix(in srgb,var(--rc) 26%,transparent);opacity:.9}
+.fp-viewport.focusing .fp-label{cursor:zoom-out}
 .fp-badges{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;max-width:186px;pointer-events:auto}
 .fp-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:99px;font-size:11px;font-weight:650;letter-spacing:.02em;white-space:nowrap;color:#e8f4ff;background:rgba(8,14,22,.86);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(6px);box-shadow:0 3px 10px rgba(0,0,0,.45);cursor:pointer;transition:transform .15s,border-color .15s}
 .fp-badge:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.4)}

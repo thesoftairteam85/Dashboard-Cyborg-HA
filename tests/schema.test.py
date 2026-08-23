@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 4 and len(d["pages"][1]["sections"]) == 6
+assert d["version"] == 5 and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -13,7 +13,7 @@ v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c4", "entity_id": "event.backup"}]}]}
 m = schema.normalize_dashboard(v2)
 secs = m["pages"][0]["sections"]
-assert m["version"] == 4 and m["revision"] == 7
+assert m["version"] == 5 and m["revision"] == 7
 assert len(secs) == 3 and len(secs[1]["items"]) == 2, "case-insensitive merge"
 assert secs[2]["title"] == "Generale"
 assert "items" not in m["pages"][0], "legacy items must be dropped"
@@ -25,7 +25,7 @@ print("schema: all tests passed")
 
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
-assert d["version"] == 4
+assert d["version"] == 5
 assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
 assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
 assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
@@ -35,7 +35,7 @@ assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
     {"id": "s", "title": "X", "items": [{"id": "c", "entity_id": "light.a"}]}]}]}
 r = schema.normalize_dashboard(v3)
-assert r["version"] == 4
+assert r["version"] == 5
 assert r["pages"][0]["type"] == "sections"
 assert r["pages"][0]["sections"][0]["items"][0]["entity_id"] == "light.a"
 assert "rooms" not in r["pages"][0] and "view" not in r["pages"][0]
@@ -174,3 +174,80 @@ assert m["revision"] == 12, "la revisione non viene toccata"
 assert schema.normalize_dashboard(m) == m, "non deve aggiungere una seconda mappa"
 assert len([p for p in schema.normalize_dashboard(m)["pages"] if p["type"] == "floorplan"]) == 1
 print("map-page backfill: all tests passed")
+
+# ---- v5: storeys, polygon footprints, device spots -------------------------
+
+# a v4 room survives untouched and gains the new fields with safe defaults
+v4room = schema.normalize_room({"id": "r1", "title": "Cucina", "x": 10, "y": 20, "w": 200, "h": 160}, 0)
+assert v4room["level"] == 0
+assert v4room["points"] is None, "a plain room must stay a cheap rectangle"
+assert v4room["spots"] == {}
+assert v4room["x"] == 10 and v4room["w"] == 200, "existing geometry must not move"
+
+# storey is clamped both ways: it multiplies a vertical offset in the 3D scene
+assert schema.normalize_room({"level": 99}, 0)["level"] == 8
+assert schema.normalize_room({"level": -99}, 0)["level"] == -3
+assert schema.normalize_room({"level": "2"}, 0)["level"] == 2
+assert schema.normalize_room({"level": 1.9}, 0)["level"] == 1
+assert schema.normalize_room({"level": "primo"}, 0)["level"] == 0
+assert schema.normalize_room({"level": None}, 0)["level"] == 0
+
+# polygon footprint
+lshape = [[0, 0], [1, 0], [1, 0.5], [0.5, 0.5], [0.5, 1], [0, 1]]
+r = schema.normalize_room({"points": lshape}, 0)
+assert r["points"] == [[float(a), float(b)] for a, b in lshape]
+assert schema.normalize_room({"points": [[0, 0], [1, 0]]}, 0)["points"] is None, "under 3 vertices is not a polygon"
+assert schema.normalize_room({"points": "triangolo"}, 0)["points"] is None
+assert schema.normalize_room({"points": [[0, 0], [1, 0], [1, 1], "x", [None, 2]]}, 0)["points"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
+# out-of-box vertices are clamped, never dropped: dropping one would silently
+# change the shape, clamping keeps the vertex count the editor is showing
+assert schema.normalize_room({"points": [[-3, 0], [1, 0], [1, 9]]}, 0)["points"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]
+assert len(schema.normalize_room({"points": [[0, 0]] * 40}, 0)["points"]) == 24
+
+# spots
+r = schema.normalize_room({"spots": {"light.cucina": [0.25, 0.75], "nonsense": [0, 0],
+                                     "light.bad": "x", "light.short": [1]}}, 0)
+assert r["spots"] == {"light.cucina": [0.25, 0.75]}, r["spots"]
+assert schema.normalize_room({"spots": {"light.a": [5, -5]}}, 0)["spots"] == {"light.a": [1.0, 0.0]}
+assert schema.normalize_room({"spots": []}, 0)["spots"] == {}
+
+# view: distance between storeys and the isolate-one-storey filter
+v = schema.normalize_view({})
+assert v["level_gap"] == 150 and v["active_level"] is None
+assert schema.normalize_view({"level_gap": 9999})["level_gap"] == 400
+assert schema.normalize_view({"level_gap": 1})["level_gap"] == 40
+assert schema.normalize_view({"level_gap": "sopra"})["level_gap"] == 150
+assert schema.normalize_view({"active_level": 2})["active_level"] == 2
+assert schema.normalize_view({"active_level": 77})["active_level"] == 8
+assert schema.normalize_view({"active_level": "tutti"})["active_level"] is None
+assert schema.normalize_view({"active_level": ""})["active_level"] is None
+
+# a stored v4 dashboard gains the new room fields without losing its map
+stored = {"version": 4, "revision": 12, "pages": [
+    {"id": "map", "type": "floorplan", "title": "Mappa 3D",
+     "view": {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
+              "show_walls": True, "show_labels": True},
+     "rooms": [{"id": "room-1", "title": "Salotto", "x": 0, "y": 0, "w": 230, "h": 180,
+                "area_id": "salotto", "entities": None}]}]}
+mig = schema.normalize_dashboard(stored)
+room = mig["pages"][0]["rooms"][0]
+assert mig["version"] == 5 and mig["revision"] == 12
+assert room["title"] == "Salotto" and room["area_id"] == "salotto" and room["w"] == 230
+assert room["level"] == 0 and room["points"] is None and room["spots"] == {}
+assert mig["pages"][0]["view"]["level_gap"] == 150
+assert schema.normalize_dashboard(mig) == mig, "v5 normalization must be idempotent"
+
+# a multi-storey plan round-trips exactly
+multi = {"version": 5, "pages": [{"id": "m", "type": "floorplan",
+    "view": {"level_gap": 180, "active_level": 1},
+    "rooms": [{"id": "a", "level": 0, "w": 200, "h": 200},
+              {"id": "b", "level": 1, "w": 200, "h": 200, "points": lshape,
+               "spots": {"light.b": [0.3, 0.4]}},
+              {"id": "c", "level": -1, "w": 200, "h": 200}]}]}
+rt = schema.normalize_dashboard(multi)
+assert [r["level"] for r in rt["pages"][0]["rooms"]] == [0, 1, -1]
+assert rt["pages"][0]["rooms"][1]["spots"]["light.b"] == [0.3, 0.4]
+assert rt["pages"][0]["view"]["active_level"] == 1
+assert schema.normalize_dashboard(rt) == rt
+
+print("schema: tutti i test passati")

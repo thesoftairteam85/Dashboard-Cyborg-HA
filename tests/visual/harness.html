@@ -145,6 +145,17 @@ window.__mount=(dash,opts)=>{
         }
         if(opts&&opts.view){Object.assign(el._page().view,opts.view);}
         if(opts&&opts.selectRoom&&el._rooms().length){el._selected={kind:"room",roomId:el._rooms()[0].id};}
+        // multi-storey / polygon / focus scenarios
+        if(opts&&opts.levels&&el._rooms().length>1){
+          el._rooms().forEach((r,i)=>{r.level=opts.levels[i%opts.levels.length];});
+        }
+        if(opts&&opts.lshape&&el._rooms().length){
+          el._rooms()[0].points=[[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]];
+        }
+        if(opts&&opts.focusRoom&&el._rooms().length){
+          el._signature="";el.render();
+          el._focusRoom(el._rooms()[0].id);
+        }
         el._signature="";el.render();
         setTimeout(()=>r(true),350);
       };
