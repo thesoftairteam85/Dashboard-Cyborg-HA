@@ -12,6 +12,12 @@ v5  pages[].rooms[].level                a room sits on a storey; the map became
     pages[].rooms[].points               genuinely three-dimensional. Rooms also
     pages[].rooms[].spots                gained a free polygon footprint and a
                                          per-device position inside the room.
+v6  vehicles[]                           electric vehicles are declared ONCE at
+    pages[].rooms[].vehicles[]           the root and referenced by id from the
+    ...items[].vehicles[]                garage, the energy flow and the EV
+                                         card. Defining a car three times means
+                                         three places to keep in sync, and one
+                                         of them is always wrong.
 
 v2 documents are migrated to v3 on load (see ``_migrate_page_v2``), so an
 existing stored dashboard keeps its cards and its section grouping without
@@ -21,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,
@@ -50,6 +56,56 @@ DEFAULT_SECTIONS: list[dict[str, Any]] = [
 
 
 PAGE_TYPES = ("sections", "floorplan")
+
+#: A charging vehicle is not just another load. Its power is the largest single
+#: thing in a domestic installation, it is deferrable, and its interesting
+#: state — how full it is — lives on a different entity from the one that
+#: measures the power. So it gets a first-class definition instead of being
+#: squeezed into a generic device row.
+MAX_VEHICLES = 8
+
+VEHICLE_FIELDS = (
+    # entity_id fields, all optional: a plain wallbox with no car integration
+    # still works with only "power" set.
+    "battery",     # sensor, % state of charge
+    "charging",    # binary_sensor / sensor / switch: is it charging now
+    "power",       # sensor, W drawn by the wallbox
+    "energy",      # sensor, kWh delivered (long-term statistic)
+    "range",       # sensor, km of range
+    "plugged",     # binary_sensor, cable connected
+    "target",      # number / sensor, target state of charge
+    "switch",      # switch, start/stop charging
+    "current",     # number, charging current limit
+)
+
+
+def normalize_vehicle(vehicle: Any, index: int) -> dict[str, Any] | None:
+    """One electric vehicle, or None if there is nothing usable in it."""
+    if not isinstance(vehicle, dict):
+        return None
+    result: dict[str, Any] = {
+        "id": str(vehicle.get("id") or f"ev-{index + 1}")[:48],
+        "name": str(vehicle.get("name") or "Auto elettrica")[:60],
+        "icon": str(vehicle.get("icon") or "mdi:car-electric")[:64],
+        "color": str(vehicle.get("color") or "#06d6a0")[:32],
+    }
+    for field in VEHICLE_FIELDS:
+        value = vehicle.get(field)
+        result[field] = value if isinstance(value, str) and "." in value else None
+
+    # Usable capacity, used to turn "45% -> 80% at 7.4 kW" into a time. Without
+    # it the card simply does not show an estimate rather than inventing one.
+    try:
+        capacity = float(vehicle.get("capacity") or 0)
+    except (TypeError, ValueError):
+        capacity = 0.0
+    result["capacity"] = round(capacity, 1) if 0 < capacity <= 500 else None
+
+    # A vehicle with no entity at all is a name and nothing else: it would
+    # render as an empty card forever, so it is dropped.
+    if not any(result[f] for f in VEHICLE_FIELDS):
+        return None
+    return result
 
 # Camera defaults for the CSS-3D isometric view. pitch 56deg / yaw 32deg is the
 # classic architectural-render angle: high enough to read the floor layout,
@@ -117,6 +173,12 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     walls = result.get("walls")
     result["walls"] = ([w if w in WALL_TYPE_KEYS else "wall" for w in walls][:24]
                        if isinstance(walls, list) else [])
+
+    # Vehicles parked in this room, by id. The garage is a room like any other;
+    # what makes it a garage is that a car is in it.
+    vehicles = result.get("vehicles")
+    result["vehicles"] = ([v for v in vehicles if isinstance(v, str) and v][:MAX_VEHICLES]
+                          if isinstance(vehicles, list) else [])
 
     hidden = result.get("hidden")
     result["hidden"] = ([h for h in hidden if isinstance(h, str) and "." in h][:200]
@@ -222,6 +284,7 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
 def default_dashboard() -> dict[str, Any]:
     return {
         "version": SCHEMA_VERSION,
+        "vehicles": [],
         "revision": 0,
         "pages": [{
             "id": "overview",
@@ -275,6 +338,18 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if result.get("type") == "people":
         people = result.get("people")
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
+    if result.get("type") == "energyflow":
+        flow = result.get("flow")
+        if isinstance(flow, dict):
+            # Declared vehicles join the load sub-tree unless switched off.
+            flow["show_vehicles"] = bool(flow.get("show_vehicles", True))
+    if result.get("type") == "ev":
+        # Which of the declared vehicles this card shows. Empty means all of
+        # them, so a second car appears without editing the card.
+        vehicles = result.get("vehicles")
+        result["vehicles"] = ([v for v in vehicles if isinstance(v, str) and v][:MAX_VEHICLES]
+                              if isinstance(vehicles, list) else [])
+        result["show_controls"] = bool(result.get("show_controls", True))
     if result.get("type") == "room":
         area = result.get("area")
         result["area"] = area if isinstance(area, str) and area else None
@@ -582,8 +657,11 @@ def normalize_page(page: dict[str, Any], index: int) -> dict[str, Any]:
 
 def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize configuration while retaining extension fields."""
+    # Falling through with an empty dict rather than returning the raw defaults:
+    # returning them skipped normalization entirely, so a brand new install got
+    # a document that its own normalizer would have written differently.
     if not isinstance(data, dict):
-        return default_dashboard()
+        data = {}
     result = default_dashboard()
     result.update(data)
     result["version"] = SCHEMA_VERSION
@@ -592,20 +670,46 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         result["revision"] = 0
 
+    vehicles = data.get("vehicles")
+    if isinstance(vehicles, list):
+        rows = [normalize_vehicle(v, i) for i, v in enumerate(vehicles)]
+        clean = [v for v in rows if v is not None][:MAX_VEHICLES]
+        # Ids have to be unique: rooms and flow nodes reference them, and two
+        # cars sharing an id would follow each other around the dashboard.
+        seen: set[str] = set()
+        unique = []
+        for v in clean:
+            base = v["id"]
+            candidate, n = base, 2
+            while candidate in seen:
+                candidate = f"{base}-{n}"
+                n += 1
+            v["id"] = candidate
+            seen.add(candidate)
+            unique.append(v)
+        result["vehicles"] = unique
+    else:
+        result["vehicles"] = []
+
     theme = dict(DEFAULT_THEME)
     if isinstance(data.get("theme"), dict):
         theme.update(data["theme"])
     result["theme"] = theme
 
     pages = data.get("pages")
-    if not isinstance(pages, list) or not pages:
-        result["pages"] = default_dashboard()["pages"]
-    else:
-        normalized = [
-            normalize_page(pg, i)
-            for i, pg in enumerate(x for x in pages if isinstance(x, dict))
-        ]
-        result["pages"] = normalized or default_dashboard()["pages"]
+    source = pages if isinstance(pages, list) and pages else default_dashboard()["pages"]
+    normalized = [
+        normalize_page(pg, i)
+        for i, pg in enumerate(x for x in source if isinstance(x, dict))
+    ]
+    # The fallback goes through normalize_page like everything else. It used to
+    # be handed back raw, so the very first save wrote a document missing the
+    # fields the normalizer adds (section "collapsed", page "layout") and the
+    # next load produced a *different* document from the same input. Anything
+    # comparing revisions or diffing the store saw a phantom change.
+    result["pages"] = normalized or [
+        normalize_page(pg, i) for i, pg in enumerate(default_dashboard()["pages"])
+    ]
 
     # A dashboard saved before the 3D map existed keeps only the pages it was
     # stored with: ``result.update(data)`` replaces the whole page list, so

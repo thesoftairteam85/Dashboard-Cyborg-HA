@@ -39,6 +39,9 @@ const DEFAULT_DASH = {
     ["12-map-walls",  { pageIndex: 1, autoRooms: true, balcony: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
+    ["26-ev",         { pageIndex: 0, autoCompose: true, ev: true }],
+    ["13-map-garage", { pageIndex: 1, autoRooms: true, garage: true }],
+    ["15-flow-ev",    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, ev: true }],
     ["22-economy",    { pageIndex: 0, autoCompose: true, economy: true }],
     ["23-economy-ed", { pageIndex: 0, autoCompose: true, economy: true, editing: true, selectEconomy: true }],
   ];
@@ -316,6 +319,83 @@ const DEFAULT_DASH = {
      new Set(tr.lines.map((l) => l.stroke)).size === 4, tr.lines.map((l) => l.stroke).join(" "));
   ok("le linee non sono piatte", tr.lines.every((l) => l.h > 5), tr.lines.map((l) => l.h).join());
   ok("la legenda ha una voce per linea", tr.legend === 4, String(tr.legend));
+
+  // ---- auto elettrica -----------------------------------------------------
+  console.log("\n== AUTO ELETTRICA ==");
+  const garage = await scene({ pageIndex: 1, autoRooms: true, garage: true });
+  const gar = await page.evaluate(() => {
+    const cars = Array.from(document.querySelectorAll(".fp-car"));
+    const vp = document.querySelector("[data-fp-viewport]").getBoundingClientRect();
+    return {
+      count: cars.length,
+      charging: cars.filter((c) => c.className.includes("charging")).length,
+      inView: cars.every((c) => {
+        const b = c.querySelector(".fp-car-icon").getBoundingClientRect();
+        return b.left >= vp.left - 4 && b.right <= vp.right + 4 && b.width > 20;
+      }),
+      iconW: cars.length ? Math.round(cars[0].querySelector(".fp-car-icon").getBoundingClientRect().width) : 0,
+      socW: cars.length ? Math.round(cars[0].querySelector(".fp-car-soc span").getBoundingClientRect().width) : 0,
+      barW: cars.length ? Math.round(cars[0].querySelector(".fp-car-soc").getBoundingClientRect().width) : 0,
+      text: cars.length ? cars[0].querySelector(".fp-car-tag").textContent.replace(/\s+/g, " ").trim() : "",
+    };
+  });
+  ok("l'auto è nel garage", gar.count === 1, String(gar.count));
+  ok("il garage mostra che sta caricando", gar.charging === 1);
+  ok("l'auto sta dentro il riquadro della mappa", gar.inView);
+  // billboarded like the device pins: the 3D transform must not squash it
+  ok("l'icona dell'auto non è deformata", gar.iconW >= 40 && gar.iconW <= 54, String(gar.iconW));
+  // 62% of the bar, not a full or empty one
+  ok("la barra di carica è proporzionale allo stato",
+     Math.abs(gar.socW / gar.barW - 0.62) < 0.05, (gar.socW / gar.barW).toFixed(3));
+  ok("la targhetta dice nome e percentuale", /Model 3/.test(gar.text) && /62%/.test(gar.text), gar.text);
+  // At the garage's own wall height the near wall covered the marker and the
+  // name came out half hidden. The fix lifts it into the same band as the room
+  // label — the one thing on the map that is known to stay readable — and above
+  // the floor's centre line, which is the test the walls themselves use.
+  const clear = await page.evaluate(() => {
+    const car = document.querySelector(".fp-car");
+    const room = car.closest(".fp-room");
+    const R = (el) => { const b = el.getBoundingClientRect(); return { t: b.top, b: b.bottom }; };
+    const floor = R(room.querySelector(".fp-floor"));
+    return { body: R(car.querySelector(".fp-car-body")), tag: R(room.querySelector(".fp-tag")),
+      floorMid: (floor.t + floor.b) / 2 };
+  });
+  ok("l'auto galleggia sopra il pavimento, non dentro il muro",
+     clear.body.b < clear.floorMid, Math.round(clear.body.b) + " vs " + Math.round(clear.floorMid));
+  ok("l'auto sta nella stessa fascia leggibile del nome della stanza",
+     clear.body.t <= clear.tag.b + 60 && clear.body.b >= clear.tag.t - 60,
+     Math.round(clear.body.t) + ".." + Math.round(clear.body.b) + " vs " +
+     Math.round(clear.tag.t) + ".." + Math.round(clear.tag.b));
+
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, ev: true });
+  await page.waitForTimeout(700);
+  const evc = await page.evaluate(() => {
+    const ring = document.querySelector(".ev-ring-arc");
+    const car = document.querySelector(".ev-car");
+    if (!ring || !car) return null;
+    const cs = getComputedStyle(ring);
+    const dash = parseFloat(cs.strokeDasharray);
+    const off = parseFloat(cs.strokeDashoffset);
+    const rows = Array.from(document.querySelectorAll(".ev-row")).map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    const box = car.getBoundingClientRect();
+    return { pct: 1 - off / dash, rows, w: Math.round(box.width),
+      parentW: Math.round(car.parentElement.getBoundingClientRect().width),
+      charging: !!document.querySelector(".ev-ring.charging"),
+      target: !!document.querySelector(".ev-target b") };
+  });
+  ok("la card auto disegna l'anello", !!evc);
+  // the arc really is 62% of the circle, not a decoration
+  ok("l'anello è al 62 per cento", evc && Math.abs(evc.pct - 0.62) < 0.02, evc && evc.pct.toFixed(3));
+  ok("l'anello pulsa in carica", evc && evc.charging);
+  ok("la tacca dell'obiettivo c'è", evc && evc.target);
+  ok("le righe dicono potenza, autonomia, obiettivo e tempo",
+     evc && evc.rows.length === 4 && evc.rows.join(" ").includes("312 km")
+     && evc.rows.join(" ").includes("1 h 28"), evc && evc.rows.join(" | "));
+  ok("la card auto non deborda", evc && evc.w <= evc.parentW + 1);
 
   // ---- sides of a room ----------------------------------------------------
   console.log("\n== LATI DELLA STANZA ==");

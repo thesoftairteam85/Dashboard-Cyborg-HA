@@ -797,6 +797,7 @@ const CARD_TYPES = [
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
+  { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
   { k: "room", l: "Stanza", solo: true, d: "Una stanza intera in una card: luci, clima, aperture e sensori dell'area, con i comandi." },
   { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
@@ -888,6 +889,8 @@ function kelvinToHex(kelvin) {
 }
 
 /** Line colours for a multi-series chart: distinct in hue, equal in weight. */
+const MAX_VEHICLES_JS = 8;
+
 const SERIES_COLORS = ["#00e5ff", "#ffd166", "#06d6a0", "#c77dff", "#ff8fab",
                        "#8ecae6", "#ff924c", "#a0e7a0"];
 
@@ -911,6 +914,106 @@ const WHITE_PRESETS = [
   { k: 2200, l: "Candela" }, { k: 2700, l: "Caldo" }, { k: 3000, l: "Relax" },
   { k: 4000, l: "Neutro" }, { k: 5000, l: "Lavoro" }, { k: 6500, l: "Freddo" },
 ];
+
+/* ==========================================================================
+ * AUTO ELETTRICA
+ *
+ * A charging car is the largest single load a house will ever have — 7.4 kW on
+ * a domestic wallbox, 22 kW on three phase — and unlike every other load it is
+ * a *store*: the interesting question is not "how much is it drawing" but "how
+ * full is it and when will it be ready". Those two facts live on different
+ * entities, usually from different integrations (the wallbox measures power,
+ * the car reports its state of charge), which is why a vehicle is declared once
+ * as a set of entity references and then read as a whole.
+ *
+ * Every field is optional. A bare wallbox with nothing but a power sensor still
+ * works and simply shows less; nothing is invented to fill a gap.
+ * ======================================================================== */
+
+/** Words a charger uses for "charging", across integrations and languages. */
+const CHARGING_WORDS = /\b(charg|carica|ricarica|in_carica|fast_charg|dc_charg)/i;
+const PLUGGED_WORDS = /\b(plug|connect|collegat|inserit|attacc)/i;
+
+/**
+ * Read a vehicle's whole state in one go.
+ *
+ * Returns nulls rather than zeros for anything unknown: a car whose SoC is not
+ * published must render as "—", not as an empty battery, because those two
+ * mean very different things to somebody deciding whether to drive.
+ */
+function vehicleState(vehicle, states) {
+  const get = (key) => (vehicle[key] ? states[vehicle[key]] : null);
+  const num = (st) => {
+    if (!st) return null;
+    const n = parseFloat(st.state);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const socSt = get("battery");
+  const soc = num(socSt);
+  const powerSt = get("power");
+  const powerW = powerSt ? powerWatts(powerSt) : null;
+  const rangeKm = num(get("range"));
+  const targetSt = get("target");
+  const target = num(targetSt);
+
+  const chSt = get("charging");
+  let charging = null;
+  if (chSt) {
+    charging = ON_STATES.has(chSt.state) || CHARGING_WORDS.test(chSt.state);
+  } else if (powerW !== null) {
+    // No dedicated entity: anything above 400 W on a wallbox is a car
+    // charging, not standby. Below that a charger idles, a contactor hums and
+    // a meter reads noise.
+    charging = powerW > 400;
+  }
+
+  const plugSt = get("plugged");
+  let plugged = null;
+  if (plugSt) {
+    plugged = ON_STATES.has(plugSt.state) || PLUGGED_WORDS.test(plugSt.state);
+  } else if (charging) {
+    plugged = true;
+  }
+
+  // Time to target. Only computed when every term is real: capacity declared,
+  // power flowing, and a target above the current level.
+  let etaMin = null;
+  const goal = target !== null ? target : 100;
+  if (vehicle.capacity && soc !== null && powerW !== null && powerW > 200 && goal > soc) {
+    const kwhNeeded = vehicle.capacity * ((goal - soc) / 100);
+    etaMin = Math.round((kwhNeeded / (powerW / 1000)) * 60);
+    // Beyond a day the estimate is meaningless: a 2 kW trickle on an empty
+    // 100 kWh pack is 50 hours, and printing that as a countdown is noise.
+    if (etaMin > 1440) etaMin = null;
+  }
+
+  let status;
+  if (charging) status = "in carica";
+  else if (plugged) status = "collegata";
+  else if (plugged === false) status = "scollegata";
+  else status = soc !== null ? "a riposo" : "stato sconosciuto";
+
+  return { soc, charging: !!charging, plugged, powerW, rangeKm, target,
+    etaMin, status, raw: { socSt, powerSt, chSt } };
+}
+
+/** "1 h 25" / "40 min", for a time-to-target. */
+function etaWords(minutes) {
+  if (minutes === null || minutes === undefined) return "";
+  if (minutes < 60) return minutes + " min";
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return h + " h" + (m >= 5 ? " " + m : "");
+}
+
+/** Colour of a state of charge, from empty to full. */
+function socColor(soc) {
+  if (soc === null || soc === undefined) return "#8d99ae";
+  if (soc < 15) return "#ff3d71";
+  if (soc < 35) return "#ff924c";
+  if (soc < 60) return "#ffd166";
+  return "#06d6a0";
+}
 
 /* ==========================================================================
  * IRRIGAZIONE
@@ -955,9 +1058,10 @@ function cameraStream(entityId, st) {
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room"]);
+  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev"]);
 
 const COMPOSITE_META = {
+  ev:            ["Auto elettrica", "Ricarica e stato batteria", "mdi:car-electric", "lg"],
   room:          ["Stanza", "Dispositivi della stanza", "mdi:home-floor-g", "md"],
   trend:         ["Confronto andamenti", "Storico a confronto", "mdi:chart-multiple", "lg"],
   lights:        ["Luci", "Illuminazione della casa", "mdi:lightbulb-group", "lg"],
@@ -1252,6 +1356,13 @@ class CyborgDashboard extends HTMLElement {
         // another storey changes nothing about entity state, and without this
         // the map would only repaint on the next unrelated state update.
         parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length},${(room.walls || []).join("")}`);
+        for (const v of this._vehiclesFor(room.vehicles)) {
+          if (!Array.isArray(room.vehicles) || !room.vehicles.length) break;
+          for (const key of ["battery", "charging", "power"]) {
+            const vs = v[key] && this._hass.states[v[key]];
+            if (vs) parts.push(v[key] + "=" + vs.state);
+          }
+        }
         const ids = room.id === focusId ? this._roomAllEntities(room) : this._roomEntities(room);
         for (const id of ids) {
           const st = this._hass.states[id];
@@ -1277,6 +1388,14 @@ class CyborgDashboard extends HTMLElement {
             + ":" + (this._sentNotifs || []).length
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
+        }
+        if (it.type === "ev") {
+          for (const v of this._vehiclesFor(it.vehicles)) {
+            for (const key of ["battery", "charging", "power", "range", "target", "plugged", "switch", "current"]) {
+              const vs = v[key] && this._hass.states[v[key]];
+              if (vs) parts.push(v[key] + "=" + vs.state);
+            }
+          }
         }
         if (it.type === "room") {
           for (const id of this._roomCardEntities(it)) {
@@ -1320,6 +1439,14 @@ class CyborgDashboard extends HTMLElement {
           for (const key of ["grid", "solar", "battery", "home"]) {
             const fs = it.flow[key] && this._hass.states[it.flow[key]];
             if (fs) parts.push(it.flow[key] + "=" + fs.state);
+          }
+          if (it.flow.show_vehicles !== false) {
+            for (const v of this._vehicles()) {
+              const ps = v.power && this._hass.states[v.power];
+              if (ps) parts.push(v.power + "=" + ps.state);
+              const bs = v.battery && this._hass.states[v.battery];
+              if (bs) parts.push(v.battery + "=" + bs.state);
+            }
           }
           for (const d of (it.flow.devices || [])) {
             const ds = this._hass.states[d.entity];
@@ -1963,6 +2090,33 @@ class CyborgDashboard extends HTMLElement {
       ? `<div class="fp-spots">${allEnts.map((e, i) => this._spotMarkup(room, e, i, allEnts.length)).join("")}</div>`
       : "";
 
+    // Cars are drawn whether or not the room is focused: "is it charging" is
+    // the question you ask by glancing at the plan, not by opening the garage.
+    //
+    // Two heights on purpose. Seen from outside, the marker floats above the
+    // box like the room label does, because at a garage's own wall height the
+    // near wall simply covers it and the name is unreadable. Inside a focused
+    // room the walls are translucent and the car belongs on the floor, where
+    // it actually is.
+    const parked = this._vehiclesFor(room.vehicles).filter(() => Array.isArray(room.vehicles) && room.vehicles.length);
+    const cars = parked.length && !ghost ? `<div class="fp-cars">${parked.map((v, i) => {
+      const vs = vehicleState(v, this._hass.states);
+      const [fx, fy] = this._spotFor(room, "vehicle:" + v.id, i, parked.length);
+      return `<div class="fp-car${vs.charging ? " charging" : ""}${this._editing ? " movable" : ""}"
+          data-spot="vehicle:${esc(v.id)}" style="left:${(fx * 100).toFixed(3)}%;top:${(fy * 100).toFixed(3)}%;--ec:${esc(socColor(vs.soc))}">
+          <div class="fp-car-body" style="transform:translateZ(${(focused ? wallH * 0.3 + 6 : wallH + 12).toFixed(1)}px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1)) scale(calc(1 / var(--zoom)))">
+            <div class="fp-car-icon"><ha-icon icon="${esc(v.icon)}"></ha-icon>
+              ${vs.charging ? '<i class="fp-car-bolt"><ha-icon icon="mdi:flash"></ha-icon></i>' : ""}</div>
+            <div class="fp-car-soc">
+              <span style="width:${vs.soc === null ? 0 : Math.max(0, Math.min(100, vs.soc)).toFixed(1)}%"></span>
+            </div>
+            <div class="fp-car-tag"><strong>${esc(v.name)}</strong>
+              <small>${esc(vs.soc === null ? vs.status : Math.round(vs.soc) + "%"
+                + (vs.charging && vs.powerW !== null ? " · " + fmtPower(vs.powerW).v + " " + fmtPower(vs.powerW).u : ""))}</small></div>
+          </div>
+        </div>`;
+    }).join("")}</div>` : "";
+
     const walls = view.show_walls && !ghost ? roomEdges(room).map((e, i) => {
       const wt = wallAt(room, i);
       if (wt.none || wallH <= 0) return "";
@@ -2026,6 +2180,7 @@ class CyborgDashboard extends HTMLElement {
         <svg class="fp-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${pointsToSvg(pts)}"></polygon></svg>
         ${walls}
         ${spots}
+        ${cars}
         ${handles}
         ${vertices}
         ${tag}
@@ -2614,6 +2769,15 @@ class CyborgDashboard extends HTMLElement {
               ${custom ? `<button class="mini danger" data-room-ent-remove="${esc(e)}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}</div>`;
           }).join("")
           : '<div class="entity-result-empty">Nessun dispositivo. Collega un\'area oppure aggiungili a mano.</div>'}</div>
+        ${this._vehicles().length ? `<div class="room-cars">
+          <strong>AUTO PARCHEGGIATE QUI</strong>
+          <span class="hint">Un garage è una stanza come le altre: quello che lo rende un garage è che dentro c'è un'auto. Compare sulla mappa con il suo stato di carica, anche senza entrare nella stanza.</span>
+          ${this._vehicles().map((v) => {
+            const on = Array.isArray(room.vehicles) && room.vehicles.includes(v.id);
+            return `<button type="button" class="dom-chip ${on ? "on" : ""}" data-room-veh="${esc(v.id)}">
+              <ha-icon icon="${esc(v.icon)}"></ha-icon>${esc(v.name)}</button>`;
+          }).join("")}
+        </div>` : ""}
         <button class="secondary wide" data-room-focus-btn="${esc(room.id)}"><ha-icon icon="mdi:magnify-scan"></ha-icon> ENTRA NELLA STANZA E POSIZIONA</button>
         <span class="hint">${placed} dispositivi posizionati a mano; gli altri si dispongono da soli.</span>
       </div>
@@ -2809,6 +2973,30 @@ class CyborgDashboard extends HTMLElement {
         children: [],
       });
     }
+    // Declared vehicles join the flow on their own. A car is the single
+    // largest load a house will ever have and the whole point of the diagram
+    // is to show where the power goes, so requiring the wallbox to be added a
+    // second time as a generic device would be busywork. If the user *has*
+    // already added that sensor by hand, the vehicle is skipped rather than
+    // counted twice.
+    if (flow.show_vehicles !== false) {
+      const already = new Set(all.map((l) => l.entity));
+      for (const v of this._vehicles()) {
+        if (!v.power || already.has(v.power)) continue;
+        const vst = this._hass.states[v.power];
+        if (!vst) continue;
+        const vw = powerWatts(vst);
+        if (vw === null || vw < 1) continue;
+        const vs = vehicleState(v, this._hass.states);
+        all.push({
+          entity: v.power, name: v.name, icon: v.icon, watts: vw,
+          parent: v.flow_parent || null, children: [],
+          vehicle: v, soc: vs.soc, charging: vs.charging,
+        });
+        already.add(v.power);
+      }
+    }
+
     // A nested load is already inside its parent's reading, so only roots may
     // be summed against the house total — counting both would invent
     // consumption that does not exist and shrink "unmeasured" to nothing.
@@ -2857,15 +3045,20 @@ class CyborgDashboard extends HTMLElement {
 
     loads.forEach((l, i) => {
       const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
-      const color = l.other ? "#8d99ae" : "#00e5ff";
+      const color = l.other ? "#8d99ae" : l.vehicle ? (l.vehicle.color || "#06d6a0") : "#00e5ff";
       const r = this._flowRadius(l.watts, refRoot, 20, 38);
       svg.push(this._flowPath("ef-l" + i,
         `M300,${322 + (homeR || 0)} C300,${390 + (homeR || 0)} ${x},${y - 74} ${x},${y - r - 5}`,
         l.watts, color, false));
       html.push(this._flowNodeHtml(x, y,
         { label: l.name, icon: l.icon, color },
-        l.watts, null,
-        { vb, radius: r, outside: true, cls: "leaf" + (l.other ? " other" : ""),
+        l.watts,
+        // The car's sub-line is its state of charge: "3.6 kW" and "62% and
+        // climbing" answer different questions, and on a car it is the second
+        // one that decides whether you can leave.
+        l.vehicle && l.soc !== null ? Math.round(l.soc) + "%" + (l.charging ? " ⚡" : "") : null,
+        { vb, radius: r, outside: true,
+          cls: "leaf" + (l.other ? " other" : "") + (l.vehicle ? " ev" + (l.charging ? " charging" : "") : ""),
           attrs: l.entity ? `data-fp-badge="${esc(l.entity)}"` : "" }));
 
       const cn = l.children.length;
@@ -3253,6 +3446,164 @@ class CyborgDashboard extends HTMLElement {
         this._sentPending = false;
         this._touch(true);
       });
+  }
+
+  // --------------------------------------------------- auto elettrica ---
+
+  /** Vehicles declared on this dashboard. */
+  _vehicles() {
+    return (this._dashboard && Array.isArray(this._dashboard.vehicles))
+      ? this._dashboard.vehicles : [];
+  }
+
+  _vehicle(id) { return this._vehicles().find((v) => v.id === id) || null; }
+
+  /** Vehicles a card or a room shows: the listed ones, or all of them. */
+  _vehiclesFor(list) {
+    const all = this._vehicles();
+    if (!Array.isArray(list) || !list.length) return all;
+    return list.map((id) => this._vehicle(id)).filter(Boolean);
+  }
+
+  /**
+   * A ring rather than a bar.
+   *
+   * The state of charge is the one number somebody reads from across the room,
+   * and a ring carries it at a glance while leaving its middle free for the
+   * percentage. The arc is a stroked circle with a dash offset, so there is no
+   * arc-flag arithmetic to get wrong.
+   */
+  _socRing(soc, charging, size) {
+    const r = 34, c = 2 * Math.PI * r;
+    const pct = soc === null ? 0 : Math.max(0, Math.min(100, soc));
+    const color = socColor(soc);
+    return `<svg class="ev-ring${charging ? " charging" : ""}" viewBox="0 0 80 80" style="width:${size}px;height:${size}px">
+      <circle class="ev-ring-bg" cx="40" cy="40" r="${r}"/>
+      <circle class="ev-ring-arc" cx="40" cy="40" r="${r}" style="stroke:${esc(color)};
+        stroke-dasharray:${c.toFixed(1)};stroke-dashoffset:${(c * (1 - pct / 100)).toFixed(1)}"/>
+      <text class="ev-ring-val" x="40" y="${charging ? 38 : 45}">${soc === null ? "—" : Math.round(pct)}</text>
+      ${soc !== null ? `<text class="ev-ring-pct" x="40" y="${charging ? 50 : 57}">%</text>` : ""}
+      ${charging ? '<text class="ev-ring-bolt" x="40" y="64">⚡</text>' : ""}
+    </svg>`;
+  }
+
+  _evBody(item) {
+    const vehicles = this._vehiclesFor(item.vehicles);
+    if (!vehicles.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:car-electric-outline"></ha-icon>
+        <span>Nessuna auto elettrica configurata. Aprendo la card in modifica puoi dichiararla — bastano la percentuale di batteria e il sensore di potenza della colonnina — oppure lasciare che Cyborg la cerchi da sola.</span></div>`;
+    }
+    return `<div class="ev">${vehicles.map((v) => {
+      const st = vehicleState(v, this._hass.states);
+      const rows = [];
+      if (st.powerW !== null) {
+        const f = fmtPower(st.powerW);
+        rows.push([st.charging ? "mdi:flash" : "mdi:flash-off", "Potenza", f.v + " " + f.u]);
+      }
+      if (st.rangeKm !== null) rows.push(["mdi:map-marker-distance", "Autonomia", Math.round(st.rangeKm) + " km"]);
+      if (st.target !== null) rows.push(["mdi:target", "Obiettivo", Math.round(st.target) + "%"]);
+      if (st.etaMin !== null) rows.push(["mdi:timer-sand", "Alla carica", etaWords(st.etaMin)]);
+
+      const hasSwitch = v.switch && this._hass.states[v.switch];
+      const hasCurrent = v.current && this._hass.states[v.current];
+      const curSt = hasCurrent ? this._hass.states[v.current] : null;
+
+      return `<article class="ev-car${st.charging ? " charging" : ""}" style="--ec:${esc(socColor(st.soc))}">
+        <div class="ev-top">
+          ${this._socRing(st.soc, st.charging, 92)}
+          <div class="ev-id">
+            <button class="ev-name" ${v.battery ? `data-more-info="${esc(v.battery)}"` : ""}>
+              <ha-icon icon="${esc(v.icon)}"></ha-icon><strong>${esc(v.name)}</strong>
+            </button>
+            <span class="ev-status">${esc(st.status)}${
+              st.etaMin !== null ? " · pronta fra " + esc(etaWords(st.etaMin)) : ""}</span>
+            ${st.soc !== null && st.target !== null && st.target > st.soc ? `<div class="ev-target">
+              <i style="width:${Math.max(0, Math.min(100, st.soc)).toFixed(1)}%"></i>
+              <b style="left:${Math.max(0, Math.min(100, st.target)).toFixed(1)}%"></b>
+            </div>` : ""}
+          </div>
+        </div>
+        ${rows.length ? `<div class="ev-rows">${rows.map(([icon, label, value]) => `
+          <div class="ev-row"><ha-icon icon="${esc(icon)}"></ha-icon>
+            <span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>` : ""}
+        ${item.show_controls !== false && (hasSwitch || hasCurrent) ? `<div class="ev-ctl">
+          ${hasSwitch ? `<button class="ev-btn ${ON_STATES.has(this._hass.states[v.switch].state) ? "on" : ""}"
+            data-ev-switch="${esc(v.switch)}">
+            <ha-icon icon="${ON_STATES.has(this._hass.states[v.switch].state) ? "mdi:stop" : "mdi:play"}"></ha-icon>
+            ${ON_STATES.has(this._hass.states[v.switch].state) ? "FERMA" : "AVVIA"}</button>` : ""}
+          ${hasCurrent ? `<label class="ev-amp">CORRENTE · ${esc(curSt.state)} A
+            <input type="range" data-ev-current="${esc(v.current)}"
+              min="${esc(curSt.attributes.min ?? 6)}" max="${esc(curSt.attributes.max ?? 32)}"
+              step="${esc(curSt.attributes.step ?? 1)}" value="${esc(curSt.state)}"></label>` : ""}
+        </div>` : ""}
+      </article>`;
+    }).join("")}</div>`;
+  }
+
+  /**
+   * Find the electric vehicle in a Home Assistant instance.
+   *
+   * Matched on device_class plus naming, because there is no EV device class:
+   * a car's state of charge is a battery sensor like any other, and what
+   * distinguishes it is that it lives on a device whose name says car. Better
+   * to propose something the user confirms than to require twelve entity
+   * pickers before anything appears on screen.
+   */
+  _detectVehicles() {
+    const CAR = /\b(auto|car|vehicle|veicolo|ev|tesla|zoe|leaf|kona|id\.?[345]|model[_\s-]?[3ysx]|e[_\s-]?tron|ioniq|kia|renault|bmw|volvo|polestar)\b/i;
+    const WALL = /\b(wallbox|colonnina|charger|caricator|easee|zappi|go-?e|keba|pulsar|evse)\b/i;
+    const states = this._hass.states;
+    const nameOf = (id) => ((states[id].attributes.friendly_name || "") + " " + id);
+
+    const socs = Object.keys(states).filter((id) =>
+      id.startsWith("sensor.") && states[id].attributes.device_class === "battery"
+      && CAR.test(nameOf(id)));
+    const powers = Object.keys(states).filter((id) =>
+      states[id].attributes.device_class === "power" && (WALL.test(nameOf(id)) || CAR.test(nameOf(id))));
+
+    const pick = (pool, re) => pool.find((id) => re.test(nameOf(id))) || null;
+    const found = [];
+
+    if (socs.length) {
+      for (const soc of socs.slice(0, MAX_VEHICLES_JS)) {
+        // Group everything whose name shares the car's leading word: that is
+        // how integrations name a device's entities.
+        const tag = (states[soc].attributes.friendly_name || soc).split(/[\s_]/)[0];
+        const near = new RegExp("\\b" + tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        found.push({
+          id: uid("ev"),
+          name: (states[soc].attributes.friendly_name || "Auto elettrica")
+            .replace(/\s*(batteria|battery|soc|stato di carica)\s*/i, "").trim() || "Auto elettrica",
+          icon: "mdi:car-electric", color: "#06d6a0",
+          battery: soc,
+          charging: Object.keys(states).find((id) =>
+            (id.startsWith("binary_sensor.") || id.startsWith("sensor.")) && near.test(nameOf(id))
+            && /charg|carica/i.test(nameOf(id))) || null,
+          power: powers.find((id) => near.test(nameOf(id))) || powers[0] || null,
+          energy: Object.keys(states).find((id) =>
+            states[id].attributes.device_class === "energy" && (WALL.test(nameOf(id)) || near.test(nameOf(id)))) || null,
+          range: Object.keys(states).find((id) => near.test(nameOf(id)) && /autonom|range|km/i.test(nameOf(id))) || null,
+          plugged: Object.keys(states).find((id) => id.startsWith("binary_sensor.")
+            && near.test(nameOf(id)) && /plug|connect|collegat/i.test(nameOf(id))) || null,
+          target: Object.keys(states).find((id) => (id.startsWith("number.") || id.startsWith("sensor."))
+            && near.test(nameOf(id)) && /target|limit|obiettivo/i.test(nameOf(id))) || null,
+          switch: Object.keys(states).find((id) => id.startsWith("switch.")
+            && (near.test(nameOf(id)) || WALL.test(nameOf(id))) && /charg|carica/i.test(nameOf(id))) || null,
+          current: Object.keys(states).find((id) => id.startsWith("number.")
+            && (near.test(nameOf(id)) || WALL.test(nameOf(id))) && /current|corrente|ampere/i.test(nameOf(id))) || null,
+          capacity: null,
+        });
+      }
+    } else if (powers.length) {
+      // A wallbox with no car integration: still worth showing, it is the
+      // thing that tells you whether the car is charging at all.
+      const wall = pick(powers, WALL) || powers[0];
+      found.push({ id: uid("ev"), name: states[wall].attributes.friendly_name || "Colonnina",
+        icon: "mdi:ev-station", color: "#06d6a0",
+        battery: null, charging: null, power: wall, energy: null, range: null,
+        plugged: null, target: null, switch: null, current: null, capacity: null });
+    }
+    return found;
   }
 
   // ------------------------------------------------------------ stanza ---
@@ -4426,6 +4777,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "monitor") return this._monitorBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
+    if (type === "ev") return this._evBody(item);
     if (type === "room") return this._roomCardBody(item);
     if (type === "trend") return this._trendBody(item);
     if (type === "lights") return this._lightsBody(item);
@@ -4597,6 +4949,17 @@ class CyborgDashboard extends HTMLElement {
    * belonging to the same device name. Anything not matched is simply left for
    * the user to pick, rather than guessed wrongly.
    */
+  /** Optional section: whether declared vehicles join the load sub-tree. */
+  _flowVehicleOption(card) {
+    const vehicles = this._vehicles().filter((v) => v.power);
+    if (!vehicles.length) return "";
+    return `<div class="section">
+      <strong>AUTO ELETTRICHE NEL FLUSSO</strong>
+      <span class="hint">${vehicles.length} auto con un sensore di potenza dichiarato. Compaiono come carichi con il loro stato di carica, senza doverle aggiungere una seconda volta qui.</span>
+      <label class="check"><input type="checkbox" data-flow-vehicles ${(card.flow || {}).show_vehicles !== false ? "checked" : ""}> Mostra le auto nel sotto-albero dei consumi</label>
+    </div>`;
+  }
+
   async _detectFlow(card) {
     let prefs;
     try {
@@ -4799,6 +5162,57 @@ class CyborgDashboard extends HTMLElement {
         <label class="check"><input type="checkbox" data-prop="show_updates" ${card.show_updates !== false ? "checked" : ""}> Includi aggiornamenti disponibili</label>
         <label>MASSIMO IN ELENCO<input type="number" min="3" max="60" data-prop="max" value="${card.max || 8}"></label>
         <button class="secondary wide" data-notif-clear><ha-icon icon="mdi:notification-clear-all"></ha-icon> SVUOTA L'ARCHIVIO AVVISI</button>
+      </div>`;
+    }
+    if (card.type === "ev") {
+      const all = this._vehicles();
+      const chosen = Array.isArray(card.vehicles) && card.vehicles.length ? card.vehicles : all.map((v) => v.id);
+      const numeric = (test) => Object.keys(this._hass.states).filter(test);
+      const field = (v, key, label, test, hint) => `<label>${esc(label)}
+        <select data-veh-field="${esc(v.id)}|${esc(key)}">
+          <option value="">— nessuno —</option>
+          ${numeric(test).map((id) => `<option value="${esc(id)}" ${v[key] === id ? "selected" : ""}>${
+            esc(this._hass.states[id].attributes.friendly_name || id)}</option>`).join("")}
+        </select>${hint ? `<span class="hint">${esc(hint)}</span>` : ""}</label>`;
+
+      return `<div class="section">
+        <strong>AUTO ELETTRICHE</strong>
+        <span class="hint">Le auto si dichiarano una volta sola qui e valgono per tutta la dashboard: la card, il garage sulla mappa 3D e il flusso energetico leggono le stesse entità. ${
+          all.length ? `${all.length} dichiarate.` : "Nessuna ancora."}</span>
+        <button class="secondary wide" data-veh-detect><ha-icon icon="mdi:auto-fix"></ha-icon> CERCA LE AUTO IN HOME ASSISTANT</button>
+        <button class="secondary wide" data-veh-add><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI A MANO</button>
+        ${all.map((v) => {
+          const st = vehicleState(v, this._hass.states);
+          const open = (this._vehOpen || {})[v.id];
+          return `<div class="veh-card">
+            <div class="veh-head">
+              <ha-icon icon="${esc(v.icon)}"></ha-icon>
+              <div class="ede-txt"><strong>${esc(v.name)}</strong>
+                <small>${esc(st.status)}${st.soc !== null ? " · " + Math.round(st.soc) + "%" : ""}</small></div>
+              <button class="mini ${chosen.includes(v.id) ? "on" : ""}" data-veh-pick="${esc(v.id)}" title="Mostra in questa card">
+                <ha-icon icon="${chosen.includes(v.id) ? "mdi:eye" : "mdi:eye-off"}"></ha-icon></button>
+              <button class="mini" data-veh-open="${esc(v.id)}"><ha-icon icon="${open ? "mdi:chevron-up" : "mdi:tune-variant"}"></ha-icon></button>
+              <button class="mini danger" data-veh-remove="${esc(v.id)}"><ha-icon icon="mdi:close"></ha-icon></button>
+            </div>
+            ${open ? `<div class="veh-body">
+              <label>NOME<input data-veh-prop="${esc(v.id)}|name" value="${esc(v.name)}"></label>
+              <label>ICONA<input data-veh-prop="${esc(v.id)}|icon" value="${esc(v.icon)}" placeholder="mdi:car-electric"></label>
+              ${field(v, "battery", "PERCENTUALE BATTERIA", (id) => this._hass.states[id].attributes.device_class === "battery")}
+              ${field(v, "power", "POTENZA ALLA COLONNINA", (id) => this._hass.states[id].attributes.device_class === "power")}
+              ${field(v, "charging", "IN CARICA", (id) => id.startsWith("binary_sensor.") || id.startsWith("sensor.") || id.startsWith("switch."))}
+              ${field(v, "plugged", "CAVO COLLEGATO", (id) => id.startsWith("binary_sensor."))}
+              ${field(v, "range", "AUTONOMIA", (id) => id.startsWith("sensor."))}
+              ${field(v, "target", "OBIETTIVO DI CARICA", (id) => id.startsWith("number.") || id.startsWith("sensor."))}
+              ${field(v, "energy", "ENERGIA EROGATA (kWh)", (id) => this._hass.states[id].attributes.device_class === "energy")}
+              ${field(v, "switch", "AVVIA / FERMA CARICA", (id) => id.startsWith("switch."))}
+              ${field(v, "current", "LIMITE DI CORRENTE", (id) => id.startsWith("number."))}
+              <label>CAPACITÀ UTILE kWh<input type="number" step="0.5" min="0" max="500"
+                data-veh-prop="${esc(v.id)}|capacity" value="${v.capacity ?? ""}" placeholder="es. 58"></label>
+              <span class="hint">Serve solo per stimare il tempo alla carica. Senza, il tempo non viene mostrato invece di essere inventato. La stima non tiene conto del rallentamento oltre l'80%.</span>
+            </div>` : ""}
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessuna auto dichiarata.</div>'}
+        <label class="check"><input type="checkbox" data-prop="show_controls" ${card.show_controls !== false ? "checked" : ""}> Mostra i comandi di ricarica</label>
       </div>`;
     }
     if (card.type === "room") {
@@ -5218,6 +5632,7 @@ class CyborgDashboard extends HTMLElement {
   _flowEditor(card) {
     if (this._wizard && this._wizard.cardId === card.id) return this._wizardEditor(card);
     const flow = card.flow || {};
+    const evSection = this._flowVehicleOption(card);
     const devices = flow.devices || [];
     const configured = FLOW_SLOTS.some((sl) => flow[sl.key]);
     return `<div class="section">
@@ -5262,7 +5677,8 @@ class CyborgDashboard extends HTMLElement {
       <button class="mini ${this._flowSlot === "__dev" ? "accentbtn" : ""}" data-flow-pick="__dev"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARICO</button>
       ${this._flowSlot === "__dev" ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
         <div class="entity-results" data-entity-results>${this._entityResults("power")}</div>` : ""}
-    </div>`;
+    </div>
+    ${evSection}`;
   }
 
   _renderCardEditor(card) {
@@ -5776,6 +6192,109 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    // --- auto elettriche (definite a livello di dashboard)
+    const flowVeh = q("[data-flow-vehicles]");
+    if (flowVeh && card) flowVeh.onchange = () => {
+      card.flow = card.flow || {};
+      card.flow.show_vehicles = flowVeh.checked;
+      this._touch();
+    };
+    const vehDetect = q("[data-veh-detect]");
+    if (vehDetect) vehDetect.onclick = () => {
+      const found = this._detectVehicles();
+      if (!found.length) {
+        this._error = "Nessuna auto elettrica riconosciuta in Home Assistant";
+        this._touch(true);
+        return;
+      }
+      this._dashboard.vehicles = Array.isArray(this._dashboard.vehicles) ? this._dashboard.vehicles : [];
+      const known = new Set(this._dashboard.vehicles.map((v) => v.battery || v.power));
+      let added = 0;
+      for (const v of found) {
+        if (known.has(v.battery || v.power)) continue;
+        this._dashboard.vehicles.push(v);
+        added += 1;
+      }
+      this._error = added ? "" : "Le auto trovate erano già dichiarate";
+      this._touch();
+    };
+    const vehAdd = q("[data-veh-add]");
+    if (vehAdd) vehAdd.onclick = () => {
+      this._dashboard.vehicles = Array.isArray(this._dashboard.vehicles) ? this._dashboard.vehicles : [];
+      const v = { id: uid("ev"), name: "Auto elettrica", icon: "mdi:car-electric", color: "#06d6a0",
+        battery: null, charging: null, power: null, energy: null, range: null,
+        plugged: null, target: null, switch: null, current: null, capacity: null };
+      this._dashboard.vehicles.push(v);
+      this._vehOpen = { ...(this._vehOpen || {}), [v.id]: true };
+      this._touch();
+    };
+    all("[data-veh-open]").forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute("data-veh-open");
+        this._vehOpen = { ...(this._vehOpen || {}) };
+        this._vehOpen[id] = !this._vehOpen[id];
+        this._touch(true);
+      };
+    });
+    all("[data-veh-remove]").forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute("data-veh-remove");
+        this._dashboard.vehicles = this._vehicles().filter((v) => v.id !== id);
+        // A car removed from the dashboard must not leave a dangling id in a
+        // room or a card, or the garage would keep an empty parking space.
+        for (const page of this._dashboard.pages) {
+          for (const room of (page.rooms || [])) {
+            if (Array.isArray(room.vehicles)) room.vehicles = room.vehicles.filter((x) => x !== id);
+          }
+          for (const sec of (page.sections || [])) {
+            for (const it of (sec.items || [])) {
+              if (Array.isArray(it.vehicles)) it.vehicles = it.vehicles.filter((x) => x !== id);
+            }
+          }
+        }
+        this._touch();
+      };
+    });
+    all("[data-veh-prop]").forEach((el) => {
+      const commit = () => {
+        const [id, key] = el.getAttribute("data-veh-prop").split("|");
+        const v = this._vehicle(id);
+        if (!v) return;
+        v[key] = key === "capacity" ? (el.value === "" ? null : Number(el.value)) : el.value;
+        this._touch();
+      };
+      el.onchange = commit;
+    });
+    all("[data-veh-field]").forEach((el) => {
+      el.onchange = () => {
+        const [id, key] = el.getAttribute("data-veh-field").split("|");
+        const v = this._vehicle(id);
+        if (!v) return;
+        v[key] = el.value || null;
+        this._touch();
+      };
+    });
+    all("[data-veh-pick]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-veh-pick");
+        const all2 = this._vehicles().map((v) => v.id);
+        const cur = Array.isArray(card.vehicles) && card.vehicles.length ? card.vehicles.slice() : all2.slice();
+        card.vehicles = cur.includes(id) ? cur.filter((x) => x !== id) : cur.concat([id]);
+        this._touch();
+      };
+    });
+    all("[data-ev-switch]").forEach((el) => {
+      el.onclick = () => this._hass.callService("switch", "toggle",
+        { entity_id: el.getAttribute("data-ev-switch") });
+    });
+    all("[data-ev-current]").forEach((el) => {
+      // onchange, not oninput: a repaint mid-drag replaces the slider and
+      // aborts the gesture, and every step would be a service call besides.
+      el.onchange = () => this._hass.callService("number", "set_value",
+        { entity_id: el.getAttribute("data-ev-current"), value: Number(el.value) });
+    });
+
     all("[data-roomcard-vis]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -6190,6 +6709,16 @@ class CyborgDashboard extends HTMLElement {
     const focusExit = q("[data-focus-exit]");
     if (focusExit) focusExit.onclick = () => this._exitFocus();
 
+    all("[data-room-veh]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const id = el.getAttribute("data-room-veh");
+        const cur = Array.isArray(room.vehicles) ? room.vehicles.slice() : [];
+        room.vehicles = cur.includes(id) ? cur.filter((x) => x !== id) : cur.concat([id]);
+        this._touch();
+      };
+    });
     all("[data-room-vis]").forEach((el) => {
       el.onclick = () => {
         const room = this._room(this._selected && this._selected.roomId);
@@ -6833,7 +7362,7 @@ class CyborgDashboard extends HTMLElement {
    * room, and a lamp floating in that notch would be plainly wrong.
    */
   _bindSpotDrag(un) {
-    Array.from(this.querySelectorAll(".fp-spot.movable")).forEach((h) => {
+    Array.from(this.querySelectorAll(".fp-spot.movable, .fp-car.movable")).forEach((h) => {
       h.onpointerdown = (ev) => {
         if (ev.target.closest("[data-fp-badge]") && ev.pointerType === "mouse" && ev.button !== 0) return;
         const el = h.closest(".fp-room");
@@ -7439,6 +7968,9 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-n.leaf .ef-n-val{order:2;font-size:13px}
 .ef-n.leaf.child .ef-n-val{font-size:11.5px}
 .ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:88px}
+.ef-n.leaf.ev .ef-n-disc{border-color:color-mix(in srgb,#06d6a0 70%,transparent)}
+.ef-n.leaf.ev.charging .ef-n-disc{animation:evPulse 1.9s ease-in-out infinite}
+.ef-n.leaf.ev .ef-n-sub{color:#06d6a0;opacity:.9;font-weight:700}
 .ef-n.leaf.other .ef-n-disc{border-style:dashed;opacity:.8}
 .ef-n.leaf:hover .ef-n-disc{border-color:var(--nc);box-shadow:0 0 22px color-mix(in srgb,var(--nc) 45%,transparent)}
 .ef-subhint{fill:currentColor;opacity:.4;font:600 11px Inter,system-ui,sans-serif;text-anchor:middle}
@@ -7664,6 +8196,78 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-hud-btn.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
 .fp-hud-btn ha-icon{--mdc-icon-size:17px;display:block}
 .fp-hint{position:absolute;right:14px;bottom:18px;font:10px ui-monospace,monospace;letter-spacing:1.4px;opacity:.4;pointer-events:none}
+
+/* --------------------------------------------------------- auto elettrica -- */
+.ev{margin-top:12px;display:flex;flex-direction:column;gap:10px}
+.ev-car{padding:12px;border-radius:14px;background:color-mix(in srgb,var(--ec) 7%,transparent);
+  border:1px solid color-mix(in srgb,var(--ec) 22%,transparent)}
+.ev-car.charging{border-color:color-mix(in srgb,var(--ec) 55%,transparent);
+  box-shadow:0 0 26px color-mix(in srgb,var(--ec) 16%,transparent)}
+.ev-top{display:flex;align-items:center;gap:14px}
+.ev-ring{flex-shrink:0}
+.ev-ring-bg{fill:none;stroke:rgba(255,255,255,.07);stroke-width:7}
+.ev-ring-arc{fill:none;stroke-width:7;stroke-linecap:round;transform:rotate(-90deg);transform-origin:50% 50%;
+  transition:stroke-dashoffset .6s cubic-bezier(.4,0,.2,1),stroke .4s}
+/* The ring breathes only while charging: a static ring is a reading, a moving
+   one is an event, and the difference has to be visible from the doorway. */
+.ev-ring.charging .ev-ring-arc{animation:evPulse 1.9s ease-in-out infinite}
+@keyframes evPulse{0%,100%{opacity:1}50%{opacity:.55}}
+.ev-ring-val{fill:currentColor;font:700 23px Inter,system-ui,sans-serif;text-anchor:middle}
+.ev-ring-pct{fill:currentColor;opacity:.45;font:600 9px ui-monospace,monospace;text-anchor:middle}
+.ev-ring-bolt{fill:var(--ec);font-size:13px;text-anchor:middle}
+.ev-id{flex:1;min-width:0}
+.ev-name{display:flex;align-items:center;gap:7px;padding:0;background:none;border:0;color:var(--primary-text-color)}
+.ev-name ha-icon{--mdc-icon-size:20px;color:var(--ec)}
+.ev-name strong{font-size:15px;font-weight:650}
+.ev-status{display:block;margin-top:2px;font:10px ui-monospace,monospace;letter-spacing:1.2px;text-transform:uppercase;opacity:.55}
+.ev-target{position:relative;height:5px;margin-top:9px;border-radius:99px;background:rgba(255,255,255,.07);overflow:visible}
+.ev-target i{display:block;height:100%;border-radius:99px;background:var(--ec)}
+/* The target is a mark on the bar, not a second bar: it is a destination. */
+.ev-target b{position:absolute;top:-3px;width:2px;height:11px;border-radius:99px;background:#fff;opacity:.7}
+.ev-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:4px;margin-top:11px}
+.ev-row{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.03)}
+.ev-row ha-icon{--mdc-icon-size:15px;color:var(--ec);opacity:.8;flex-shrink:0}
+.ev-row span{flex:1;font:9.5px ui-monospace,monospace;letter-spacing:.9px;text-transform:uppercase;opacity:.5}
+.ev-row strong{font:12px ui-monospace,monospace;font-weight:700}
+.ev-ctl{display:flex;align-items:center;gap:11px;margin-top:11px;flex-wrap:wrap}
+.ev-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:10px;font-size:11px;letter-spacing:.1em;
+  background:color-mix(in srgb,var(--ec) 14%,transparent);border:1px solid color-mix(in srgb,var(--ec) 40%,transparent);color:var(--ec)}
+.ev-btn.on{background:color-mix(in srgb,#ff3d71 15%,transparent);border-color:color-mix(in srgb,#ff3d71 45%,transparent);color:#ff8fab}
+.ev-btn ha-icon{--mdc-icon-size:15px}
+.ev-amp{flex:1;min-width:150px;font:9px ui-monospace,monospace;letter-spacing:1.1px;opacity:.6}
+.veh-card{margin-top:7px;border-radius:11px;background:color-mix(in srgb,var(--accent) 5%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 15%,transparent)}
+.veh-head{display:flex;align-items:center;gap:8px;padding:8px 10px}
+.veh-head>ha-icon{--mdc-icon-size:18px;color:var(--accent);flex-shrink:0}
+.veh-head .mini.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+.veh-body{display:flex;flex-direction:column;gap:7px;padding:2px 10px 11px}
+.room-cars{margin-top:10px;display:flex;flex-wrap:wrap;gap:5px}
+.room-cars strong,.room-cars .hint{flex-basis:100%}
+.room-cars strong{font:9.5px ui-monospace,monospace;letter-spacing:1.5px;opacity:.55}
+
+/* la macchina sulla mappa 3D */
+.fp-cars{position:absolute;inset:0;transform-style:preserve-3d}
+.fp-car{position:absolute;width:0;height:0;transform-style:preserve-3d}
+.fp-car.movable{cursor:move;touch-action:none;pointer-events:auto}
+.fp-car-body{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;gap:3px;
+  width:max-content;transform-origin:0 0}
+.fp-car-icon{position:relative;display:grid;place-items:center;width:46px;height:34px;margin-left:-23px;border-radius:10px;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--ec) 30%,#0b1119),#0b1119);
+  border:1.5px solid color-mix(in srgb,var(--ec) 65%,transparent);color:var(--ec);
+  box-shadow:0 6px 18px rgba(0,0,0,.55)}
+.fp-car-icon ha-icon{--mdc-icon-size:24px}
+.fp-car.charging .fp-car-icon{box-shadow:0 6px 22px color-mix(in srgb,var(--ec) 55%,transparent);
+  animation:evPulse 1.9s ease-in-out infinite}
+.fp-car-bolt{position:absolute;right:-7px;top:-7px;display:grid;place-items:center;width:18px;height:18px;border-radius:50%;
+  background:#ffd166;color:#0a1017;box-shadow:0 0 12px rgba(255,209,102,.7)}
+.fp-car-bolt ha-icon{--mdc-icon-size:12px}
+.fp-car-soc{width:46px;margin-left:-23px;height:4px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden}
+.fp-car-soc span{display:block;height:100%;border-radius:99px;background:var(--ec);transition:width .6s ease}
+.fp-car-tag{display:flex;flex-direction:column;align-items:center;transform:translateX(-50%);padding:2px 8px;border-radius:8px;
+  background:rgba(6,12,20,.9);border:1px solid rgba(255,255,255,.12);white-space:nowrap;line-height:1.25}
+.fp-car-tag strong{font-size:10px;font-weight:650}
+.fp-car-tag small{font:9px ui-monospace,monospace;opacity:.6;letter-spacing:.4px}
+@media(max-width:700px){.fp-car-tag{display:none}}
 
 .rc{margin-top:12px;display:flex;flex-direction:column;gap:10px}
 .rc-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(74px,1fr));gap:6px}

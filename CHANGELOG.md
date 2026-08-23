@@ -4,6 +4,63 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.20.0] - 2026-08-23
+
+L'auto elettrica entra nel sistema: dichiarata una volta, presente ovunque.
+
+### Auto elettriche
+Un'auto in carica è il carico più grande che una casa avrà mai — 7,4 kW su una
+wallbox domestica, 22 kW in trifase — e a differenza di ogni altro carico è un
+**accumulo**: la domanda non è "quanto sta assorbendo" ma "quanto è piena e
+quando è pronta". Le due cose stanno su entità diverse, spesso di integrazioni
+diverse. Per questo l'auto si dichiara **una volta sola**, a livello di
+dashboard, e viene letta da tutti e tre i posti in cui serve.
+
+- **Card Auto elettrica** — anello di carica con la percentuale, stato
+  (in carica / collegata / scollegata), potenza alla colonnina, autonomia,
+  obiettivo di carica come tacca sulla barra, e **tempo stimato alla carica**.
+  Comandi di avvio/arresto e limite di corrente quando l'impianto li espone.
+- **Mappa 3D** — l'auto compare **dentro il garage**, con il suo simbolo, la
+  barra dello stato di carica e il fulmine quando sta caricando. Si vede dalla
+  pianta, senza entrare nella stanza, e si trascina dove è parcheggiata
+  davvero. Un garage è una stanza come le altre: quello che lo rende un garage
+  è che dentro c'è un'auto (e un lato basculante, dalla 0.18.0).
+- **Flusso energetico** — l'auto entra da sola nel sotto-albero dei consumi,
+  con il suo colore e la sua percentuale sotto il nodo. Se il sensore della
+  wallbox era già stato aggiunto a mano come carico generico, **non viene
+  contato due volte**.
+- **Rilevamento automatico**: Cyborg cerca in Home Assistant la batteria
+  dell'auto e la potenza della colonnina e propone la configurazione.
+- Funziona anche con **una sola wallbox e nessuna integrazione dell'auto**:
+  mostra semplicemente meno, senza inventare niente.
+- Più auto: fino a otto.
+
+### Onestà dei numeri
+- Il tempo alla carica viene calcolato solo quando **ogni termine è reale**:
+  capacità dichiarata, potenza che scorre, obiettivo sopra il livello attuale.
+  Senza capacità il tempo non compare invece di essere stimato a caso. Oltre le
+  24 ore non viene mostrato, perché un conto alla rovescia di 50 ore non è
+  un'informazione. La stima non tiene conto del rallentamento oltre l'80% ed è
+  dichiarata come stima.
+- Una capacità fuori scala viene **scartata**, non limitata: un numero sbagliato
+  produrrebbe una stima sicura di sé e sbagliata.
+- Una batteria di cui l'impianto non pubblica il livello resta "—", non zero:
+  chi deve decidere se partire ha bisogno che le due cose restino distinte.
+- Senza un sensore dedicato, "in carica" si deduce dalla potenza sopra i 400 W:
+  sotto quella soglia una colonnina è a riposo, non sta caricando.
+
+### Correzione
+- **Il dashboard di fabbrica non era idempotente.** Le pagine predefinite non
+  passavano dal loro stesso normalizzatore: al primo salvataggio veniva scritto
+  un documento diverso da quello che il caricamento successivo produceva dallo
+  stesso input, e chi confronta le revisioni vedeva una modifica fantasma.
+
+### Verifica
+- 586 asserzioni sulla logica del pannello, schema completo, **85 asserzioni
+  geometriche misurate** in Chromium headless — fra cui che l'anello è
+  davvero al 62% del cerchio, che la barra nel garage è proporzionale allo
+  stato di carica, e che l'auto non finisce dietro il muro del garage.
+
 ## [0.19.0] - 2026-08-23
 
 La sezione Stanze, e il confronto andamenti che ora disegna davvero le linee.

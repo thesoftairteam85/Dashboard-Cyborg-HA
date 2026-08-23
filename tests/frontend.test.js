@@ -1554,6 +1554,141 @@ console.log("\n== 21. CARD STANZA ==");
   el._registry = null;
 }
 
+console.log("\n== 22. AUTO ELETTRICA ==");
+{
+  states["sensor.auto_batteria"] = S("62", { friendly_name: "Model 3 Batteria", device_class: "battery", unit_of_measurement: "%" });
+  states["sensor.wallbox_potenza"] = S("7.4", { friendly_name: "Wallbox Potenza", device_class: "power", unit_of_measurement: "kW" });
+  states["binary_sensor.auto_in_carica"] = S("on", { friendly_name: "Model 3 In carica" });
+  states["binary_sensor.auto_collegata"] = S("on", { friendly_name: "Model 3 Collegata" });
+  states["sensor.auto_autonomia"] = S("312", { friendly_name: "Model 3 Autonomia", unit_of_measurement: "km" });
+  states["number.auto_obiettivo"] = S("80", { friendly_name: "Model 3 Obiettivo", unit_of_measurement: "%" });
+  states["switch.wallbox_carica"] = S("on", { friendly_name: "Wallbox Carica" });
+  states["number.wallbox_corrente"] = S("16", { friendly_name: "Wallbox Corrente", min: 6, max: 32, step: 1 });
+
+  const car = { id: "ev1", name: "Model 3", icon: "mdi:car-electric", color: "#06d6a0",
+    battery: "sensor.auto_batteria", charging: "binary_sensor.auto_in_carica",
+    power: "sensor.wallbox_potenza", energy: null, range: "sensor.auto_autonomia",
+    plugged: "binary_sensor.auto_collegata", target: "number.auto_obiettivo",
+    switch: "switch.wallbox_carica", current: "number.wallbox_corrente", capacity: 60 };
+
+  const vs = vehicleState(car, states);
+  ok("legge lo stato di carica", vs.soc === 62);
+  // 7.4 kW in a kW-unit sensor: the unit-aware reader is what stops this
+  // being 7.4 W and the whole estimate being nonsense
+  ok("la potenza rispetta l'unità di misura", vs.powerW === 7400, String(vs.powerW));
+  ok("sa che sta caricando", vs.charging === true);
+  ok("sa che è collegata", vs.plugged === true);
+  ok("legge l'autonomia", vs.rangeKm === 312);
+  ok("legge l'obiettivo", vs.target === 80);
+  // 60 kWh * (80-62)/100 = 10.8 kWh a 7.4 kW = 87.5 min
+  ok("stima il tempo alla carica", vs.etaMin === 88, String(vs.etaMin));
+  ok("lo stato è leggibile", vs.status === "in carica");
+
+  const noCap = vehicleState({ ...car, capacity: null }, states);
+  ok("senza capacità non inventa un tempo", noCap.etaMin === null);
+  const full = vehicleState({ ...car }, { ...states, "sensor.auto_batteria": S("80", {}) });
+  ok("arrivata all'obiettivo non c'è più tempo residuo", full.etaMin === null);
+  const slow = vehicleState({ ...car }, { ...states,
+    "sensor.wallbox_potenza": S("0.3", { device_class: "power", unit_of_measurement: "kW" }) });
+  ok("una carica lentissima non stampa un conto alla rovescia assurdo", slow.etaMin === null,
+     String(slow.etaMin));
+
+  // no dedicated charging entity: inferred from power, with a threshold that
+  // rejects a charger idling
+  const inferred = vehicleState({ ...car, charging: null }, states);
+  ok("senza sensore dedicato la carica si deduce dalla potenza", inferred.charging === true);
+  const idle = vehicleState({ ...car, charging: null },
+    { ...states, "sensor.wallbox_potenza": S("120", { device_class: "power", unit_of_measurement: "W" }) });
+  ok("una colonnina a riposo non risulta in carica", idle.charging === false);
+
+  const bare = vehicleState({ id: "x", name: "Colonnina", power: "sensor.wallbox_potenza" }, states);
+  ok("una colonnina senza auto funziona lo stesso", bare.powerW === 7400 && bare.soc === null);
+  ok("una batteria sconosciuta resta sconosciuta, non zero",
+     vehicleState({ id: "y", name: "N", power: "sensor.wallbox_potenza" }, states).soc === null);
+
+  ok("il colore segue lo stato di carica",
+     socColor(5) !== socColor(50) && socColor(50) !== socColor(90) && socColor(null) === "#8d99ae");
+  ok("i tempi sono leggibili", etaWords(45) === "45 min" && etaWords(88) === "1 h 28" && etaWords(120) === "2 h");
+
+  // -- la card --
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [car], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [
+      { id: "s1", title: "Auto", icon: "mdi:car", accent: "#06d6a0", items: [
+        { id: "evcard", type: "ev", entity_id: "", name: "", size: "lg",
+          appearance: {}, states: {}, actions: {}, vehicles: [], show_controls: true }]}]}]};
+  el._pageIndex = 0; el._editing = false; el._selected = null;
+  el.render();
+  const eh = el.innerHTML;
+  ok("la card mostra l'anello di carica", eh.includes("ev-ring") && eh.includes(">62<"));
+  ok("l'anello pulsa mentre carica", eh.includes("ev-ring charging"));
+  ok("mostra la potenza in kW", eh.includes("7.4") || eh.includes("7,4"), (eh.match(/ev-row[^]{0,120}/) || [""])[0]);
+  ok("mostra l'autonomia", eh.includes("312 km"));
+  ok("mostra il tempo alla carica", eh.includes("1 h 28"));
+  ok("mostra l'obiettivo come tacca sulla barra", eh.includes("ev-target"));
+  ok("offre di fermare la carica", eh.includes('data-ev-switch="switch.wallbox_carica"') && eh.includes("FERMA"));
+  ok("offre il limite di corrente", eh.includes('data-ev-current="number.wallbox_corrente"'));
+  ok("card auto: nessun undefined", !/>undefined</.test(eh) && !eh.includes("[object"));
+
+  // an empty dashboard must explain itself, not break
+  el._dashboard.vehicles = [];
+  el.render();
+  ok("senza auto la card spiega cosa fare", el.innerHTML.includes("Nessuna auto elettrica configurata"));
+  el._dashboard.vehicles = [car];
+
+  // -- rilevamento --
+  const found = el._detectVehicles();
+  ok("riconosce l'auto in Home Assistant", found.length >= 1, String(found.length));
+  ok("aggancia la batteria giusta", found[0].battery === "sensor.auto_batteria", String(found[0].battery));
+  ok("aggancia la potenza della colonnina", found[0].power === "sensor.wallbox_potenza");
+
+  // -- nel flusso energetico --
+  const flow = { grid: "sensor.rete_potenza_attiva_totale", devices: [] };
+  const loads = el._flowLoads(flow, 9000);
+  const evLoad = loads.find((l) => l.vehicle);
+  ok("l'auto entra da sola nel flusso", !!evLoad);
+  ok("nel flusso porta con sé lo stato di carica", evLoad && evLoad.soc === 62 && evLoad.charging === true);
+  ok("nel flusso pesa quanto assorbe davvero", evLoad && evLoad.watts === 7400, evLoad && String(evLoad.watts));
+  // adding the wallbox by hand as well must not count it twice
+  const dup = el._flowLoads({ devices: [{ entity: "sensor.wallbox_potenza", name: "Wallbox" }] }, 9000);
+  ok("aggiungerla a mano non la conta due volte",
+     dup.filter((l) => l.entity === "sensor.wallbox_potenza").length === 1,
+     String(dup.filter((l) => l.entity === "sensor.wallbox_potenza").length));
+  ok("si può escludere dal flusso",
+     !el._flowLoads({ devices: [], show_vehicles: false }, 9000).some((l) => l.vehicle));
+
+  // -- nel garage sulla mappa --
+  el._dashboard.pages.push({ id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+    view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true,
+            level_gap: 150, active_level: null },
+    rooms: [{ id: "garage", area_id: null, title: "Garage", icon: "mdi:garage", color: "#8ecae6",
+              x: 0, y: 0, w: 240, h: 200, level: 0, points: null, spots: {}, hidden: [],
+              walls: [], entities: [], vehicles: ["ev1"] },
+            { id: "salotto", area_id: null, title: "Salotto", icon: "mdi:sofa", color: "#00e5ff",
+              x: 260, y: 0, w: 240, h: 200, level: 0, points: null, spots: {}, hidden: [],
+              walls: [], entities: [], vehicles: [] }] });
+  el._pageIndex = 1; el._focus = null;
+  el.render();
+  const mh2 = el.innerHTML;
+  ok("l'auto compare nel garage", mh2.includes('data-spot="vehicle:ev1"'));
+  ok("il garage mostra la percentuale", mh2.includes("62%"));
+  ok("l'auto in carica è marcata sulla mappa", mh2.includes("fp-car charging"));
+  ok("una stanza senza auto non ne disegna",
+     (mh2.split('data-room="salotto"')[1] || "").split("fp-car")[0].indexOf("fp-cars") === -1);
+  ok("la mappa mostra l'auto anche senza entrare nella stanza", !el._focus);
+
+  states["binary_sensor.auto_in_carica"] = S("off", { friendly_name: "Model 3 In carica" });
+  el._signature = ""; el.render();
+  ok("finita la carica il fulmine sparisce", !el.innerHTML.includes("fp-car charging"));
+
+  for (const id of ["sensor.auto_batteria","sensor.wallbox_potenza","binary_sensor.auto_in_carica",
+                    "binary_sensor.auto_collegata","sensor.auto_autonomia","number.auto_obiettivo",
+                    "switch.wallbox_carica","number.wallbox_corrente"]) delete states[id];
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 22", !el._isFloorplan());
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

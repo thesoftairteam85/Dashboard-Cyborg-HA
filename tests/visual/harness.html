@@ -75,6 +75,14 @@ const states={
  "sensor.energia_lavatrice":S("141",{friendly_name:"Lavatrice",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
  "sensor.energia_forno":S("74",{friendly_name:"Forno",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
  "vacuum.robot":S("cleaning",{friendly_name:"Robot aspirapolvere",battery_level:64}),
+ "sensor.model3_batteria":S("62",{friendly_name:"Model 3 Batteria",device_class:"battery",unit_of_measurement:"%"}),
+ "sensor.wallbox_potenza":S("7.4",{friendly_name:"Wallbox Potenza",device_class:"power",unit_of_measurement:"kW"}),
+ "binary_sensor.model3_in_carica":S("on",{friendly_name:"Model 3 In carica"}),
+ "binary_sensor.model3_collegata":S("on",{friendly_name:"Model 3 Collegata"}),
+ "sensor.model3_autonomia":S("312",{friendly_name:"Model 3 Autonomia",unit_of_measurement:"km"}),
+ "number.model3_obiettivo":S("80",{friendly_name:"Model 3 Obiettivo",unit_of_measurement:"%"}),
+ "switch.wallbox_carica":S("on",{friendly_name:"Wallbox Carica"}),
+ "number.wallbox_corrente":S("16",{friendly_name:"Wallbox Corrente",min:6,max:32,step:1}),
 };
 const AREA=[["soggiorno","Soggiorno",null],["camera_da_letto","Camera da letto",null],
  ["bagno","Bagno","mdi:toilet"],["cucina","Cucina",null],["balcone","Balcone","mdi:balcony"]];
@@ -195,6 +203,26 @@ window.__mount=(dash,opts)=>{
           if(opts.openTree){el._flowOpen={flowcard:true};}
           if(opts.monitor){sec.items.push({id:"moncard",type:"monitor",entity_id:"",name:"",size:"lg",
             appearance:{},states:{},actions:{},grid_entity:"sensor.rete_potenza",limit_w:3300,groups:[],max_per_group:8});}
+        }
+        if(opts&&opts.ev){
+          el._dashboard.vehicles=[{id:"ev1",name:"Model 3",icon:"mdi:car-electric",color:"#06d6a0",
+            battery:"sensor.model3_batteria",charging:"binary_sensor.model3_in_carica",
+            power:"sensor.wallbox_potenza",energy:null,range:"sensor.model3_autonomia",
+            plugged:"binary_sensor.model3_collegata",target:"number.model3_obiettivo",
+            switch:"switch.wallbox_carica",current:"number.wallbox_corrente",capacity:60}];
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"evcard",type:"ev",entity_id:"",name:"",size:"lg",
+            appearance:{},states:{},actions:{},vehicles:[],show_controls:true});
+        }
+        if(opts&&opts.garage&&el._rooms().length){
+          el._dashboard.vehicles=[{id:"ev1",name:"Model 3",icon:"mdi:car-electric",color:"#06d6a0",
+            battery:"sensor.model3_batteria",charging:"binary_sensor.model3_in_carica",
+            power:"sensor.wallbox_potenza",energy:null,range:"sensor.model3_autonomia",
+            plugged:"binary_sensor.model3_collegata",target:"number.model3_obiettivo",
+            switch:null,current:null,capacity:60}];
+          const r=el._rooms()[el._rooms().length-1];
+          r.title="Garage"; r.icon="mdi:garage"; r.vehicles=["ev1"];
+          r.walls=["garage","wall","wall","wall"];
         }
         if(opts&&opts.rooms){ el._addRoomSection(); }
         if(opts&&opts.trend){

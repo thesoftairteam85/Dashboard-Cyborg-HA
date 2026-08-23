@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 5 and len(d["pages"][1]["sections"]) == 6
+assert d["version"] == 6 and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -13,7 +13,7 @@ v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c4", "entity_id": "event.backup"}]}]}
 m = schema.normalize_dashboard(v2)
 secs = m["pages"][0]["sections"]
-assert m["version"] == 5 and m["revision"] == 7
+assert m["version"] == 6 and m["revision"] == 7
 assert len(secs) == 3 and len(secs[1]["items"]) == 2, "case-insensitive merge"
 assert secs[2]["title"] == "Generale"
 assert "items" not in m["pages"][0], "legacy items must be dropped"
@@ -25,7 +25,7 @@ print("schema: all tests passed")
 
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
-assert d["version"] == 5
+assert d["version"] == 6
 assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
 assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
 assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
@@ -35,7 +35,7 @@ assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
     {"id": "s", "title": "X", "items": [{"id": "c", "entity_id": "light.a"}]}]}]}
 r = schema.normalize_dashboard(v3)
-assert r["version"] == 5
+assert r["version"] == 6
 assert r["pages"][0]["type"] == "sections"
 assert r["pages"][0]["sections"][0]["items"][0]["entity_id"] == "light.a"
 assert "rooms" not in r["pages"][0] and "view" not in r["pages"][0]
@@ -231,7 +231,7 @@ stored = {"version": 4, "revision": 12, "pages": [
                 "area_id": "salotto", "entities": None}]}]}
 mig = schema.normalize_dashboard(stored)
 room = mig["pages"][0]["rooms"][0]
-assert mig["version"] == 5 and mig["revision"] == 12
+assert mig["version"] == 6 and mig["revision"] == 12
 assert room["title"] == "Salotto" and room["area_id"] == "salotto" and room["w"] == 230
 assert room["level"] == 0 and room["points"] is None and room["spots"] == {}
 assert mig["pages"][0]["view"]["level_gap"] == 150
@@ -352,3 +352,73 @@ assert rv["hidden"] == ["sensor.x"]
 assert schema.normalize_room({}, 0)["hidden"] == []
 
 print("schema: soglie, andamenti, irrigazione e visibilita' ok")
+
+# ---- v6: auto elettriche ----------------------------------------------------
+
+d6 = schema.normalize_dashboard({"vehicles": [
+    {"id": "ev1", "name": "Model 3", "battery": "sensor.soc", "power": "sensor.wb",
+     "capacity": 60, "charging": "binary_sensor.ch"},
+    {"id": "ev1", "name": "Doppione", "battery": "sensor.soc2"},
+    {"name": "Senza entita"},
+    {"id": "ev3", "power": "non-un-entity"},
+    "spazzatura",
+]})
+assert [v["id"] for v in d6["vehicles"]] == ["ev1", "ev1-2"], [v["id"] for v in d6["vehicles"]]
+assert d6["vehicles"][0]["capacity"] == 60.0
+assert d6["vehicles"][0]["charging"] == "binary_sensor.ch"
+assert d6["vehicles"][0]["range"] is None
+assert d6["version"] == 6
+# a vehicle with no entity at all would be a name and nothing else
+assert all(v["name"] != "Senza entita" for v in d6["vehicles"])
+assert all(v["name"] != "" for v in d6["vehicles"])
+assert schema.normalize_dashboard({})["vehicles"] == []
+assert schema.normalize_dashboard({"vehicles": "una"})["vehicles"] == []
+assert schema.normalize_dashboard(d6) == d6, "v6 idempotente"
+
+# capacity out of range is dropped, not clamped: a wrong number would produce a
+# confident and wrong charging estimate
+assert schema.normalize_vehicle({"id": "x", "power": "sensor.p", "capacity": 9000}, 0)["capacity"] is None
+assert schema.normalize_vehicle({"id": "x", "power": "sensor.p", "capacity": -5}, 0)["capacity"] is None
+assert schema.normalize_vehicle({"id": "x", "power": "sensor.p", "capacity": "grande"}, 0)["capacity"] is None
+assert schema.normalize_vehicle({"id": "x", "power": "sensor.p", "capacity": 77.5}, 0)["capacity"] == 77.5
+assert schema.normalize_vehicle("no", 0) is None
+assert len(schema.normalize_dashboard({"vehicles": [
+    {"id": f"e{i}", "power": "sensor.p"} for i in range(30)]})["vehicles"]) == 8
+
+# rooms and cards reference vehicles by id
+r6 = schema.normalize_room({"vehicles": ["ev1", 5, "", "ev2"]}, 0)
+assert r6["vehicles"] == ["ev1", "ev2"]
+assert schema.normalize_room({}, 0)["vehicles"] == []
+evc = schema.normalize_item({"type": "ev", "vehicles": ["ev1"]}, 0)
+assert evc["vehicles"] == ["ev1"] and evc["show_controls"] is True
+assert schema.normalize_item({"type": "ev"}, 0)["vehicles"] == []
+assert schema.normalize_item({"type": "ev", "show_controls": False}, 0)["show_controls"] is False
+
+# the energy flow opts in by default
+ef = schema.normalize_item({"type": "energyflow", "flow": {"grid": "sensor.g"}}, 0)
+assert ef["flow"]["show_vehicles"] is True
+assert schema.normalize_item({"type": "energyflow", "flow": {"show_vehicles": False}}, 0)["flow"]["show_vehicles"] is False
+
+# a v5 dashboard gains the key without losing anything
+old5 = {"version": 5, "revision": 3, "pages": [
+    {"id": "h", "type": "sections", "title": "Cyborg", "sections": [
+        {"id": "s", "title": "Energia", "icon": "mdi:flash", "accent": "#ffd166",
+         "items": [{"id": "c", "type": "energyflow", "entity_id": "", "flow": {"grid": "sensor.g"}}]}]}]}
+m6 = schema.normalize_dashboard(old5)
+assert m6["version"] == 6 and m6["revision"] == 3 and m6["vehicles"] == []
+assert m6["pages"][0]["sections"][0]["items"][0]["flow"]["grid"] == "sensor.g"
+assert schema.normalize_dashboard(m6) == m6
+
+print("schema: auto elettriche ok")
+
+# The defaults must survive their own normalizer unchanged: the first save of a
+# fresh install used to write a document that differed from what the next load
+# produced, which looks like a phantom edit to anything watching revisions.
+fresh = schema.normalize_dashboard(None)
+assert schema.normalize_dashboard(fresh) == fresh, "il dashboard di fabbrica deve essere idempotente"
+assert all("collapsed" in sec for pg in fresh["pages"] for sec in pg.get("sections", []))
+assert all(pg.get("layout") for pg in fresh["pages"])
+assert schema.normalize_dashboard({"pages": []}) == fresh
+assert schema.normalize_dashboard({"pages": "no"}) == fresh
+
+print("schema: valori di fabbrica idempotenti")
