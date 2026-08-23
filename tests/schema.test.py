@@ -142,3 +142,35 @@ assert it["c2"]["refresh"] == 10, "default"
 assert "cameras" not in it["s"]
 assert schema.normalize_dashboard(d) == d
 print("camera schema: all tests passed")
+
+# ---- economy card ----------------------------------------------------------
+d = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+    {"id": "e", "type": "economy", "grid_import": "sensor.imp", "grid_export": "",
+     "price_import": "0.2456", "price_export": -3, "period": "decade"},
+    {"id": "e2", "type": "economy", "price_import": "boh"},
+    {"id": "s", "type": "sensor", "entity_id": "sensor.z"}]}]}]})
+it = {c["id"]: c for c in d["pages"][0]["sections"][0]["items"]}
+assert it["e"]["grid_import"] == "sensor.imp"
+assert it["e"]["grid_export"] is None, "stringa vuota -> non collegato"
+assert it["e"]["solar"] is None
+assert it["e"]["price_import"] == 0.2456
+assert it["e"]["price_export"] == 0.0, "prezzo negativo azzerato"
+assert it["e"]["period"] == "month", "periodo sconosciuto -> default"
+assert it["e2"]["price_import"] == 0.25
+assert "price_import" not in it["s"]
+assert schema.normalize_dashboard(d) == d
+print("economy schema: all tests passed")
+
+# ---- an existing dashboard must gain the 3D map page -----------------------
+old_install = {"version": 3, "revision": 12, "pages": [
+    {"id": "home", "title": "Cyborg", "icon": "mdi:x", "sections": [
+        {"id": "s1", "title": "Energia", "items": [{"id": "c1", "entity_id": "sensor.a"}]}]}]}
+m = schema.normalize_dashboard(old_install)
+assert len(m["pages"]) == 2, [p["id"] for p in m["pages"]]
+assert m["pages"][0]["id"] == "home", "la pagina esistente resta la prima"
+assert m["pages"][0]["sections"][0]["items"][0]["entity_id"] == "sensor.a", "contenuto intatto"
+assert m["pages"][1]["type"] == "floorplan" and m["pages"][1]["rooms"] == []
+assert m["revision"] == 12, "la revisione non viene toccata"
+assert schema.normalize_dashboard(m) == m, "non deve aggiungere una seconda mappa"
+assert len([p for p in schema.normalize_dashboard(m)["pages"] if p["type"] == "floorplan"]) == 1
+print("map-page backfill: all tests passed")

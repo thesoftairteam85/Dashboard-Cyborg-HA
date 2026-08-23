@@ -54,6 +54,13 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     # core versions turn this into a hard error) - so it must run in the
     # executor thread pool, not be called inline here.
     version = await hass.async_add_executor_job(_integration_version)
+    # Publishing the module on every frontend page registers the Lovelace card
+    # as a side effect, without the user having to add a resource by hand.
+    # A custom panel is NOT a Lovelace dashboard, so it can never be picked as
+    # the default dashboard; a Lovelace dashboard holding the equivalent card
+    # can. add_extra_js_url is verified present in core 2026.8.3
+    # (components/frontend/__init__.py) and is idempotent per URL.
+    frontend.add_extra_js_url(hass, f"{STATIC_PATH}/cyborg-dashboard.js?v={version}")
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_PATH,

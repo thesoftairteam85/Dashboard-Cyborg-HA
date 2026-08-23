@@ -137,6 +137,16 @@ const SECTION_PRESETS = [
     cardType: () => "status",
   },
   {
+    // These two build nothing from entity scoring: they exist so the page
+    // editor can drop in a ready-made section holding the composite card.
+    id: "monitoraggio", title: "Monitoraggio", icon: "mdi:gauge-full", accent: "#8ecae6", limit: 0,
+    score: () => 0, cardType: () => "monitor", seed: "monitor",
+  },
+  {
+    id: "economia", title: "Economia", icon: "mdi:cash-multiple", accent: "#ffd166", limit: 0,
+    score: () => 0, cardType: () => "economy", seed: "economy",
+  },
+  {
     id: "sistema", title: "Sistema", icon: "mdi:chip", accent: "#8d99ae", limit: 8,
     score(id, st) {
       const d = domainOf(id);
@@ -433,6 +443,7 @@ const CARD_TYPES = [
   ["people", "Presenze — chi è in casa"],
   ["monitor", "Monitoraggio — diagnostica d'impianto"],
   ["camera", "Videocamere — anteprime e live"],
+  ["economy", "Analisi economica — costi, ricavi e risparmio"],
 ];
 
 /* ==========================================================================
@@ -463,7 +474,7 @@ function cameraStream(entityId, st) {
 }
 
 /** Card types that stand on their own instead of displaying one entity. */
-const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people", "monitor", "camera"]);
+const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people", "monitor", "camera", "economy"]);
 
 const COMPOSITE_META = {
   energyflow:    ["Flusso energetico", "Potenza in tempo reale", "mdi:transit-connection-variant", "lg"],
@@ -472,7 +483,30 @@ const COMPOSITE_META = {
   people:        ["Presenze", "Chi è in casa", "mdi:account-group", "sm"],
   monitor:       ["Monitoraggio", "Diagnostica impianto", "mdi:gauge-full", "lg"],
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
+  economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
 };
+
+/* ==========================================================================
+ * ANALISI ECONOMICA
+ *
+ * Energy in kWh comes from the recorder statistics
+ * (recorder/statistics_during_period, verified in core 2026.8.3), not from
+ * the live states: a power reading says nothing about how much a period cost.
+ * Every figure is derived from the same three totals — prelievo, immissione,
+ * produzione — so the numbers can never disagree with each other.
+ * ======================================================================== */
+
+const ECONOMY_PERIODS = [
+  { key: "today", label: "Oggi", days: 1, bucket: "hour" },
+  { key: "week", label: "7 giorni", days: 7, bucket: "day" },
+  { key: "month", label: "30 giorni", days: 30, bucket: "day" },
+  { key: "year", label: "12 mesi", days: 365, bucket: "month" },
+];
+
+function eur(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  return (v < 0 ? "−" : "") + Math.abs(v).toFixed(2).replace(".", ",");
+}
 
 const BINARY_WORDS = {
   door: ["Aperta", "Chiusa"], window: ["Aperta", "Chiusa"],
@@ -700,6 +734,7 @@ class CyborgDashboard extends HTMLElement {
       this._dashboard.revision = res.revision;
       this._error = "";
       this._saved = true;
+      this._dirty = false;
       this.render();
       setTimeout(() => { this._saved = false; this.render(); }, 2200);
     } catch (err) {
@@ -708,14 +743,112 @@ class CyborgDashboard extends HTMLElement {
     }
   }
 
-  _touch() { this._signature = ""; this.render(); }
+  /**
+   * Mark the configuration as changed and repaint.
+   *
+   * Without a visible dirty flag, deleting a card and reloading brought it
+   * back, which reads as "it won't let me delete" rather than "you didn't
+   * save". Every mutation goes through here, so the flag cannot be forgotten.
+   */
+  _touch(clean) {
+    if (!clean) this._dirty = true;
+    this._signature = "";
+    this.render();
+  }
 
   // ------------------------------------------------------------- mutation --
+
+  /**
+   * Page management.
+   *
+   * There was no way to add, remove or reorder a page at all: pages only ever
+   * came from `default_dashboard()`, which applies to a fresh install and
+   * nothing else. Any dashboard saved before a page type existed could never
+   * reach it — that is why an existing install had no 3D map.
+   */
+  _addPage(kind) {
+    const pages = this._dashboard.pages;
+    const base = { id: uid("page"), title: "Nuova pagina", icon: "mdi:view-dashboard-outline",
+      layout: { type: "grid", columns: 12, gap: 16 } };
+    let page;
+    if (kind === "floorplan") {
+      page = Object.assign(base, { type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+        view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true },
+        rooms: [] });
+    } else if (kind === "overview") {
+      page = Object.assign(base, { type: "sections", title: "Panoramica",
+        icon: "mdi:view-dashboard-variant", sections: [] });
+    } else {
+      page = Object.assign(base, { type: "sections", sections: [] });
+    }
+    pages.push(page);
+    this._pageIndex = pages.length - 1;
+    this._selected = null;
+    this._dirty = true;
+    this._touch();
+    if (kind === "overview") this._composeOverview();
+  }
+
+  _removePage(index) {
+    const pages = this._dashboard.pages;
+    if (pages.length <= 1) { this._error = "Deve restare almeno una pagina"; this._touch(); return; }
+    pages.splice(index, 1);
+    if (this._pageIndex >= pages.length) this._pageIndex = pages.length - 1;
+    this._selected = null;
+    this._dirty = true;
+    this._touch();
+  }
+
+  _movePage(index, delta) {
+    const pages = this._dashboard.pages;
+    const j = index + delta;
+    if (j < 0 || j >= pages.length) return;
+    [pages[index], pages[j]] = [pages[j], pages[index]];
+    if (this._pageIndex === index) this._pageIndex = j;
+    else if (this._pageIndex === j) this._pageIndex = index;
+    this._dirty = true;
+    this._touch();
+  }
+
+  _pageManager() {
+    const pages = this._dashboard.pages;
+    const hasMap = pages.some((p) => p.type === "floorplan");
+    return `<div class="section">
+      <strong>PAGINE</strong>
+      <span class="hint">${pages.length} pagine · la prima è quella che si apre per prima.</span>
+      <div class="page-list">${pages.map((pg, i) => `
+        <div class="page-row ${i === this._pageIndex ? "current" : ""}">
+          <ha-icon icon="${esc(pg.icon || "mdi:view-dashboard-outline")}"></ha-icon>
+          <div><strong>${esc(pg.title || "Pagina " + (i + 1))}</strong>
+            <small>${esc(pg.type === "floorplan" ? "mappa 3D" : (pg.sections || []).length + " sezioni")}</small></div>
+          <button class="mini" data-page-move="${i}:-1" ${i === 0 ? "disabled" : ""} title="Sposta su"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+          <button class="mini" data-page-move="${i}:1" ${i === pages.length - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+          <button class="mini danger" data-page-remove="${i}" ${pages.length <= 1 ? "disabled" : ""} title="Elimina pagina"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+        </div>`).join("")}</div>
+      <div class="preset-grid">
+        <button type="button" class="preset" data-add-page="sections"><ha-icon icon="mdi:view-dashboard-outline"></ha-icon><span>Pagina vuota</span></button>
+        <button type="button" class="preset" data-add-page="overview" style="--accent:#06d6a0"><ha-icon icon="mdi:view-dashboard-variant"></ha-icon><span>Panoramica</span></button>
+        ${hasMap ? "" : `<button type="button" class="preset" data-add-page="floorplan" style="--accent:#c77dff"><ha-icon icon="mdi:floor-plan"></ha-icon><span>Mappa 3D</span></button>`}
+      </div>
+    </div>`;
+  }
 
   _addSection(preset) {
     const base = preset || { title: "Nuova sezione", icon: "mdi:shape-outline", accent: null };
     const section = { id: uid("sec"), title: base.title, icon: base.icon,
       accent: base.accent || null, collapsed: false, items: [] };
+    if (base.seed) {
+      const card = { id: uid("card"), type: base.seed, entity_id: "", name: "",
+        size: (COMPOSITE_META[base.seed] || [])[3] || "lg",
+        appearance: { icon: (COMPOSITE_META[base.seed] || [])[2] || "mdi:shape-outline" },
+        states: {}, actions: {} };
+      if (base.seed === "monitor") Object.assign(card, { grid_entity: null, limit_w: 3300, groups: [], max_per_group: 8 });
+      if (base.seed === "economy") Object.assign(card, { grid_import: null, grid_export: null, solar: null,
+        price_import: 0.25, price_export: 0.10, period: "month" });
+      section.items.push(card);
+      if (base.seed === "monitor") { /* wired by the user in the card editor */ }
+      if (base.seed === "economy") this._detectEconomy(card);
+    }
     this._page().sections.push(section);
     this._selected = { kind: "section", sectionId: section.id };
     this._touch();
@@ -2097,6 +2230,137 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  // ------------------------------------------------- analisi economica ---
+
+  /**
+   * Fetch kWh totals for the configured statistics over the chosen window.
+   *
+   * A statistic's `sum` is a monotonically increasing meter, so the energy in
+   * a window is last minus first — not the sum of the buckets, which would
+   * count the whole meter reading over and over.
+   */
+  _loadEconomy(item) {
+    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
+    const ids = ["grid_import", "grid_export", "solar"].map((k) => item[k]).filter(Boolean);
+    const key = item.id + "|" + period.key + "|" + ids.join(",");
+    this._economy = this._economy || {};
+    if (this._economy[key] && Date.now() - this._economy[key].ts < 300000) return this._economy[key];
+    if (this._economyPending === key) return this._economy[key] || null;
+    if (!ids.length) return null;
+
+    this._economyPending = key;
+    const end = new Date();
+    const start = new Date(end.getTime() - period.days * 86400000);
+    this._hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      statistic_ids: ids,
+      period: period.bucket,
+      types: ["sum"],
+    }).then((res) => {
+      const total = (id) => {
+        const rows = (res && res[id]) || [];
+        const sums = rows.map((r) => r.sum).filter((n) => Number.isFinite(n));
+        if (sums.length < 2) return sums.length === 1 ? 0 : null;
+        return Math.max(0, sums[sums.length - 1] - sums[0]);
+      };
+      this._economy[key] = { ts: Date.now(), period: period.key,
+        imported: item.grid_import ? total(item.grid_import) : null,
+        exported: item.grid_export ? total(item.grid_export) : null,
+        produced: item.solar ? total(item.solar) : null };
+      this._economyPending = null;
+      this._touch(true);
+    }).catch((err) => {
+      this._economy[key] = { ts: Date.now(), error: true,
+        message: (err && err.message) || "statistiche non disponibili" };
+      this._economyPending = null;
+      this._touch(true);
+    });
+    return null;
+  }
+
+  _economyFigures(item, data) {
+    const pIn = Number(item.price_import) || 0;
+    const pOut = Number(item.price_export) || 0;
+    const imported = data.imported || 0;
+    const exported = data.exported || 0;
+    const produced = data.produced || 0;
+    // what the plant kept at home is production minus what went to the grid
+    const selfUsed = Math.max(0, produced - exported);
+    const cost = imported * pIn;
+    const revenue = exported * pOut;
+    // the counterfactual an installer is actually asked about: the same house
+    // consumption billed entirely at the import tariff
+    const withoutPv = (imported + selfUsed) * pIn;
+    const net = cost - revenue;
+    return { imported, exported, produced, selfUsed, cost, revenue, withoutPv, net,
+      saved: withoutPv - net, hasPv: produced > 0 || exported > 0 };
+  }
+
+  _economyBody(item) {
+    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
+    if (!item.grid_import && !item.solar) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:cash-remove"></ha-icon>
+        <span>Collega almeno il contatore di energia prelevata dalla rete (kWh) nell'editor della card.</span></div>`;
+    }
+    const data = this._loadEconomy(item);
+    if (!data) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon>
+        <span>Lettura delle statistiche…</span></div>`;
+    }
+    if (data.error) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
+        <span>${esc(data.message)}. Servono entità con statistiche a lungo termine (state_class: total_increasing).</span></div>`;
+    }
+    const f = this._economyFigures(item, data);
+    const bar = (v, max) => `${max > 0 ? Math.max(2, Math.min(100, (v / max) * 100)) : 0}%`;
+    const maxE = Math.max(f.imported, f.exported, f.selfUsed, 0.001);
+
+    return `<div class="eco">
+        <div class="eco-tabs">${ECONOMY_PERIODS.map((p) =>
+          `<button class="eco-tab ${p.key === period.key ? "on" : ""}" data-eco-period="${p.key}">${esc(p.label)}</button>`).join("")}</div>
+
+        <div class="eco-hero ${f.net < 0 ? "credit" : ""}">
+          <span>SPESA NETTA · ${esc(period.label.toUpperCase())}</span>
+          <strong>${esc(eur(f.net))}<i>€</i></strong>
+          ${f.hasPv ? `<em>senza fotovoltaico: ${esc(eur(f.withoutPv))} €</em>` : ""}
+        </div>
+
+        ${f.hasPv ? `<div class="eco-saved">
+          <ha-icon icon="mdi:piggy-bank-outline"></ha-icon>
+          <div><strong>${esc(eur(f.saved))} €</strong><span>risparmiati grazie all'impianto</span></div>
+        </div>` : ""}
+
+        <div class="eco-rows">
+          <div class="eco-row cost">
+            <span class="eco-k"><ha-icon icon="mdi:transmission-tower-import"></ha-icon> Prelievo</span>
+            <span class="eco-bar"><i style="width:${bar(f.imported, maxE)}"></i></span>
+            <span class="eco-kwh">${esc(f.imported.toFixed(1))} kWh</span>
+            <span class="eco-eur">${esc(eur(f.cost))} €</span>
+          </div>
+          ${f.selfUsed > 0 ? `<div class="eco-row self">
+            <span class="eco-k"><ha-icon icon="mdi:home-lightning-bolt-outline"></ha-icon> Autoconsumo</span>
+            <span class="eco-bar"><i style="width:${bar(f.selfUsed, maxE)}"></i></span>
+            <span class="eco-kwh">${esc(f.selfUsed.toFixed(1))} kWh</span>
+            <span class="eco-eur">+${esc(eur(f.selfUsed * (Number(item.price_import) || 0)))} €</span>
+          </div>` : ""}
+          ${f.exported > 0 ? `<div class="eco-row rev">
+            <span class="eco-k"><ha-icon icon="mdi:transmission-tower-export"></ha-icon> Immissione</span>
+            <span class="eco-bar"><i style="width:${bar(f.exported, maxE)}"></i></span>
+            <span class="eco-kwh">${esc(f.exported.toFixed(1))} kWh</span>
+            <span class="eco-eur">+${esc(eur(f.revenue))} €</span>
+          </div>` : ""}
+        </div>
+
+        <div class="eco-foot">
+          <span>prelievo ${esc(eur(Number(item.price_import) || 0))} €/kWh</span>
+          ${(Number(item.price_export) || 0) > 0 ? `<span>immissione ${esc(eur(Number(item.price_export) || 0))} €/kWh</span>` : ""}
+          ${f.produced > 0 ? `<span>prodotti ${esc(f.produced.toFixed(1))} kWh</span>` : ""}
+        </div>
+      </div>`;
+  }
+
   _cardBody(item, st) {
     const type = item.type || "entity";
     if (type === "energyflow") return this._energyFlowBody(item);
@@ -2106,6 +2370,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "people") return this._peopleBody(item);
     if (type === "monitor") return this._monitorBody(item);
     if (type === "camera") return this._cameraBody(item);
+    if (type === "economy") return this._economyBody(item);
     const attrs = (st && st.attributes) || {};
     const state = st ? st.state : "unavailable";
     const unit = attrs.unit_of_measurement || "";
@@ -2199,7 +2464,7 @@ class CyborgDashboard extends HTMLElement {
           </div>
         </article>`;
     }
-    return `<article class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}${item.type === "weather" && item.entity_id ? " tappable" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+    return `<article data-card-id="${esc(item.id)}" class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}${item.type === "weather" && item.entity_id ? " tappable" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
         ${item.type === "weather" && item.entity_id ? `data-weather-open="${esc(item.entity_id)}" class-hint="clickable"` : ""}
         ${composite || item.type === "weather" ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
   }
@@ -2320,6 +2585,42 @@ class CyborgDashboard extends HTMLElement {
   }
 
   _compositeEditor(card) {
+    if (card.type === "economy") {
+      const energyStats = Object.keys(this._hass.states).filter((id) => {
+        const st = this._hass.states[id];
+        return st.attributes.device_class === "energy"
+          && ["total", "total_increasing"].includes(st.attributes.state_class);
+      });
+      const pick = (key, label, hintRe) => {
+        const ranked = energyStats.slice().sort((a, b) =>
+          (hintRe.test(b) - hintRe.test(a)) || a.localeCompare(b));
+        return `<label>${esc(label)}<select data-prop="${esc(key)}">
+          <option value="">— non collegato —</option>
+          ${ranked.map((id) => `<option value="${esc(id)}" ${card[key] === id ? "selected" : ""}>${
+            esc(this._hass.states[id].attributes.friendly_name || id)}${hintRe.test(id) ? " ·" : ""}</option>`).join("")}
+        </select></label>`;
+      };
+      return `<div class="section">
+        <strong>CONTATORI DI ENERGIA</strong>
+        <span class="hint">Servono entità in <strong>kWh</strong> con statistiche a lungo termine, non sensori di potenza. ${
+          energyStats.length ? `Trovate ${energyStats.length} entità adatte.` : "Nessuna entità di energia trovata."}</span>
+        ${pick("grid_import", "ENERGIA PRELEVATA DALLA RETE", /preliev|import|rete|grid|consum/i)}
+        ${pick("grid_export", "ENERGIA IMMESSA IN RETE", /immess|immiss|export|vendut/i)}
+        ${pick("solar", "ENERGIA PRODOTTA DAL FOTOVOLTAICO", /solar|fotovolt|\bpv\b|produz/i)}
+        <button class="secondary wide" data-eco-detect><ha-icon icon="mdi:auto-fix"></ha-icon> RILEVA DALLA DASHBOARD ENERGIA</button>
+      </div>
+      <div class="section">
+        <strong>TARIFFE</strong>
+        <span class="hint">Il prezzo di prelievo è quello che paghi; quello di immissione è il ritiro dedicato o lo scambio riconosciuto.</span>
+        <div class="two">
+          <label>PRELIEVO €/kWh<input type="number" step="0.001" min="0" data-prop="price_import" value="${card.price_import ?? 0.25}"></label>
+          <label>IMMISSIONE €/kWh<input type="number" step="0.001" min="0" data-prop="price_export" value="${card.price_export ?? 0.1}"></label>
+        </div>
+        <label>PERIODO PREDEFINITO<select data-prop="period">
+          ${ECONOMY_PERIODS.map((p) => `<option value="${p.key}" ${(card.period || "month") === p.key ? "selected" : ""}>${esc(p.label)}</option>`).join("")}
+        </select></label>
+      </div>`;
+    }
     if (card.type === "camera") {
       const all = Object.keys(this._hass.states).filter((id) => id.startsWith("camera."));
       const chosen = Array.isArray(card.cameras) && card.cameras.length ? card.cameras : all;
@@ -2557,6 +2858,35 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  /** Prefill the economy card from the Home Assistant energy configuration. */
+  async _detectEconomy(card) {
+    let prefs;
+    try {
+      prefs = await this._hass.callWS({ type: "energy/get_prefs" });
+    } catch (err) {
+      this._error = "Dashboard Energia non configurata in Home Assistant";
+      this._touch(true);
+      return;
+    }
+    let priceIn = null;
+    for (const src of (prefs.energy_sources || [])) {
+      if (src.type === "grid") {
+        if (!card.grid_import && src.stat_energy_from) card.grid_import = src.stat_energy_from;
+        if (!card.grid_export && src.stat_energy_to) card.grid_export = src.stat_energy_to;
+        // several grid sources can each carry a price; the dearest is the one
+        // that actually hurts, so it is the honest default to show
+        if (typeof src.number_energy_price === "number") {
+          priceIn = priceIn === null ? src.number_energy_price : Math.max(priceIn, src.number_energy_price);
+        }
+      }
+      if (src.type === "solar" && !card.solar && src.stat_energy_from) card.solar = src.stat_energy_from;
+    }
+    if (priceIn !== null) card.price_import = priceIn;
+    this._error = card.grid_import ? "" : "Nessun contatore di rete trovato nella Dashboard Energia";
+    this._economy = {};
+    this._touch();
+  }
+
   _flowEditor(card) {
     if (this._wizard && this._wizard.cardId === card.id) return this._wizardEditor(card);
     const flow = card.flow || {};
@@ -2705,6 +3035,7 @@ class CyborgDashboard extends HTMLElement {
         <label>ICONA${iconField("data-page-prop", "icon", p.icon || "mdi:hexagon-multiple-outline")}</label>
         <label>COLORE TEMA<input type="color" data-theme-prop="accent" value="${esc((this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff")}"></label>
       </div>
+      ${this._pageManager()}
       <div class="section">
         <strong>SEZIONI</strong>
         <span class="hint">Clicca “SEZIONE” su un blocco per configurarlo, oppure aggiungine uno nuovo.</span>
@@ -2814,11 +3145,12 @@ class CyborgDashboard extends HTMLElement {
           </div>
           <div class="tools">
             ${this._saved ? '<span class="status ok"><ha-icon icon="mdi:check"></ha-icon> SALVATO</span>' : ""}
+            ${this._editing && this._dirty && !this._saved ? '<span class="status warn"><ha-icon icon="mdi:content-save-alert-outline"></ha-icon> MODIFICHE NON SALVATE</span>' : ""}
             ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
             ${this._editing ? `${floorplan
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
                  : '<button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>'}
-               <button data-save><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
+               <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
               <ha-icon icon="${this._editing ? "mdi:eye-outline" : "mdi:pencil-outline"}"></ha-icon>
               ${this._editing ? "ESCI" : "MODIFICA"}
@@ -2859,7 +3191,18 @@ class CyborgDashboard extends HTMLElement {
     const section = this._selectedSection();
 
     const btn = q("[data-toggle-edit]");
-    if (btn) btn.onclick = () => { this._editing = !this._editing; this._selected = null; this._touch(); };
+    if (btn) btn.onclick = () => {
+      if (this._editing && this._dirty) {
+        // silently dropping edits is how "it won't let me delete" happens
+        this._save();
+        this._editing = false;
+        this._selected = null;
+        return;
+      }
+      this._editing = !this._editing;
+      this._selected = null;
+      this._touch();
+    };
     const save = q("[data-save]");
     if (save) save.onclick = () => this._save();
     const addSec = q("[data-add-section]");
@@ -2988,6 +3331,20 @@ class CyborgDashboard extends HTMLElement {
       }
       this._bindEntityRows();
     }
+
+    // --- page management
+    all("[data-add-page]").forEach((el) => {
+      el.onclick = () => this._addPage(el.getAttribute("data-add-page"));
+    });
+    all("[data-page-remove]").forEach((el) => {
+      el.onclick = () => this._removePage(parseInt(el.getAttribute("data-page-remove"), 10));
+    });
+    all("[data-page-move]").forEach((el) => {
+      el.onclick = () => {
+        const [i, d] = el.getAttribute("data-page-move").split(":").map(Number);
+        this._movePage(i, d);
+      };
+    });
 
     // --- page tabs
     all("[data-page-tab]").forEach((el) => {
@@ -3135,6 +3492,27 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => this.dispatchEvent(new CustomEvent("hass-more-info", {
         detail: { entityId: el.getAttribute("data-more-info") }, bubbles: true, composed: true }));
     });
+    all("[data-eco-period]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.period = el.getAttribute("data-eco-period");
+        this._touch();
+      };
+    });
+    // live view: the period tabs must work without entering edit mode
+    all("[data-eco-period]").forEach((el) => {
+      if (card) return;
+      el.onclick = () => {
+        const target = el.closest(".item");
+        const id = target && target.getAttribute("data-card-id");
+        for (const sec of this._sections()) {
+          const it = sec.items.find((x) => x.id === id);
+          if (it) { it.period = el.getAttribute("data-eco-period"); this._touch(true); return; }
+        }
+      };
+    });
+    const ecoDetect = q("[data-eco-detect]");
+    if (ecoDetect && card) ecoDetect.onclick = () => this._detectEconomy(card);
     all("[data-camera-pick]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -3771,6 +4149,35 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .wxd-fact ha-icon{--mdc-icon-size:16px;color:var(--accent);opacity:.8;flex-shrink:0}
 .wxd-fact span{flex:1;min-width:0;font-size:11px;opacity:.6}
 .wxd-fact strong{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.eco{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.eco-tabs{display:flex;gap:4px}
+.eco-tab{flex:1;padding:7px 4px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.04em;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.5}
+.eco-tab.on{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.eco-hero{text-align:center;padding:6px 0 2px}
+.eco-hero>span{display:block;font:10px ui-monospace,monospace;letter-spacing:2px;opacity:.45}
+.eco-hero>strong{display:block;margin-top:4px;font:750 40px Inter,system-ui,sans-serif;letter-spacing:-.04em;line-height:1;color:#ffd166}
+.eco-hero.credit>strong{color:#06d6a0}
+.eco-hero>strong i{font-style:normal;font-size:18px;font-weight:600;opacity:.55;margin-left:4px}
+.eco-hero>em{display:block;margin-top:6px;font-style:normal;font-size:11px;opacity:.5}
+.eco-saved{display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:12px;background:rgba(6,214,160,.1);border:1px solid rgba(6,214,160,.28)}
+.eco-saved ha-icon{--mdc-icon-size:22px;color:#06d6a0;flex-shrink:0}
+.eco-saved strong{display:block;font:750 19px Inter,system-ui,sans-serif;color:#06d6a0;line-height:1}
+.eco-saved span{display:block;margin-top:2px;font-size:11px;opacity:.6}
+.eco-rows{display:flex;flex-direction:column;gap:6px}
+.eco-row{display:grid;grid-template-columns:130px 1fr 74px 66px;align-items:center;gap:9px}
+.eco-k{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;opacity:.75}
+.eco-k ha-icon{--mdc-icon-size:15px;flex-shrink:0}
+.eco-bar{height:7px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden}
+.eco-bar i{display:block;height:100%;border-radius:99px;transition:width .4s ease}
+.eco-row.cost .eco-bar i,.eco-row.cost .eco-k ha-icon{background:#ff8fa3;color:#ff8fa3}
+.eco-row.self .eco-bar i,.eco-row.self .eco-k ha-icon{background:#06d6a0;color:#06d6a0}
+.eco-row.rev .eco-bar i,.eco-row.rev .eco-k ha-icon{background:#ffd166;color:#ffd166}
+.eco-kwh{font:11px ui-monospace,monospace;opacity:.5;text-align:right}
+.eco-eur{font:750 13px Inter,system-ui,sans-serif;text-align:right;font-variant-numeric:tabular-nums}
+.eco-row.cost .eco-eur{color:#ff8fa3}
+.eco-row.self .eco-eur,.eco-row.rev .eco-eur{color:#06d6a0}
+.eco-foot{display:flex;flex-wrap:wrap;gap:12px;padding-top:9px;border-top:1px solid color-mix(in srgb,var(--accent) 14%,transparent);font:10px ui-monospace,monospace;letter-spacing:.5px;opacity:.4}
+@media(max-width:560px){.eco-row{grid-template-columns:1fr 62px 60px}.eco-bar{display:none}}
 .mon{margin-top:12px;display:flex;flex-direction:column;gap:12px}
 .mg{display:flex;flex-direction:column;align-items:center;gap:2px}
 .mg-svg{width:100%;max-width:280px;height:auto;display:block}
@@ -3909,6 +4316,16 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .flow-slot .check{margin-top:8px;font-size:10.5px}
 .flow-slot input[type=text]{margin-top:8px}
 
+.status.warn{color:#ffd166;background:rgba(255,209,102,.13)}
+button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
+@keyframes saveNudge{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 45%,transparent)}50%{box-shadow:0 0 0 6px transparent}}
+.page-list{display:flex;flex-direction:column;gap:4px;margin-top:9px}
+.page-row{display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid transparent}
+.page-row.current{border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.page-row>ha-icon{--mdc-icon-size:17px;color:var(--accent);flex-shrink:0}
+.page-row>div{flex:1;min-width:0}
+.page-row strong{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page-row small{display:block;font:10px ui-monospace,monospace;opacity:.45}
 .page-tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:20px}
 .page-tab{padding:9px 14px;border-radius:11px;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.55;font-size:11px}
 .page-tab ha-icon{--mdc-icon-size:16px}
@@ -3971,4 +4388,40 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 
 if (!customElements.get("cyborg-dashboard")) {
   customElements.define("cyborg-dashboard", CyborgDashboard);
+}
+
+/**
+ * The very same component, also published as a Lovelace card.
+ *
+ * A custom panel and a Lovelace dashboard are different objects in Home
+ * Assistant, and only a Lovelace dashboard can be chosen as the default
+ * dashboard. Registering the component as a card lets the user create a normal
+ * Lovelace dashboard containing this one card in panel mode and set *that* as
+ * default — without maintaining a second implementation.
+ */
+class CyborgDashboardCard extends CyborgDashboard {
+  setConfig(config) {
+    this._cardConfig = config || {};
+    if (Number.isInteger(this._cardConfig.page)) this._pageIndex = this._cardConfig.page;
+  }
+  getCardSize() { return 12; }
+  static getStubConfig() { return { type: "custom:cyborg-dashboard-card" }; }
+}
+
+if (!customElements.get("cyborg-dashboard-card")) {
+  customElements.define("cyborg-dashboard-card", CyborgDashboardCard);
+}
+
+// The card picker registry only exists in a browser; guard it so the module
+// can also be loaded by the test harness.
+if (typeof window !== "undefined") {
+  window.customCards = window.customCards || [];
+  if (!window.customCards.some((c) => c.type === "cyborg-dashboard-card")) {
+    window.customCards.push({
+      type: "cyborg-dashboard-card",
+      name: "Cyborg Dashboard",
+      description: "La dashboard Cyborg completa dentro una dashboard Lovelace, così può essere impostata come predefinita.",
+      preview: false,
+    });
+  }
 }

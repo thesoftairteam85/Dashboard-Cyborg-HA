@@ -163,6 +163,17 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
     if result.get("type") == "notifications":
         result["show_updates"] = bool(result.get("show_updates", True))
+    if result.get("type") == "economy":
+        for key in ("grid_import", "grid_export", "solar"):
+            value = result.get(key)
+            result[key] = value if isinstance(value, str) and value else None
+        for key, default in (("price_import", 0.25), ("price_export", 0.10)):
+            try:
+                result[key] = max(0.0, round(float(result.get(key, default)), 4))
+            except (TypeError, ValueError):
+                result[key] = default
+        period = result.get("period")
+        result["period"] = period if period in ("today", "week", "month", "year") else "month"
     if result.get("type") == "camera":
         cams = result.get("cameras")
         result["cameras"] = [c for c in cams if isinstance(c, str) and c] if isinstance(cams, list) else []
@@ -318,4 +329,19 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
             for i, pg in enumerate(x for x in pages if isinstance(x, dict))
         ]
         result["pages"] = normalized or default_dashboard()["pages"]
+
+    # A dashboard saved before the 3D map existed keeps only the pages it was
+    # stored with: ``result.update(data)`` replaces the whole page list, so
+    # every page added to the defaults since then never reaches an existing
+    # install. Appending the missing map page is additive, touches nothing the
+    # user configured, and without it the feature stays unreachable.
+    if not any(p.get("type") == "floorplan" for p in result["pages"]):
+        result["pages"].append(normalize_page({
+            "id": "map",
+            "type": "floorplan",
+            "title": "Mappa 3D",
+            "icon": "mdi:floor-plan",
+            "view": dict(DEFAULT_VIEW),
+            "rooms": [],
+        }, len(result["pages"])))
     return result

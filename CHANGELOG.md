@@ -4,6 +4,62 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.14.0] - 2026-08-22
+
+Gestione delle pagine, dashboard impostabile come predefinita, analisi
+economica dell'energia.
+
+### Correzioni strutturali
+- **Non esisteva alcun modo di aggiungere una pagina.** Le pagine venivano
+  soltanto da `default_dashboard()`, che si applica a un'installazione nuova e
+  a nient'altro: `result.update(data)` sostituisce l'intera lista con quella
+  salvata. Ogni pagina aggiunta ai valori predefiniti dopo la prima
+  installazione non è mai arrivata a chi aveva già una dashboard — ecco perché
+  **la Mappa 3D non compariva**. Ora l'editor di pagina permette di
+  aggiungere, rinominare, riordinare ed eliminare pagine, e la migrazione
+  aggiunge la pagina Mappa 3D quando manca, senza toccare nulla di
+  configurato.
+- **"Non mi fa eliminare le card".** L'eliminazione funzionava, ma senza
+  salvare tornava tutto com'era e non c'era alcuna indicazione di modifiche in
+  sospeso. Ora ogni mutazione marca la configurazione come modificata, la
+  testata mostra **MODIFICHE NON SALVATE**, il pulsante SALVA si evidenzia, e
+  uscire dalla modalità modifica salva invece di buttare via le modifiche.
+
+### Novità: la dashboard può essere la plancia predefinita
+- **Lo stesso componente è ora anche una card Lovelace** (`cyborg-dashboard-card`).
+  Un pannello personalizzato e una dashboard Lovelace sono oggetti diversi in
+  Home Assistant, e solo una dashboard Lovelace può essere scelta come
+  predefinita. Creando una normale dashboard Lovelace con dentro questa sola
+  card in modalità Pannello, **quella** si imposta come predefinita.
+- Il modulo viene pubblicato su tutte le pagine del frontend con
+  `frontend.add_extra_js_url` (verificato in core 2026.8.3): la card è
+  disponibile subito, senza aggiungere risorse a mano.
+
+### Novità: analisi economica
+- **Spesa netta del periodo** (oggi / 7 giorni / 30 giorni / 12 mesi) con il
+  confronto che conta davvero per un impianto fotovoltaico: **quanto avresti
+  speso senza**, e quindi quanto hai risparmiato.
+- Ripartizione fra prelievo (costo), autoconsumo (costo evitato) e immissione
+  (ricavo), con tariffe configurabili.
+- I kWh vengono dalle **statistiche a lungo termine**
+  (`recorder/statistics_during_period`, verificato in core 2026.8.3), non
+  dagli stati istantanei: una potenza non dice quanto è costato un periodo.
+  L'energia di una finestra è ultimo meno primo valore del contatore, non la
+  somma dei campioni — sommarli conterebbe la lettura del contatore infinite
+  volte.
+- **Rilevamento dalla Dashboard Energia**, tariffa inclusa: fra più contratti
+  di rete viene proposto il prezzo più alto, perché è quello che pesa.
+- Nuove sezioni pronte all'uso: **Monitoraggio** ed **Economia**, che si
+  aggiungono con la card già dentro.
+
+### Verifica
+- `tests/frontend.test.js`: 326 asserzioni (32 nuove su gestione pagine, stato
+  di modifica e analisi economica, inclusa la verifica che un ridisegno di
+  sfondo non finga modifiche dell'utente).
+- `tests/schema.test.py`: la migrazione aggiunge la mappa a una dashboard
+  esistente lasciando intatti contenuti e numero di revisione, e non ne
+  aggiunge una seconda.
+
 ## [0.13.0] - 2026-08-22
 
 Videocamere in diretta e dettaglio meteo.

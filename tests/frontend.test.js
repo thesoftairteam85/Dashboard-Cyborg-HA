@@ -789,6 +789,85 @@ el._subscribe("k", { type: "x" }, () => {});
 ok("sottoscrizione aperta una sola volta", opened === 1, String(opened));
 setTimeout(() => {}, 0);
 
+console.log("\n== 14. PAGINE E ANALISI ECONOMICA ==");
+el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }] };
+el._pageIndex = 0; el._editing = true; el._selected = null; el._dirty = false; el._overlay = null;
+
+el.render();
+ok("l'editor pagina offre la gestione pagine", el.innerHTML.includes("data-add-page"));
+ok("propone la Mappa 3D quando manca", el.innerHTML.includes('data-add-page="floorplan"'));
+el._addPage("floorplan");
+ok("pagina mappa aggiunta", el._dashboard.pages.length === 2 && el._dashboard.pages[1].type === "floorplan");
+ok("si passa subito alla nuova pagina", el._pageIndex === 1 && el._isFloorplan());
+ok("aggiungere una pagina marca le modifiche", el._dirty === true);
+el._pageIndex = 0; el.render();
+ok("non ripropone la mappa se c'e' gia'", !el.innerHTML.includes('data-add-page="floorplan"'));
+
+el._addPage("sections");
+ok("pagina vuota aggiunta", el._dashboard.pages.length === 3);
+el._movePage(2, -1);
+ok("riordino pagine", el._dashboard.pages[1].type === "sections" && el._dashboard.pages[2].type === "floorplan");
+el._removePage(2);
+ok("eliminazione pagina", el._dashboard.pages.length === 2 && !el._dashboard.pages.some(p => p.type === "floorplan"));
+el._dashboard.pages = [el._dashboard.pages[0]];
+el._pageIndex = 0;
+el._removePage(0);
+ok("non si puo' restare senza pagine", el._dashboard.pages.length === 1 && el._error.includes("almeno una"));
+el._error = "";
+
+// dirty state: the reason "non mi fa eliminare" looked like a bug
+el._dirty = false;
+el._dashboard.pages[0].sections = [{ id: "s", title: "T", icon: "mdi:x", accent: null, collapsed: false,
+  items: [{ id: "i1", type: "entity", entity_id: "light.soggiorno", appearance: {}, states: {}, actions: {} }] }];
+el._removeCard("s", "i1");
+ok("eliminare una card la rimuove davvero", el._section("s").items.length === 0);
+ok("eliminare marca le modifiche non salvate", el._dirty === true);
+el.render();
+ok("l'avviso 'non salvate' e' visibile", el.innerHTML.includes("MODIFICHE NON SALVATE"));
+// _touch(true) is how background refreshes repaint without claiming the user
+// changed something; getting this wrong would show "non salvate" forever
+el._dirty = false;
+el._touch(true);
+ok("un ridisegno di sfondo non finge modifiche", el._dirty === false);
+el._touch();
+ok("una mutazione marca le modifiche", el._dirty === true);
+
+// economy
+const ecoCard = { id: "eco", type: "economy", entity_id: "", appearance: {}, states: {}, actions: {},
+  grid_import: "sensor.imp", grid_export: "sensor.exp", solar: "sensor.pvkwh",
+  price_import: 0.25, price_export: 0.10, period: "month" };
+const ecoSec = { id: "es", title: "Economia", icon: "mdi:cash", accent: "#ffd166", items: [ecoCard] };
+const fig = el._economyFigures(ecoCard, { imported: 100, exported: 40, produced: 150 });
+ok("autoconsumo = produzione - immissione", fig.selfUsed === 110, String(fig.selfUsed));
+ok("costo = prelievo x tariffa", fig.cost === 25, String(fig.cost));
+ok("ricavo = immissione x tariffa", Math.abs(fig.revenue - 4) < 1e-9, String(fig.revenue));
+ok("netto = costo - ricavo", Math.abs(fig.net - 21) < 1e-9, String(fig.net));
+ok("senza fotovoltaico = (prelievo + autoconsumo) x tariffa", Math.abs(fig.withoutPv - 52.5) < 1e-9, String(fig.withoutPv));
+ok("risparmio = senza PV - netto", Math.abs(fig.saved - 31.5) < 1e-9, String(fig.saved));
+const noPv = el._economyFigures(ecoCard, { imported: 100, exported: 0, produced: 0 });
+ok("senza impianto nessun risparmio dichiarato", noPv.hasPv === false && noPv.saved === 0);
+ok("prezzi a zero non rompono il calcolo", el._economyFigures({}, { imported: 10, exported: 1, produced: 5 }).net === 0);
+
+el._economy = { }; el._economyPending = null;
+el._hass.callWS = async () => ({});
+const ecoEmpty = el._renderCard({ id: "e2", type: "economy", entity_id: "", appearance: {}, states: {}, actions: {} }, ecoSec);
+ok("senza contatori spiega cosa collegare", ecoEmpty.includes("prelevata dalla rete"));
+
+el._economy = { [ecoCard.id + "|month|sensor.imp,sensor.exp,sensor.pvkwh"]:
+  { ts: Date.now(), imported: 100, exported: 40, produced: 150 } };
+const ecoHtml = el._renderCard(ecoCard, ecoSec);
+ok("mostra la spesa netta", ecoHtml.includes("SPESA NETTA") && ecoHtml.includes("21,00"));
+ok("mostra il confronto senza fotovoltaico", ecoHtml.includes("senza fotovoltaico") && ecoHtml.includes("52,50"));
+ok("mostra il risparmio", ecoHtml.includes("31,50") && ecoHtml.includes("risparmiati"));
+ok("mostra le tre voci", ecoHtml.includes("Prelievo") && ecoHtml.includes("Autoconsumo") && ecoHtml.includes("Immissione"));
+ok("selettore di periodo", (ecoHtml.match(/data-eco-period=/g) || []).length === 4);
+ok("economia: nessun undefined", !/>undefined</.test(ecoHtml) && !ecoHtml.includes("[object"));
+ok("economia: div bilanciati", (ecoHtml.match(/<div/g) || []).length === (ecoHtml.match(/<\/div>/g) || []).length);
+ok("valuta in formato italiano", ecoHtml.includes(",") && !ecoHtml.includes("21.00"));
+
+el._editing = false; el._selected = null; el._dirty = false;
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);
