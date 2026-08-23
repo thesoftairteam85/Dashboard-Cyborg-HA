@@ -358,6 +358,39 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         if isinstance(flow, dict):
             # Declared vehicles join the load sub-tree unless switched off.
             flow["show_vehicles"] = bool(flow.get("show_vehicles", True))
+    if result.get("type") == "comfort":
+        rows: list[dict[str, Any]] = []
+        raw = result.get("rooms")
+        if isinstance(raw, list):
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                temperature = row.get("temperature")
+                if not isinstance(temperature, str) or "." not in temperature:
+                    continue
+                humidity = row.get("humidity")
+                rows.append({
+                    "temperature": temperature,
+                    "humidity": humidity if isinstance(humidity, str) and "." in humidity else None,
+                    "name": str(row.get("name") or "")[:60],
+                    "icon": str(row.get("icon") or "")[:64],
+                })
+                if len(rows) >= 30:
+                    break
+        result["rooms"] = rows
+        bands = result.get("bands")
+        clean_bands: dict[str, float] = {}
+        if isinstance(bands, dict):
+            for key in ("cold", "warm", "dry", "humid"):
+                if key not in bands or bands[key] in (None, ""):
+                    continue
+                try:
+                    clean_bands[key] = float(bands[key])
+                except (TypeError, ValueError):
+                    continue
+        result["bands"] = clean_bands
+        room_filter = result.get("filter")
+        result["filter"] = room_filter if isinstance(room_filter, str) else ""
     if result.get("type") == "ev":
         # Which of the declared vehicles this card shows. Empty means all of
         # them, so a second car appears without editing the card.

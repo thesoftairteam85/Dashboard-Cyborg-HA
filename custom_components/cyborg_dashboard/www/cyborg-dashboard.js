@@ -813,6 +813,7 @@ const CARD_TYPES = [
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
+  { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
   { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
   { k: "room", l: "Stanza", solo: true, d: "Una stanza intera in una card: luci, clima, aperture e sensori dell'area, con i comandi." },
   { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
@@ -930,6 +931,58 @@ const WHITE_PRESETS = [
   { k: 2200, l: "Candela" }, { k: 2700, l: "Caldo" }, { k: 3000, l: "Relax" },
   { k: 4000, l: "Neutro" }, { k: 5000, l: "Lavoro" }, { k: 6500, l: "Freddo" },
 ];
+
+/* ==========================================================================
+ * COMFORT
+ *
+ * Not "is it 24.6 degrees" but "is this room comfortable" — the number alone
+ * makes the reader do the judging every time, in every room. The bands below
+ * are the ones building services use for a dwelling; they are defaults and the
+ * card lets them be changed, because a bedroom, a wine cellar and a west-facing
+ * balcony do not share an opinion about what is warm.
+ * ======================================================================== */
+
+const COMFORT_DEFAULTS = { cold: 18, warm: 26, dry: 30, humid: 60 };
+
+function comfortBands(item) {
+  const over = (item && item.bands) || {};
+  const out = {};
+  for (const k of Object.keys(COMFORT_DEFAULTS)) {
+    const n = Number(over[k]);
+    out[k] = Number.isFinite(n) ? n : COMFORT_DEFAULTS[k];
+  }
+  return out;
+}
+
+/** Verdict for one room: the word, its colour, and why. */
+function comfortVerdict(temp, hum, bands) {
+  if (temp === null || temp === undefined || !Number.isFinite(temp)) {
+    return { k: "na", l: "N/D", color: "#8d99ae" };
+  }
+  if (temp < bands.cold) return { k: "cold", l: "FREDDO", color: "#4cc9f0" };
+  if (temp > bands.warm) return { k: "hot", l: "CALDO", color: "#ff3d71" };
+  // Temperature is in range; humidity decides between comfortable and merely
+  // tolerable. A 22-degree room at 75% humidity is not comfortable.
+  if (Number.isFinite(hum)) {
+    if (hum < bands.dry) return { k: "dry", l: "SECCO", color: "#ffd166" };
+    if (hum > bands.humid) return { k: "humid", l: "UMIDO", color: "#8ecae6" };
+  }
+  return { k: "ok", l: "COMFORT", color: "#06d6a0" };
+}
+
+/**
+ * Where a temperature sits on a fixed scale, as a percentage.
+ *
+ * Fixed on purpose: 12 to 34 degrees, the same for every room. A per-room
+ * scale would put a cellar at 14 and a balcony at 33 in the same place on
+ * their strips, which is precisely the comparison the card exists to make.
+ */
+const COMFORT_SCALE_MIN = 12, COMFORT_SCALE_MAX = 34;
+function comfortPosition(temp) {
+  if (!Number.isFinite(temp)) return null;
+  const t = Math.max(COMFORT_SCALE_MIN, Math.min(COMFORT_SCALE_MAX, temp));
+  return ((t - COMFORT_SCALE_MIN) / (COMFORT_SCALE_MAX - COMFORT_SCALE_MIN)) * 100;
+}
 
 /* ==========================================================================
  * AUTO ELETTRICA
@@ -1077,9 +1130,10 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev"]);
+  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev", "comfort"]);
 
 const COMPOSITE_META = {
+  comfort:       ["Temperature", "Sensori stanza per stanza", "mdi:home-thermometer", "xl"],
   ev:            ["Auto elettrica", "Ricarica e stato batteria", "mdi:car-electric", "lg"],
   room:          ["Stanza", "Dispositivi della stanza", "mdi:home-floor-g", "md"],
   trend:         ["Confronto andamenti", "Storico a confronto", "mdi:chart-multiple", "lg"],
@@ -1424,6 +1478,15 @@ class CyborgDashboard extends HTMLElement {
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
         }
+        if (it.type === "comfort") {
+          parts.push("cf:" + (it.filter || ""));
+          for (const r of this._comfortRooms(it)) {
+            for (const id of [r.temperature, r.humidity]) {
+              const cs = id && this._hass.states[id];
+              if (cs) parts.push(id + "=" + cs.state);
+            }
+          }
+        }
         if (it.type === "ev") {
           for (const v of this._vehiclesFor(it.vehicles)) {
             for (const key of ["battery", "charging", "power", "range", "target", "plugged", "switch", "current"]) {
@@ -1596,6 +1659,44 @@ class CyborgDashboard extends HTMLElement {
     this._pageIndex = Math.max(0, Math.min(this._dashboard.pages.length - 1, destIndex));
     this._selected = { kind: "section", sectionId: section.id };
     this._fitKey = null;
+    this._touch();
+  }
+
+  /**
+   * The Temperature section in one click: the room-by-room comfort card and,
+   * under it, every room temperature on one chart.
+   *
+   * The chart is filled from the same discovery the comfort card uses, so the
+   * two always describe the same rooms — building the list twice is how they
+   * end up disagreeing.
+   */
+  async _addComfortSection() {
+    if (!this._registry) await this._loadRegistry();
+    const existing = this._sections().find((sec) =>
+      (sec.items || []).some((it) => it.type === "comfort"));
+    if (existing) {
+      this._selected = { kind: "section", sectionId: existing.id };
+      this._error = "La sezione Temperature esiste già";
+      this._touch(true);
+      return;
+    }
+    const rooms = this._comfortRooms({});
+    const series = rooms.slice(0, 8).map((r, i) => ({
+      entity: r.temperature, name: r.name,
+      color: SERIES_COLORS[i % SERIES_COLORS.length],
+    }));
+    const section = { id: uid("sec"), title: "Temperature", icon: "mdi:home-thermometer",
+      accent: "#4cc9f0", collapsed: false, items: [
+        { id: uid("card"), type: "comfort", entity_id: "", name: "", size: "xl",
+          appearance: { icon: "mdi:home-thermometer" }, states: {}, actions: {},
+          rooms: [], bands: {}, filter: "" },
+        { id: uid("card"), type: "trend", entity_id: "", name: "Andamento", size: "xl",
+          appearance: { icon: "mdi:chart-multiple" }, states: {}, actions: {},
+          series, hours: 24, y_min: null, y_max: null },
+      ] };
+    this._page().sections.push(section);
+    this._selected = { kind: "section", sectionId: section.id };
+    this._error = series.length ? "" : "Nessun sensore di temperatura assegnato a un'area";
     this._touch();
   }
 
@@ -2260,7 +2361,11 @@ class CyborgDashboard extends HTMLElement {
     // on top of the geometry they move, so the room being edited shows its
     // name and nothing else until it is deselected.
     const editable = this._editing && selected && !ghost;
-    const badgeLayer = badges && !editable ? `<div class="fp-badges">${badges}</div>` : "";
+    // While editing, no room shows its status badges. The strip is wider than
+    // the room and floats above the plan, so it lands on top of the rooms
+    // next door and eats the clicks meant for them — which is why some rooms
+    // simply could not be selected. Editing is about geometry, not readings.
+    const badgeLayer = badges && !this._editing ? `<div class="fp-badges">${badges}</div>` : "";
     const tag = (label || badgeLayer) && !dim && !focused ? `
       <div class="fp-anchor" style="left:${(cx * 100).toFixed(3)}%;top:${(cy * 100).toFixed(3)}%;transform:translateZ(${wallH + 14}px) rotateZ(calc(var(--yaw) * -1)) rotateX(calc(var(--pitch) * -1))">
         <div class="fp-tag">${label}${badgeLayer}</div>
@@ -2785,6 +2890,30 @@ class CyborgDashboard extends HTMLElement {
     this._save();
   }
 
+  /**
+   * The list of every room, always reachable.
+   *
+   * It appears in the page editor *and* in the room editor. Selecting a room
+   * switches the panel to that room's editor, and when the list only lived in
+   * the page editor it vanished at exactly that moment — so you could reach
+   * one room and then had to go hunting on the canvas for the next. On a plan
+   * where rooms overlap that hunt is what "non mi fa cliccare su balcone" was.
+   */
+  _roomSwitcher() {
+    const rooms = this._rooms();
+    if (!rooms.length) return '<div class="entity-result-empty">Nessuna stanza.</div>';
+    return `<div class="room-list" data-keep-scroll="room-list">${rooms.map((r) => {
+      const sel = this._selected && this._selected.kind === "room" && this._selected.roomId === r.id;
+      return `<button class="room-list-row ${sel ? "on" : ""}" data-pick-room="${esc(r.id)}" style="--rc:${esc(r.color)}">
+        <ha-icon icon="${esc(r.icon)}"></ha-icon>
+        <div class="rl-txt"><strong>${esc(r.title)}</strong>
+          <small>${esc(levelName(r.level || 0))} · ${Math.round(r.w)}×${Math.round(r.h)}${
+            Number(r.rotation) ? " · " + Math.round(r.rotation) + "°" : ""}</small></div>
+        <i class="rl-dot"></i>
+      </button>`;
+    }).join("")}</div>`;
+  }
+
   _renderRoomEditor(room) {
     const areas = (this._registry && this._registry.areas) || [];
     const derived = this._roomEntities(room);
@@ -2800,6 +2929,10 @@ class CyborgDashboard extends HTMLElement {
     const placed = Object.keys(room.spots || {}).length;
     return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("STANZA", room.title)}
+      <div class="section">
+        <strong>CAMBIA STANZA</strong>
+        ${this._roomSwitcher()}
+      </div>
       <div class="section">
         <label>NOME<input data-room-prop="title" value="${esc(room.title)}"></label>
         <label>AREA HOME ASSISTANT<select data-room-prop="area_id">
@@ -2973,6 +3106,11 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint">${this._rooms().length} stanze sulla pianta · ${areas.length} aree disponibili in Home Assistant.</span>
         <button class="secondary wide" data-add-room><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI STANZA</button>
         <button class="secondary wide danger-outline" data-auto-rooms><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DALLE AREE</button>
+      </div>
+      <div class="section">
+        <strong>STANZE</strong>
+        <span class="hint">Ogni stanza è raggiungibile da qui, anche quando sulla pianta ne sta sopra un'altra. Toccane una per selezionarla e modificarla.</span>
+        ${this._roomSwitcher()}
       </div>
       <div class="section">
         <strong>PIANI</strong>
@@ -3684,6 +3822,102 @@ class CyborgDashboard extends HTMLElement {
       });
   }
 
+  // ---------------------------------------------------------- comfort ---
+
+  /**
+   * Rooms with a temperature sensor, discovered from the area registry.
+   *
+   * Explicit rows win when present; otherwise every area that has a
+   * temperature sensor becomes a row, and a humidity sensor in the same area
+   * is paired with it. Discovery rather than configuration, because the areas
+   * are already maintained in Home Assistant and re-declaring them here would
+   * be a second list to keep in sync.
+   */
+  _comfortRooms(item) {
+    const explicit = Array.isArray(item.rooms) ? item.rooms.filter((r) => r && r.temperature) : [];
+    if (explicit.length) {
+      return explicit.map((r) => ({
+        key: r.temperature,
+        name: r.name || (this._hass.states[r.temperature]
+          && this._hass.states[r.temperature].attributes.friendly_name) || r.temperature,
+        icon: r.icon || "mdi:home-thermometer",
+        temperature: r.temperature, humidity: r.humidity || null,
+      }));
+    }
+    if (!this._registry) return [];
+    const rows = [];
+    for (const area of this._registry.areas) {
+      const pool = this._registry.byArea[area.area_id] || [];
+      const cat = this._registry.category || {};
+      const find = (dc) => pool.find((id) => {
+        const st = this._hass.states[id];
+        return st && !cat[id] && st.attributes.device_class === dc
+          && Number.isFinite(parseFloat(st.state));
+      });
+      const temperature = find("temperature");
+      if (!temperature) continue;
+      rows.push({ key: area.area_id, name: area.name || area.area_id,
+        icon: area.icon || roomIconFor(area.name || area.area_id),
+        temperature, humidity: find("humidity") || null });
+    }
+    return rows;
+  }
+
+  _comfortBody(item) {
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+    const rooms = this._comfortRooms(item);
+    if (!rooms.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:home-thermometer-outline"></ha-icon>
+        <span>${this._registry
+          ? "Nessuna area con un sensore di temperatura. Assegna i sensori alle aree in Home Assistant, oppure scegli le stanze a mano nell'editor."
+          : "Lettura del registro aree…"}</span></div>`;
+    }
+    const bands = comfortBands(item);
+    const filter = item.filter || "";
+    const shown = filter ? rooms.filter((r) => r.key === filter) : rooms;
+
+    const num = (id) => {
+      const st = id && this._hass.states[id];
+      if (!st) return null;
+      const n = parseFloat(st.state);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const chips = `<div class="cf-chips">
+        <button class="cf-chip ${filter ? "" : "on"}" data-comfort-filter="">
+          <ha-icon icon="mdi:home"></ha-icon>TUTTE<em>${rooms.length}</em></button>
+        ${rooms.map((r) => `<button class="cf-chip ${filter === r.key ? "on" : ""}" data-comfort-filter="${esc(r.key)}">
+          <ha-icon icon="${esc(r.icon)}"></ha-icon>${esc(r.name)}</button>`).join("")}
+      </div>`;
+
+    const cards = shown.map((r) => {
+      const t = num(r.temperature), h = num(r.humidity);
+      const v = comfortVerdict(t, h, bands);
+      const pos = comfortPosition(t);
+      return `<article class="cf-room" style="--cc:${esc(v.color)}">
+        <header>
+          <span class="cf-ico"><ha-icon icon="${esc(r.icon)}"></ha-icon></span>
+          <strong>${esc(r.name)}</strong>
+          <em class="cf-badge">${esc(v.l)}</em>
+        </header>
+        <div class="cf-vals">
+          <button class="cf-t" ${r.temperature ? `data-more-info="${esc(r.temperature)}"` : ""}>
+            <small>TEMPERATURA</small>
+            <b>${t === null ? "—" : t.toFixed(1)}<i>°</i></b>
+          </button>
+          <button class="cf-h" ${r.humidity ? `data-more-info="${esc(r.humidity)}"` : ""}>
+            <small><ha-icon icon="mdi:water"></ha-icon> UMIDITÀ</small>
+            <b>${h === null ? "—" : Math.round(h)}<i>%</i></b>
+            <span class="cf-hbar"><i style="width:${h === null ? 0 : Math.max(0, Math.min(100, h))}%"></i></span>
+          </button>
+        </div>
+        <div class="cf-scale">${pos === null ? "" : `<i style="left:${pos.toFixed(1)}%"></i>`}</div>
+      </article>`;
+    }).join("");
+
+    return `<div class="cf">${chips}<div class="cf-grid">${cards}</div></div>`;
+  }
+
   // --------------------------------------------------- auto elettrica ---
 
   /** Vehicles declared on this dashboard. */
@@ -4122,7 +4356,16 @@ class CyborgDashboard extends HTMLElement {
 
   // ------------------------------------------------------------- luci ---
 
-  /** Which lights the card shows: an explicit list, or every light there is. */
+  /**
+   * What the Luci card shows.
+   *
+   * Not only the `light` domain. Plenty of real lighting is wired through a
+   * relay or a smart plug and lands in Home Assistant as a `switch`: for the
+   * person standing in the room that is a light, and refusing to list it
+   * because of its domain is the dashboard being pedantic about someone else's
+   * wiring. An explicit list therefore accepts any entity; the automatic list
+   * stays with the light domain, which is the only safe guess.
+   */
   _lightEntities(item) {
     const ids = Array.isArray(item.lights) && item.lights.length
       ? item.lights.filter((id) => this._hass.states[id])
@@ -4159,8 +4402,15 @@ class CyborgDashboard extends HTMLElement {
   _lightRow(id, item) {
     const st = this._hass.states[id];
     if (!st) return "";
-    const on = st.state === "on";
-    const caps = lightCaps(st);
+    const domain = domainOf(id);
+    const isLight = domain === "light";
+    const on = ON_STATES.has(st.state);
+    // A relay has no brightness, no colour and no effects. lightCaps reads
+    // supported_color_modes, which a switch does not have, so it degrades to
+    // "nothing supported" on its own — but the row must still call the right
+    // service to turn it on.
+    const caps = isLight ? lightCaps(st)
+      : { dimmable: false, color: false, temp: false, effects: false, minK: 2000, maxK: 6500 };
     const pct = brightnessPct(st);
     const hex = lightHex(st);
     const kelvin = Number(st.attributes.color_temp_kelvin) || null;
@@ -4169,11 +4419,11 @@ class CyborgDashboard extends HTMLElement {
     const swatch = on ? (hex || (kelvin ? kelvinToHex(kelvin) : "#ffd166")) : "";
     const hasPanel = caps.dimmable || caps.color || caps.temp || caps.effects;
 
-    const sub = !on ? "spenta"
+    const sub = !on ? (isLight ? "spenta" : "spento")
       : [pct !== null ? pct + "%" : null,
          kelvin ? kelvin + "K" : null,
          st.attributes.effect && st.attributes.effect !== "None" ? st.attributes.effect : null]
-        .filter(Boolean).join(" · ") || "accesa";
+        .filter(Boolean).join(" · ") || (isLight ? "accesa" : "acceso");
 
     return `<div class="li-item${on ? " on" : ""}${open ? " open" : ""}" ${swatch ? `style="--lc:${esc(swatch)}"` : ""}>
       <div class="li-row">
@@ -4236,7 +4486,7 @@ class CyborgDashboard extends HTMLElement {
         <span>Nessuna luce trovata in Home Assistant. Quando ne aggiungerai — comprese quelle RGB — compariranno qui con i loro comandi.</span></div>`;
     }
     const onCount = groups.reduce((n, g) =>
-      n + g.ids.filter((id) => this._hass.states[id].state === "on").length, 0);
+      n + g.ids.filter((id) => ON_STATES.has(this._hass.states[id].state)).length, 0);
 
     return `<div class="li">
       <div class="li-head">
@@ -4248,7 +4498,7 @@ class CyborgDashboard extends HTMLElement {
       </div>
       ${groups.map((g) => `<section class="li-group">
         ${g.area ? `<header><ha-icon icon="mdi:door-open"></ha-icon><strong>${esc(g.area)}</strong>
-          <em>${g.ids.filter((id) => this._hass.states[id].state === "on").length}/${g.ids.length}</em>
+          <em>${g.ids.filter((id) => ON_STATES.has(this._hass.states[id].state)).length}/${g.ids.length}</em>
           <button class="act-off" data-lights-area="${esc(g.area)}" title="Spegni le luci di questa stanza"><ha-icon icon="mdi:power"></ha-icon></button>
         </header>` : ""}
         ${g.ids.map((id) => this._lightRow(id, item)).join("")}
@@ -5009,6 +5259,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "monitor") return this._monitorBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
+    if (type === "comfort") return this._comfortBody(item);
     if (type === "ev") return this._evBody(item);
     if (type === "room") return this._roomCardBody(item);
     if (type === "trend") return this._trendBody(item);
@@ -5401,6 +5652,34 @@ class CyborgDashboard extends HTMLElement {
         <button class="secondary wide" data-notif-clear><ha-icon icon="mdi:notification-clear-all"></ha-icon> SVUOTA L'ARCHIVIO AVVISI</button>
       </div>`;
     }
+    if (card.type === "comfort") {
+      const bands = comfortBands(card);
+      const rooms = this._comfortRooms(card);
+      return `<div class="section">
+        <strong>STANZE</strong>
+        <span class="hint">${rooms.length
+          ? `${rooms.length} stanze rilevate dalle aree di Home Assistant: ogni area con un sensore di temperatura diventa una riga, e l'umidità della stessa area le viene abbinata. Un sensore spostato di area si sposta anche qui, da solo.`
+          : "Nessuna area con un sensore di temperatura. Assegna i sensori alle aree in Home Assistant."}</span>
+        ${rooms.map((r) => `<div class="eco-dev-edit">
+          <ha-icon icon="${esc(r.icon)}"></ha-icon>
+          <div class="ede-txt"><strong>${esc(r.name)}</strong>
+            <small>${esc(r.temperature)}${r.humidity ? " · " + esc(r.humidity) : " · senza umidità"}</small></div>
+        </div>`).join("")}
+      </div>
+      <div class="section">
+        <strong>SOGLIE DI COMFORT</strong>
+        <span class="hint">Sotto la prima è freddo, sopra la seconda è caldo. Con la temperatura in range, l'umidità decide fra comfort, secco e umido: una stanza a 22° col 75% di umidità comoda non è.</span>
+        <div class="two">
+          <label>FREDDO SOTTO °C<input type="number" step="0.5" data-comfort-band="cold" value="${bands.cold}"></label>
+          <label>CALDO SOPRA °C<input type="number" step="0.5" data-comfort-band="warm" value="${bands.warm}"></label>
+        </div>
+        <div class="two">
+          <label>SECCO SOTTO %<input type="number" step="1" data-comfort-band="dry" value="${bands.dry}"></label>
+          <label>UMIDO SOPRA %<input type="number" step="1" data-comfort-band="humid" value="${bands.humid}"></label>
+        </div>
+        <button class="secondary wide" data-comfort-reset><ha-icon icon="mdi:restore"></ha-icon> RIPRISTINA I VALORI CONSIGLIATI</button>
+      </div>`;
+    }
     if (card.type === "ev") {
       const all = this._vehicles();
       const chosen = Array.isArray(card.vehicles) && card.vehicles.length ? card.vehicles : all.map((v) => v.id);
@@ -5533,19 +5812,52 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
     }
     if (card.type === "lights") {
-      const all = Object.keys(this._hass.states).filter((id) => id.startsWith("light."));
-      const chosen = Array.isArray(card.lights) && card.lights.length ? card.lights : all;
-      const rgb = all.filter((id) => lightCaps(this._hass.states[id]).color).length;
-      const dim = all.filter((id) => lightCaps(this._hass.states[id]).dimmable).length;
+      const lightsOnly = Object.keys(this._hass.states).filter((id) => id.startsWith("light."));
+      const custom = Array.isArray(card.lights) && card.lights.length;
+      const chosen = custom ? card.lights : lightsOnly;
+      const rgb = lightsOnly.filter((id) => lightCaps(this._hass.states[id]).color).length;
+      const dim = lightsOnly.filter((id) => lightCaps(this._hass.states[id]).dimmable).length;
+      // Anything switchable can be a light: plenty of real lighting is wired
+      // through a relay and arrives as a switch.
+      const switchable = Object.keys(this._hass.states).filter((id) =>
+        ["switch", "input_boolean", "fan", "light"].includes(domainOf(id)) && !chosen.includes(id));
+      const q2 = (this._entityQuery || "").trim().toLowerCase();
+      const matches = switchable.filter((id) => !q2
+        || ((this._hass.states[id].attributes.friendly_name || "") + " " + id).toLowerCase().includes(q2));
       return `<div class="section">
-        <strong>LUCI</strong>
-        <span class="hint">${all.length
-          ? `${all.length} luci trovate: ${dim} dimmerabili, ${rgb} a colori. I comandi compaiono da soli in base a ciò che ogni corpo illuminante dichiara di saper fare, quindi quando installerai le RGB avranno subito ruota colori, temperatura ed effetti senza toccare nulla qui.`
-          : "Nessuna luce in Home Assistant. La card resterà pronta: appena ne collegherai una comparirà qui."}</span>
-        <div class="dom-grid">${all.map((id) =>
-          `<button type="button" class="dom-chip ${chosen.includes(id) ? "on" : ""}" data-light-pickcard="${esc(id)}">
-             <ha-icon icon="mdi:lightbulb"></ha-icon>${esc(this._hass.states[id].attributes.friendly_name || id)}</button>`).join("")}
+        <strong>QUALI LUCI</strong>
+        <span class="hint">${lightsOnly.length
+          ? `${lightsOnly.length} luci nel dominio <code>light</code>: ${dim} dimmerabili, ${rgb} a colori. I comandi compaiono da soli in base a ciò che ogni corpo illuminante dichiara di saper fare, quindi le RGB che installerai avranno subito colore, temperatura ed effetti senza toccare nulla qui.`
+          : "Nessuna entità <code>light</code> in Home Assistant."}</span>
+        <div class="seg">
+          <button class="${custom ? "" : "active"}" data-lights-mode="auto">Tutte le luci</button>
+          <button class="${custom ? "active" : ""}" data-lights-mode="manual">Scelte da me</button>
         </div>
+        <span class="hint">${custom
+          ? `${chosen.length} entità scelte a mano. Puoi aggiungere <strong>qualsiasi</strong> interruttore o presa: se quella presa comanda una lampada, per te è una luce.`
+          : "Passa a «Scelte da me» per aggiungere anche prese e relè che comandano lampade."}</span>
+        ${custom ? `<div class="room-entities" data-keep-scroll="lights-chosen">
+          ${chosen.map((id) => {
+            const lst = this._hass.states[id];
+            return `<div class="room-ent${lst ? "" : " hidden"}">
+              <ha-icon icon="${esc(lst ? autoIcon(id, lst) : "mdi:help-circle-outline")}"></ha-icon>
+              <span>${esc((lst && lst.attributes.friendly_name) || id)}</span>
+              <em class="room-ent-pos">${esc(domainOf(id))}</em>
+              <button class="mini danger" data-light-drop="${esc(id)}"><ha-icon icon="mdi:close"></ha-icon></button>
+            </div>`;
+          }).join("") || '<div class="entity-result-empty">Nessuna entità scelta.</div>'}
+        </div>
+        <label>AGGIUNGI UN'ENTITÀ<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="luce, presa, relè..." autocomplete="off"></label>
+        <div class="entity-results" data-keep-scroll="lights-add">
+          ${matches.slice(0, 25).map((id) => {
+            const lst = this._hass.states[id];
+            return `<div class="entity-result-row" data-light-add="${esc(id)}">
+              <ha-icon icon="${esc(autoIcon(id, lst))}"></ha-icon>
+              <div class="err-text"><strong>${esc(lst.attributes.friendly_name || id)}</strong><small>${esc(id)}</small></div>
+              <span class="err-state">${esc(lst.state)}</span>
+            </div>`;
+          }).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}
+        </div>` : ""}
         <label class="check"><input type="checkbox" data-prop="group_by_area" ${card.group_by_area !== false ? "checked" : ""}> Raggruppa per stanza</label>
         <span class="hint">Gli orari si impostano luce per luce, dal pannello che si apre toccando l'icona di regolazione sulla card. Vengono eseguiti da Home Assistant, non dal browser.</span>
       </div>`;
@@ -6180,6 +6492,7 @@ class CyborgDashboard extends HTMLElement {
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
                  : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
                     <button class="secondary" data-add-lights title="Tutte le luci della casa, per stanza"><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
+                    <button class="secondary" data-add-comfort title="Temperatura e umidità stanza per stanza"><ha-icon icon="mdi:home-thermometer"></ha-icon> TEMPERATURE</button>
                     <button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>`}
                <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
@@ -6240,6 +6553,8 @@ class CyborgDashboard extends HTMLElement {
     if (secPage) secPage.onchange = () =>
       this._moveSectionToPage(secPage.getAttribute("data-sec-page"), secPage.value);
 
+    const addComfort = q("[data-add-comfort]");
+    if (addComfort) addComfort.onclick = () => this._addComfortSection();
     const addLights = q("[data-add-lights]");
     if (addLights) addLights.onclick = () => this._addLightSection();
     const addRooms = q("[data-add-rooms]");
@@ -6336,6 +6651,10 @@ class CyborgDashboard extends HTMLElement {
 
     // --- card props
     if (card) {
+      if (card.type === "lights") {
+        const ls = q("[data-entity-search]");
+        if (ls) ls.oninput = () => { this._entityQuery = ls.value; this._touch(true); };
+      }
       const flowSearch = this._flowSlot ? q("[data-entity-search]") : null;
       if (flowSearch) {
         flowSearch.oninput = () => {
@@ -6464,6 +6783,29 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-comfort-filter]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const host = el.closest("[data-card-id]");
+        const target = this._cardById(host && host.getAttribute("data-card-id"));
+        if (!target) return;
+        target.filter = el.getAttribute("data-comfort-filter");
+        this._touch(true);   // a filter is a view, not a configuration change
+      };
+    });
+    all("[data-comfort-band]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        card.bands = card.bands || {};
+        const key = el.getAttribute("data-comfort-band");
+        if (el.value === "") delete card.bands[key];
+        else card.bands[key] = Number(el.value);
+        this._touch();
+      };
+    });
+    const cfReset = q("[data-comfort-reset]");
+    if (cfReset && card) cfReset.onclick = () => { card.bands = {}; this._touch(); };
+
     // --- auto elettriche (definite a livello di dashboard)
     const flowVeh = q("[data-flow-vehicles]");
     if (flowVeh && card) flowVeh.onchange = () => {
@@ -6671,13 +7013,32 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
-    all("[data-light-pickcard]").forEach((el) => {
+    all("[data-lights-mode]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
-        const id = el.getAttribute("data-light-pickcard");
-        const allLights = Object.keys(this._hass.states).filter((x) => x.startsWith("light."));
-        const cur = Array.isArray(card.lights) && card.lights.length ? card.lights.slice() : allLights.slice();
-        card.lights = cur.includes(id) ? cur.filter((x) => x !== id) : cur.concat([id]);
+        // Switching to manual freezes the current automatic list so the user
+        // starts from what is already on screen instead of an empty card.
+        card.lights = el.getAttribute("data-lights-mode") === "auto"
+          ? []
+          : Object.keys(this._hass.states).filter((x) => x.startsWith("light."));
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+    all("[data-light-add]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-light-add");
+        card.lights = Array.isArray(card.lights) ? card.lights.slice() : [];
+        if (!card.lights.includes(id)) card.lights.push(id);
+        this._touch();
+      };
+    });
+    all("[data-light-drop]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.lights)) return;
+        const id = el.getAttribute("data-light-drop");
+        card.lights = card.lights.filter((x) => x !== id);
         this._touch();
       };
     });
@@ -6711,8 +7072,9 @@ class CyborgDashboard extends HTMLElement {
 
     // --- luci
     all("[data-light-toggle]").forEach((el) => {
-      el.onclick = () => this._hass.callService("light", "toggle",
-        { entity_id: el.getAttribute("data-light-toggle") });
+      // Through the entity's own domain: a light wired to a relay is a switch,
+      // and light.toggle on a switch does nothing at all and reports nothing.
+      el.onclick = () => this._toggleEntity(el.getAttribute("data-light-toggle"));
     });
     all("[data-light-open]").forEach((el) => {
       el.onclick = () => {
@@ -6763,8 +7125,14 @@ class CyborgDashboard extends HTMLElement {
         const card = this._cardById(host && host.getAttribute("data-card-id"));
         const ids = this._lightEntities(card || {});
         if (!ids.length) return;
-        this._hass.callService("light", el.getAttribute("data-lights-all") === "on" ? "turn_on" : "turn_off",
-          { entity_id: ids });
+        const service = el.getAttribute("data-lights-all") === "on" ? "turn_on" : "turn_off";
+        // Grouped by domain: homeassistant.turn_on works for everything, but
+        // sending a mixed list to light.turn_on silently drops the switches.
+        const byDomain = {};
+        for (const id of ids) (byDomain[domainOf(id)] = byDomain[domainOf(id)] || []).push(id);
+        for (const [d, list] of Object.entries(byDomain)) {
+          this._hass.callService(d === "light" ? "light" : "homeassistant", service, { entity_id: list });
+        }
       };
     });
     all("[data-lights-area]").forEach((el) => {
@@ -6775,8 +7143,12 @@ class CyborgDashboard extends HTMLElement {
         const card = this._cardById(host && host.getAttribute("data-card-id"));
         const ids = this._lightEntities(card || {})
           .filter((id) => (this._areaOf(id) || "Senza stanza") === area
-            && this._hass.states[id].state === "on");
-        if (ids.length) this._hass.callService("light", "turn_off", { entity_id: ids });
+            && ON_STATES.has(this._hass.states[id].state));
+        const byDomain = {};
+        for (const id of ids) (byDomain[domainOf(id)] = byDomain[domainOf(id)] || []).push(id);
+        for (const [d, list] of Object.entries(byDomain)) {
+          this._hass.callService(d === "light" ? "light" : "homeassistant", "turn_off", { entity_id: list });
+        }
       };
     });
 
@@ -6910,6 +7282,14 @@ class CyborgDashboard extends HTMLElement {
       this._touch();
     };
     // --- storey, shape, focus and device management
+    all("[data-pick-room]").forEach((el) => {
+      el.onclick = () => {
+        this._selected = { kind: "room", roomId: el.getAttribute("data-pick-room") };
+        this._roomPicker = false;
+        this._entityQuery = "";
+        this._touch(true);
+      };
+    });
     all("[data-level-pick]").forEach((el) => {
       el.onclick = () => {
         const raw = el.getAttribute("data-level-pick");
@@ -8440,7 +8820,20 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-viewport.editing{cursor:default}
 .fp-ground.deck{background:none;border:1px dashed rgba(255,255,255,.16);box-shadow:none}
 .fp-ground{position:absolute;border-radius:14px;background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),rgba(255,255,255,.02);box-shadow:0 0 70px rgba(0,0,0,.6)}
-.fp-room{position:absolute;transform-style:preserve-3d}
+/* The room box is transparent to the pointer; the floor — which carries the
+   clip-path of the real footprint — is what receives clicks. Two consequences,
+   both of them the point: the notch of an L-shaped room is not clickable
+   (because it is not part of the room), and a click landing outside a room's
+   footprint falls through to whatever is actually underneath instead of being
+   swallowed by an invisible rectangle. */
+.fp-room{position:absolute;transform-style:preserve-3d;pointer-events:none}
+.fp-floor{pointer-events:auto}
+.fp-handle,.fp-vertex,.fp-rotate,.fp-spot.movable,.fp-car.movable,
+.fp-label,.fp-badges,.fp-spot-btn{pointer-events:auto}
+/* The room being edited floats above its neighbours so its handles are always
+   reachable, whatever order the rooms happen to be drawn in. */
+.fp-room.selected{z-index:20}
+.fp-room.focused{z-index:15}
 .fp-room.editable{cursor:grab}
 .fp-room.editable:active{cursor:grabbing}
 .fp-floor{position:absolute;inset:0;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a));box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent)}
@@ -8538,6 +8931,15 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .level-now{flex:1;text-align:center;padding:7px;border-radius:9px;background:color-mix(in srgb,var(--accent) 8%,transparent);border:1px solid color-mix(in srgb,var(--accent) 20%,transparent)}
 .level-now strong{display:block;font-size:12px}
 .level-now small{display:block;font:9.5px ui-monospace,monospace;opacity:.5}
+.room-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;max-height:300px;overflow-y:auto;overscroll-behavior:contain}
+.room-list-row{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;text-align:left;
+  background:color-mix(in srgb,var(--rc) 7%,transparent);border:1px solid color-mix(in srgb,var(--rc) 18%,transparent);color:var(--primary-text-color)}
+.room-list-row.on{border-color:var(--rc);background:color-mix(in srgb,var(--rc) 18%,transparent)}
+.room-list-row>ha-icon{--mdc-icon-size:17px;color:var(--rc);flex-shrink:0}
+.rl-txt{flex:1;min-width:0}
+.rl-txt strong{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rl-txt small{display:block;font:9px ui-monospace,monospace;opacity:.45;text-transform:uppercase;letter-spacing:.7px}
+.rl-dot{width:8px;height:8px;border-radius:50%;background:var(--rc);flex-shrink:0;opacity:.7}
 .level-rows{display:flex;flex-direction:column;gap:5px;margin-top:8px}
 .level-row{display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:9px;text-align:left;
   background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent);color:var(--primary-text-color)}
@@ -8596,6 +8998,55 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-hint{position:absolute;right:14px;bottom:18px;font:10px ui-monospace,monospace;letter-spacing:1.4px;opacity:.4;pointer-events:none}
 
 /* --------------------------------------------------------- auto elettrica -- */
+/* ------------------------------------------------------------- comfort -- */
+.cf{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.cf-chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:3px;overscroll-behavior-x:contain;scrollbar-width:none}
+.cf-chips::-webkit-scrollbar{display:none}
+.cf-chip{display:inline-flex;align-items:center;gap:6px;flex-shrink:0;padding:8px 13px;border-radius:99px;font-size:12px;font-weight:650;
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);color:var(--primary-text-color)}
+.cf-chip.on{background:color-mix(in srgb,var(--accent) 16%,transparent);border-color:var(--accent);color:var(--accent)}
+.cf-chip ha-icon{--mdc-icon-size:16px}
+.cf-chip em{font-style:normal;font:10px ui-monospace,monospace;opacity:.55;padding:1px 6px;border-radius:99px;background:rgba(255,255,255,.08)}
+.cf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+/* The card decides its own layout from its own width, not the window's: five
+   of these in a row on a wide screen are each as narrow as one on a phone, and
+   at that width two value columns collide — the temperature ran straight into
+   the "UMIDITÀ" label. */
+.cf-room{container-type:inline-size;position:relative;padding:13px 14px 0;border-radius:14px;overflow:hidden;
+  background:color-mix(in srgb,var(--cc) 7%,transparent);border:1px solid color-mix(in srgb,var(--cc) 22%,transparent)}
+.cf-room>header{display:flex;align-items:center;gap:9px;margin-bottom:11px}
+.cf-ico{display:grid;place-items:center;width:34px;height:34px;flex-shrink:0;border-radius:10px;
+  background:color-mix(in srgb,var(--cc) 16%,transparent);border:1px solid color-mix(in srgb,var(--cc) 30%,transparent);color:var(--cc)}
+.cf-ico ha-icon{--mdc-icon-size:19px}
+.cf-room>header strong{flex:1;min-width:0;font-size:15px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cf-badge{font-style:normal;font:9.5px ui-monospace,monospace;letter-spacing:1.2px;padding:4px 10px;border-radius:99px;
+  color:var(--cc);background:color-mix(in srgb,var(--cc) 13%,transparent);border:1px solid color-mix(in srgb,var(--cc) 40%,transparent)}
+.cf-vals{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;padding-bottom:13px}
+@container (max-width: 300px){
+  .cf-vals{grid-template-columns:minmax(0,1fr)}
+  .cf-h{border-left:0;padding-left:0;border-top:1px solid rgba(255,255,255,.08);padding-top:10px}
+}
+.cf-t,.cf-h{text-align:left;background:none;border:0;padding:0;color:var(--primary-text-color);min-width:0}
+.cf-h{border-left:1px solid rgba(255,255,255,.08);padding-left:12px}
+.cf-t small,.cf-h small{display:flex;align-items:center;gap:4px;font:9px ui-monospace,monospace;letter-spacing:1.3px;opacity:.45;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-h small ha-icon{--mdc-icon-size:12px;color:#4cc9f0;opacity:.8}
+.cf-t b,.cf-h b{display:block;margin-top:3px;font-size:clamp(22px,7cqw,31px);font-weight:750;line-height:1;white-space:nowrap}
+.cf-t b i,.cf-h b i{font-size:15px;font-style:normal;opacity:.5;margin-left:1px}
+.cf-hbar{display:block;margin-top:7px;height:4px;border-radius:99px;background:rgba(255,255,255,.09);overflow:hidden}
+.cf-hbar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#4cc9f0,#4361ee)}
+/* One fixed scale for every room — 12 to 34 degrees — so the markers can be
+   compared across rooms. A per-room scale would put a cellar and a balcony in
+   the same place and destroy exactly the comparison this card is for. */
+.cf-scale{position:absolute;left:0;right:0;bottom:0;height:4px;
+  background:linear-gradient(90deg,#4cc9f0 0%,#06d6a0 27%,#8ac926 45%,#ffd166 64%,#ff924c 82%,#ff3d71 100%)}
+.cf-scale i{position:absolute;top:-2px;width:3px;height:8px;margin-left:-1.5px;border-radius:99px;background:#fff;
+  box-shadow:0 0 6px rgba(0,0,0,.8)}
+@media(max-width:640px){
+  .cf-grid{grid-template-columns:1fr}
+  .cf-t b,.cf-h b{font-size:27px}
+}
+
 .ev{margin-top:12px;display:flex;flex-direction:column;gap:10px}
 .ev-car{padding:12px;border-radius:14px;background:color-mix(in srgb,var(--ec) 7%,transparent);
   border:1px solid color-mix(in srgb,var(--ec) 22%,transparent)}
@@ -8850,7 +9301,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.21.0";
+const CYBORG_BUILD = "0.22.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

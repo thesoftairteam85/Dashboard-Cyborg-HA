@@ -40,6 +40,7 @@ const DEFAULT_DASH = {
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
     ["26-ev",         { pageIndex: 0, autoCompose: true, ev: true }],
+    ["27-comfort",    { pageIndex: 0, autoCompose: true, comfort: true }],
     ["13-map-garage", { pageIndex: 1, autoRooms: true, garage: true }],
     ["15-flow-ev",    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, ev: true }],
     ["22-economy",    { pageIndex: 0, autoCompose: true, economy: true }],
@@ -320,6 +321,71 @@ const DEFAULT_DASH = {
   ok("le linee non sono piatte", tr.lines.every((l) => l.h > 5), tr.lines.map((l) => l.h).join());
   ok("la legenda ha una voce per linea", tr.legend === 4, String(tr.legend));
 
+  // ---- stanze sovrapposte: tutte cliccabili -------------------------------
+  console.log("\n== STANZE SOVRAPPOSTE ==");
+  await scene({ pageIndex: 1, autoRooms: true, editing: true, overlap: true });
+  const reach = await page.evaluate(() => {
+    const el = window.__EL__;
+    const rooms = el._rooms();
+    const out = [];
+    for (const r of rooms) {
+      const floor = document.querySelector(`[data-room="${r.id}"] .fp-floor`);
+      const b = floor.getBoundingClientRect();
+      // the centre of each room's own floor: what a finger would aim at
+      const hit = document.elementFromPoint(Math.round(b.left + b.width / 2),
+                                            Math.round(b.top + b.height / 2));
+      const owner = hit && hit.closest(".fp-room");
+      out.push({ id: r.id, title: r.title,
+        hits: owner ? owner.getAttribute("data-room") : null,
+        tag: hit ? hit.className : "" });
+    }
+    return out;
+  });
+  // Two rooms genuinely stacked on the plan cannot both own the same pixel —
+  // the one on top does, and that is correct. What must hold is that every
+  // room owns *some* visible pixel of its own floor, and that no click is
+  // intercepted by a floating badge strip belonging to a different room.
+  ok("nessun clic finisce su una targhetta di un'altra stanza",
+     reach.every((r) => !String(r.tag).includes("fp-badge")),
+     reach.map((r) => r.tag).join(" | "));
+  const sampled = await page.evaluate(() => {
+    const el = window.__EL__;
+    return el._rooms().map((r) => {
+      const floor = document.querySelector(`[data-room="${r.id}"] .fp-floor`);
+      const b = floor.getBoundingClientRect();
+      let own = 0, total = 0;
+      for (let ix = 1; ix < 10; ix++) {
+        for (let iy = 1; iy < 10; iy++) {
+          const x = Math.round(b.left + (b.width * ix) / 10);
+          const y = Math.round(b.top + (b.height * iy) / 10);
+          const hit = document.elementFromPoint(x, y);
+          const owner = hit && hit.closest(".fp-room");
+          if (!owner) continue;
+          total += 1;
+          if (owner.getAttribute("data-room") === r.id) own += 1;
+        }
+      }
+      return { title: r.title, own, total };
+    });
+  });
+  ok("ogni stanza possiede una parte cliccabile del proprio pavimento",
+     sampled.every((r) => r.own > 0), sampled.map((r) => `${r.title}:${r.own}/${r.total}`).join(" | "));
+
+  const picked = await page.evaluate(() => {
+    const el = window.__EL__;
+    const ids = el._rooms().map((r) => r.id);
+    const ok2 = [];
+    for (const id of ids) {
+      const btn = document.querySelector(`[data-pick-room="${id}"]`);
+      if (!btn) { ok2.push(false); continue; }
+      btn.click();
+      ok2.push(el._selected && el._selected.roomId === id);
+    }
+    return ok2;
+  });
+  ok("ogni stanza si seleziona dall'elenco del pannello",
+     picked.length > 1 && picked.every(Boolean), JSON.stringify(picked));
+
   // ---- rotazione della stanza e scorrimento -------------------------------
   console.log("\n== ROTAZIONE E SCORRIMENTO ==");
   const plain = await scene({ pageIndex: 1, autoRooms: true, editing: true, selectRoom: true });
@@ -375,6 +441,53 @@ const DEFAULT_DASH = {
   ok("durante il trascinamento la scena non ha inerzia",
      parseFloat(dragCss.dragging) === 0 && parseFloat(dragCss.idle) > 0,
      dragCss.idle + " -> " + dragCss.dragging);
+
+  // ---- temperature --------------------------------------------------------
+  console.log("\n== TEMPERATURE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, comfort: true });
+  await page.waitForTimeout(900);
+  const cfv = await page.evaluate(() => {
+    const rooms = Array.from(document.querySelectorAll(".cf-room")).map((r) => {
+      const mark = r.querySelector(".cf-scale i");
+      const scale = r.querySelector(".cf-scale").getBoundingClientRect();
+      const mb = mark ? mark.getBoundingClientRect() : null;
+      const box = r.getBoundingClientRect();
+      return {
+        name: r.querySelector("strong").textContent.trim(),
+        badge: r.querySelector(".cf-badge").textContent.trim(),
+        temp: r.querySelector(".cf-t b").textContent.trim(),
+        markPct: mb ? ((mb.left + mb.width / 2 - scale.left) / scale.width) * 100 : null,
+        w: Math.round(box.width),
+        overflow: r.scrollWidth > r.clientWidth + 1,
+      };
+    });
+    const chips = Array.from(document.querySelectorAll(".cf-chip")).map((c) => c.textContent.trim());
+    const grid = document.querySelector(".cf-grid");
+    return { rooms, chips, gridW: grid ? Math.round(grid.getBoundingClientRect().width) : 0 };
+  });
+  ok("una scheda per ogni stanza con un sensore", cfv.rooms.length >= 3, String(cfv.rooms.length));
+  ok("ogni scheda dichiara un giudizio",
+     cfv.rooms.every((r) => r.badge.length > 1), cfv.rooms.map((r) => r.name + ":" + r.badge).join(" | "));
+  ok("il balcone a 28.9 gradi è caldo",
+     cfv.rooms.some((r) => /Balcone/i.test(r.name) && r.badge === "CALDO"),
+     cfv.rooms.map((r) => r.name + "=" + r.badge).join(" | "));
+  // the marker position is the whole point: it must track the temperature on
+  // one shared scale, not a per-room one
+  const warm = cfv.rooms.find((r) => /Balcone/i.test(r.name));
+  const cool = cfv.rooms.find((r) => /Cucina/i.test(r.name));
+  ok("il marcatore segue la temperatura sulla scala comune",
+     warm && cool && warm.markPct > cool.markPct,
+     warm && cool ? `${cool.name} ${cool.markPct.toFixed(1)}% < ${warm.name} ${warm.markPct.toFixed(1)}%` : "mancano");
+  ok("il marcatore resta dentro la scala",
+     cfv.rooms.every((r) => r.markPct === null || (r.markPct >= -1 && r.markPct <= 101)),
+     cfv.rooms.map((r) => r.markPct && r.markPct.toFixed(1)).join());
+  ok("ci sono i filtri per stanza, TUTTE compresa",
+     cfv.chips.length === cfv.rooms.length + 1 && /TUTTE/.test(cfv.chips[0]), cfv.chips.join(" | "));
+  ok("nessuna scheda deborda", cfv.rooms.every((r) => !r.overflow));
 
   // ---- auto elettrica -----------------------------------------------------
   console.log("\n== AUTO ELETTRICA ==");

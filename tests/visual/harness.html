@@ -68,6 +68,10 @@ const states={
  "media_player.salotto":S("playing",{friendly_name:"Salotto"}),
  "cover.camera_tapparella2":S("open",{friendly_name:"Tapparella studio"}),
  "sensor.balcone_temp":S("28.9",{friendly_name:"Balcone Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.balcone_hum":S("27",{friendly_name:"Balcone Umidita",device_class:"humidity",unit_of_measurement:"%"}),
+ "sensor.camera_hum":S("52",{friendly_name:"Camera Umidita",device_class:"humidity",unit_of_measurement:"%"}),
+ "sensor.cucina_temp":S("24.6",{friendly_name:"Cucina Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.cucina_hum":S("25",{friendly_name:"Cucina Umidita",device_class:"humidity",unit_of_measurement:"%"}),
  "sensor.energia_rete":S("1310",{friendly_name:"Energia prelevata",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
  "sensor.energia_immessa":S("486",{friendly_name:"Energia immessa",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
  "sensor.energia_pv":S("1082",{friendly_name:"Energia prodotta",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
@@ -90,7 +94,9 @@ const MAP={soggiorno:["light.soggiorno_faretti","light.soggiorno_piantana","clim
  camera_da_letto:["climate.thermostat","sensor.camera_temp","light.camera_abat","cover.camera_tapparella"],
  bagno:["sensor.bagno_temp","sensor.bagno_hum","light.bagno_specchio","switch.phon"],
  cucina:["light.cucina_sottopensile","sensor.cucina_potenza","switch.piano_induzione"],
- balcone:["light.balcone_relay","sensor.balcone_temp"]};
+ balcone:["light.balcone_relay","sensor.balcone_temp","sensor.balcone_hum"]};
+MAP.camera_da_letto.push("sensor.camera_hum");
+MAP.cucina.push("sensor.cucina_temp","sensor.cucina_hum");
 
 const entReg=[];
 for(const [aid,ents] of Object.entries(MAP))
@@ -251,6 +257,16 @@ window.__mount=(dash,opts)=>{
         // multi-storey / polygon / focus scenarios
         if(opts&&opts.levels&&el._rooms().length>1){
           el._rooms().forEach((r,i)=>{r.level=opts.levels[i%opts.levels.length];});
+        }
+        if(opts&&opts.overlap&&el._rooms().length){
+          // deliberately overlapping rooms: the reported case where some of
+          // them could not be clicked at all
+          el._rooms().forEach((r,i)=>{ r.x=i*40; r.y=i*30; r.w=220; r.h=180; });
+        }
+        if(opts&&opts.comfort){
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"cfcard",type:"comfort",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},rooms:[],bands:{},filter:""});
         }
         if(opts&&opts.rotate&&el._rooms().length){ el._rooms()[0].rotation=35; }
         if(opts&&opts.balcony&&el._rooms().length){

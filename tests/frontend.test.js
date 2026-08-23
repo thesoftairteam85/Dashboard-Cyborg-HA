@@ -1851,6 +1851,151 @@ console.log("\n== 24. VERSIONE IN ESECUZIONE ==");
   ok("tolta la discrepanza l'avviso sparisce", !el.innerHTML.includes("SVUOTA LA CACHE"));
 }
 
+console.log("\n== 25. LUCI LIBERE, COMFORT, STANZE SELEZIONABILI ==");
+{
+  // -- luci comandate da prese --
+  states["light.sala_dim"] = S("on", { friendly_name: "Faretti sala", supported_color_modes: ["brightness"], brightness: 200 });
+  states["switch.piantana"] = S("on", { friendly_name: "Piantana su presa" });
+  states["input_boolean.scena"] = S("off", { friendly_name: "Scena notte" });
+
+  const lightsCard = { id: "lc", type: "lights", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, lights: [], group_by_area: true, row_action: "toggle" };
+  ok("in automatico prende solo il dominio light",
+     el._lightEntities(lightsCard).every(id => id.startsWith("light.")));
+  lightsCard.lights = ["light.sala_dim", "switch.piantana", "input_boolean.scena"];
+  ok("scelte a mano accetta qualsiasi entità",
+     el._lightEntities(lightsCard).length === 3, String(el._lightEntities(lightsCard).length));
+
+  const rowSwitch = el._lightRow("switch.piantana", lightsCard);
+  const rowLight = el._lightRow("light.sala_dim", lightsCard);
+  ok("una presa è comandabile dalla card", rowSwitch.includes('data-light-toggle="switch.piantana"'));
+  // a relay has no brightness: offering a slider that does nothing would be a lie
+  ok("una presa non mostra il cursore di intensità", !rowSwitch.includes("data-light-bri"));
+  ok("una luce dimmerabile lo mostra", rowLight.includes('data-light-bri="light.sala_dim"'));
+  ok("una presa non mostra il pannello colore", !rowSwitch.includes("data-light-open"));
+  ok("il testo di una presa è al maschile", rowSwitch.includes("acceso"));
+  ok("il testo di una luce è al femminile", rowLight.includes("%"));
+
+  // the toggle must go through the entity's own domain
+  wsCalls.length = 0;
+  el._toggleEntity("switch.piantana");
+  ok("una presa viene commutata dal suo dominio",
+     wsCalls.some(c => c.service === "switch.toggle"), JSON.stringify(wsCalls));
+  wsCalls.length = 0;
+  el._toggleEntity("light.sala_dim");
+  ok("una luce viene commutata dal dominio light", wsCalls.some(c => c.service === "light.toggle"));
+  wsCalls.length = 0;
+
+  const body = el._lightsBody(lightsCard);
+  ok("la card conta accese anche le prese", /3<\/span>|di 3/.test(body), body.slice(body.indexOf("li-count"), body.indexOf("li-count") + 140));
+
+  // -- comfort --
+  el._registry = {
+    areas: [{ area_id: "cucina", name: "Cucina", icon: "mdi:silverware" },
+            { area_id: "balcone", name: "Balcone OVEST", icon: "mdi:balcony" },
+            { area_id: "ripostiglio", name: "Ripostiglio", icon: null }],
+    byArea: { cucina: ["sensor.cu_t", "sensor.cu_h", "sensor.cu_rssi"],
+              balcone: ["sensor.ba_t", "sensor.ba_h"],
+              ripostiglio: ["light.rip"] },
+    entityArea: {}, category: { "sensor.cu_rssi": "diagnostic" },
+    entityDevice: {}, deviceName: {} };
+  states["sensor.cu_t"] = S("24.6", { friendly_name: "Cucina T", device_class: "temperature", unit_of_measurement: "°C" });
+  states["sensor.cu_h"] = S("25", { friendly_name: "Cucina H", device_class: "humidity", unit_of_measurement: "%" });
+  states["sensor.cu_rssi"] = S("-60", { friendly_name: "RSSI", device_class: "temperature" });
+  states["sensor.ba_t"] = S("26.7", { friendly_name: "Balcone T", device_class: "temperature", unit_of_measurement: "°C" });
+  states["sensor.ba_h"] = S("27", { friendly_name: "Balcone H", device_class: "humidity", unit_of_measurement: "%" });
+  states["light.rip"] = S("off", { friendly_name: "Luce ripostiglio" });
+
+  const cf = { id: "cf", type: "comfort", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, rooms: [], bands: {}, filter: "" };
+  const cfRooms = el._comfortRooms(cf);
+  ok("una riga per area con la temperatura", cfRooms.length === 2, String(cfRooms.length));
+  ok("l'umidità della stessa area viene abbinata",
+     cfRooms[0].humidity === "sensor.cu_h" && cfRooms[1].humidity === "sensor.ba_h");
+  ok("un'area senza temperatura non compare", !cfRooms.some(r => r.name === "Ripostiglio"));
+  ok("le entità di diagnostica non vengono scambiate per sensori di stanza",
+     cfRooms[0].temperature === "sensor.cu_t");
+
+  const B = comfortBands({});
+  ok("i valori consigliati sono quelli", B.cold === 18 && B.warm === 26 && B.dry === 30 && B.humid === 60);
+  ok("una soglia personalizzata vince", comfortBands({ bands: { warm: 28 } }).warm === 28);
+  ok("una soglia illeggibile torna al consigliato", comfortBands({ bands: { warm: "caldo" } }).warm === 26);
+
+  ok("24.6 con 25% di umidità è secco, non comfort",
+     comfortVerdict(24.6, 25, B).k === "dry", comfortVerdict(24.6, 25, B).k);
+  ok("22 con 45% è comfort", comfortVerdict(22, 45, B).k === "ok");
+  ok("22 con 75% è umido", comfortVerdict(22, 75, B).k === "humid");
+  ok("26.7 è caldo", comfortVerdict(26.7, 27, B).k === "hot");
+  ok("15 è freddo", comfortVerdict(15, 45, B).k === "cold");
+  ok("senza temperatura il giudizio è N/D", comfortVerdict(null, 45, B).k === "na");
+  ok("senza umidità e in range resta comfort", comfortVerdict(22, null, B).k === "ok");
+  // alzando la soglia il balcone smette di essere caldo
+  ok("le soglie cambiano davvero il giudizio",
+     comfortVerdict(26.7, 27, comfortBands({ bands: { warm: 28 } })).k === "dry");
+
+  // the scale is fixed so rooms are comparable
+  ok("la scala è la stessa per tutti", comfortPosition(12) === 0 && comfortPosition(34) === 100);
+  ok("una temperatura fuori scala viene limitata, non esce dal riquadro",
+     comfortPosition(45) === 100 && comfortPosition(-5) === 0);
+  ok("il balcone sta più a destra della cucina",
+     comfortPosition(26.7) > comfortPosition(24.6));
+  ok("senza temperatura non c'è marcatore", comfortPosition(null) === null);
+
+  const cfh = el._comfortBody(cf);
+  ok("la card mostra una scheda per stanza", (cfh.match(/class="cf-room"/g) || []).length === 2);
+  ok("mostra il giudizio", cfh.includes("SECCO") && cfh.includes("CALDO"));
+  ok("mostra temperatura e umidità", cfh.includes("24.6") && cfh.includes("27"));
+  ok("c'è il filtro per stanza", cfh.includes('data-comfort-filter="cucina"') && cfh.includes("TUTTE"));
+  ok("c'è la scala colore con il marcatore", cfh.includes("cf-scale") && cfh.includes("left:"));
+  cf.filter = "cucina";
+  ok("il filtro mostra una sola stanza",
+     (el._comfortBody(cf).match(/class="cf-room"/g) || []).length === 1);
+  cf.filter = "";
+  ok("comfort: nessun undefined", !/>undefined</.test(cfh) && !cfh.includes("[object"));
+
+  // -- stanze tutte selezionabili sulla mappa --
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "map", type: "floorplan", title: "Mappa", icon: "mdi:floor-plan",
+      view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true,
+              level_gap: 150, active_level: null },
+      rooms: ["Balcone", "Cucina", "Soggiorno"].map((t, i) => ({
+        id: "r" + i, area_id: null, title: t, icon: "mdi:home", color: "#00e5ff",
+        // deliberately overlapping, which is what made some rooms unreachable
+        x: i * 40, y: i * 30, w: 220, h: 180, level: 0, points: null, spots: {},
+        hidden: [], walls: [], entities: [], vehicles: [], rotation: 0 })) }]};
+  el._pageIndex = 0; el._editing = true; el._selected = null; el._focus = null;
+  el.render();
+  const mh3 = el.innerHTML;
+  ok("ogni stanza è raggiungibile dall'elenco nel pannello",
+     ["r0", "r1", "r2"].every(id => mh3.includes(`data-pick-room="${id}"`)));
+  ok("l'elenco mostra i nomi veri",
+     mh3.includes("Balcone") && mh3.includes("Cucina") && mh3.includes("Soggiorno"));
+  // The badge strips floated over the neighbouring rooms and swallowed their
+  // clicks, which is why some rooms could not be selected at all. Match the
+  // markup, not the class name — the stylesheet is inlined in innerHTML and
+  // mentions .fp-badges too.
+  states["light.strip_test"] = S("on", { friendly_name: "Luce test" });
+  el._rooms().forEach(r => { r.entities = ["light.strip_test"]; });
+  el._signature = ""; el.render();
+  ok("in modifica nessuna stanza mostra le targhette di stato",
+     !el.innerHTML.includes('<div class="fp-badges">'));
+  ok("il pavimento è ciò che riceve il clic, non il rettangolo",
+     el.innerHTML.includes('class="fp-floor"'));
+  el._editing = false;
+  el._signature = ""; el.render();
+  ok("fuori modifica le targhette tornano",
+     el.innerHTML.includes('<div class="fp-badges">'));
+  delete states["light.strip_test"];
+
+  for (const id of ["light.sala_dim","switch.piantana","input_boolean.scena","sensor.cu_t","sensor.cu_h",
+                    "sensor.cu_rssi","sensor.ba_t","sensor.ba_h","light.rip"]) delete states[id];
+  el._registry = null;
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0; el._editing = false; el._selected = null;
+  ok("stato ripristinato dopo la sezione 25", !el._isFloorplan());
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

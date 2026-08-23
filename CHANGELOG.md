@@ -4,6 +4,57 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.22.0] - 2026-08-23
+
+Tre richieste, tutte e tre chiuse: entità libere nell'illuminazione, la mappa
+che finalmente si lascia cliccare, e la sezione Temperature.
+
+### Novità
+- **Illuminazione: puoi scegliere qualsiasi entità, non solo `light.*`.**
+  Molte luci sono pilotate da una presa o da un relè, quindi restringere la
+  sezione al dominio `light` significava lasciare fuori metà dell'impianto.
+  L'editor ora ha un selettore **Tutte le luci / Scelte da me**: nella seconda
+  modalità cerchi fra `light`, `switch`, `input_boolean` e `fan` e componi
+  l'elenco a mano. Le righe si adattano da sole a cosa hanno davanti — una
+  presa non mostra il cursore di intensità né il pannello colore, perché non
+  li ha — e il comando viene instradato sul dominio reale dell'entità
+  (`switch.turn_on` per una presa, `light.turn_on` per una luce). Anche
+  l'accensione/spegnimento di gruppo raggruppa per dominio: prima un unico
+  `light.turn_on` ignorava in silenzio tutte le prese dell'elenco.
+
+- **Sezione Temperature (pulsante TEMPERATURE nella barra di modifica).**
+  Una scheda per stanza con temperatura in evidenza, umidità, giudizio
+  (fresco / caldo / secco / umido / ok) e un indicatore su una **scala comune
+  12–34 °C**: la scala fissa è il punto, perché è ciò che rende due stanze
+  confrontabili a colpo d'occhio invece di darti sei grafici scollegati. Le
+  stanze vengono trovate da sole dalle aree di Home Assistant che hanno un
+  sensore di temperatura, l'umidità viene appaiata dalla stessa area. Le
+  soglie di comfort sono modificabili. Il pulsante crea in un colpo solo la
+  card comfort **e** il grafico storico delle stesse stanze, già compilato.
+
+### Correzioni
+- **La mappa 3D non si lasciava cliccare («non mi fa cliccare su balcone, su
+  cucina, è molto bagato»).** Due cause reali, non una: l'area sensibile di
+  ogni stanza era il suo **rettangolo di ingombro**, non la sua sagoma, quindi
+  una stanza a L rubava i clic ai vicini; e le targhette fluttuanti, più larghe
+  della stanza, coprivano tutto quello che avevano sotto. Ora la sagoma reale
+  (`clip-path`) è l'area sensibile, i clic che la mancano **cadono sulla stanza
+  sotto** invece di essere assorbiti, la stanza selezionata passa sopra le
+  altre, e in modifica le targhette spariscono del tutto.
+- **«Devo poterle modificare tutte».** Con stanze sovrapposte o su piani
+  diversi, alcune restavano irraggiungibili col solo clic sulla mappa. Ora
+  **l'elenco completo delle stanze** è presente sia nell'editor della pagina
+  sia in quello della stanza: qualunque stanza è a un clic, sovrapposizioni
+  comprese.
+
+### Verifiche
+- 666 asserzioni frontend, suite schema completa, **101 asserzioni misurate**
+  in Chromium headless (geometria reale, non screenshot): fra queste, che ogni
+  stanza sovrapposta possieda almeno un pixel cliccabile, che l'indicatore
+  Temperature segua il valore sulla scala condivisa, e che nessuna scheda
+  debordi a 300 px di larghezza.
+
+
 ## [0.21.0] - 2026-08-23
 
 Sette segnalazioni, tre delle quali erano bug veri.
