@@ -2188,6 +2188,123 @@ console.log("\n== 27. TEMPERATURE: SENSORE GIUSTO, ESTERNO COMPRESO, ELENCO A MA
   ok("stato ripristinato dopo la sezione 27", el._registry === null);
 }
 
+console.log("\n== 28. GRAFICO CHE SEGUE LE STANZE ==");
+{
+  states["sensor.temperatura_esterna"] = S("24.0", { friendly_name: "Temperatura esterna", device_class: "temperature" });
+  states["sensor.sog_t"] = S("24.5", { friendly_name: "Soggiorno T", device_class: "temperature" });
+  states["sensor.sog_h"] = S("49.0", { friendly_name: "Soggiorno H", device_class: "humidity" });
+  states["sensor.bag_t"] = S("24.8", { friendly_name: "Bagno T", device_class: "temperature" });
+  states["sensor.bag_h"] = S("51.0", { friendly_name: "Bagno H", device_class: "humidity" });
+  states["sensor.cam_t"] = S("21.8", { friendly_name: "Camera T", device_class: "temperature" });
+  el._registry = {
+    areas: [{ area_id: "sog", name: "Soggiorno" }, { area_id: "bag", name: "Bagno" },
+            { area_id: "cam", name: "Camera" }],
+    byArea: { sog: ["sensor.sog_t", "sensor.sog_h"], bag: ["sensor.bag_t", "sensor.bag_h"],
+              cam: ["sensor.cam_t"] },
+    entityArea: { "sensor.sog_t": "Soggiorno", "sensor.sog_h": "Soggiorno",
+                  "sensor.bag_t": "Bagno", "sensor.bag_h": "Bagno", "sensor.cam_t": "Camera" },
+    category: {},
+    entityDevice: { "sensor.sog_t": "d1", "sensor.sog_h": "d1", "sensor.bag_t": "d2",
+                    "sensor.bag_h": "d2", "sensor.cam_t": "d3" },
+    deviceName: {} };
+
+  const tc = { id: "tr", type: "trend", entity_id: "", name: "", size: "xl", appearance: {},
+    states: {}, actions: {}, source: "comfort", device_class: "temperature", max_series: 8,
+    series: [], hours: 24, y_min: null, y_max: null };
+
+  let lines = el._trendSeries(tc);
+  ok("il grafico segue le stanze senza elenco fisso", lines.length === 4, String(lines.length));
+  ok("tutte e quattro su un piano solo, colori distinti",
+     new Set(lines.map(l => l.color)).size === 4, lines.map(l => l.color).join());
+  ok("l'esterno è la prima linea", lines[0].name === "Temperatura esterna", lines[0].name);
+
+  // THE point: a sensor that did not exist when the card was made must appear
+  // by itself. This is what a frozen list could never do.
+  states["sensor.sop_t"] = S("23.1", { friendly_name: "Soppalco T", device_class: "temperature" });
+  states["sensor.sop_h"] = S("47.0", { friendly_name: "Soppalco H", device_class: "humidity" });
+  el._registry.areas.push({ area_id: "sop", name: "Soppalco" });
+  el._registry.byArea.sop = ["sensor.sop_t", "sensor.sop_h"];
+  el._registry.entityDevice["sensor.sop_t"] = "d4";
+  el._registry.entityDevice["sensor.sop_h"] = "d4";
+  lines = el._trendSeries(tc);
+  ok("una stanza aggiunta domani entra da sola nel grafico",
+     lines.length === 5 && lines.some(l => l.name === "Soppalco"), lines.map(l => l.name).join());
+
+  // adding a room must not repaint the lines that were already there
+  ok("le linee esistenti non cambiano colore",
+     lines[0].color === "#00e5ff" && lines[1].name === "Soggiorno",
+     lines.slice(0, 2).map(l => l.name + "=" + l.color).join());
+
+  tc.max_series = 3;
+  ok("il tetto delle linee è rispettato", el._trendSeries(tc).length === 3);
+  tc.max_series = 99;
+  ok("il tetto assoluto è dodici, non di più", el._trendSeries(tc).length === 5);
+  tc.max_series = 8;
+
+  // -- follow a whole device_class --
+  tc.source = "class"; tc.device_class = "humidity";
+  const hums = el._trendSeries(tc);
+  ok("seguire una classe prende tutte le entità di quel tipo",
+     hums.length === 3, hums.map(h => h.entity).join());
+  ok("le linee di una classe non mescolano unità diverse",
+     hums.every(h => states[h.entity].attributes.device_class === "humidity"));
+  ok("le linee di una classe portano il nome della stanza",
+     hums.some(h => h.name === "Bagno"), hums.map(h => h.name).join());
+
+  tc.device_class = "temperature";
+  const temps = el._trendSeries(tc);
+  ok("cambiando tipo cambiano le linee",
+     temps.some(l => l.entity === "sensor.sog_t") && temps.some(l => l.entity === "sensor.sop_t")
+     && !temps.some(l => l.entity === "sensor.bag_h"),
+     temps.map(l => l.entity).join());
+  // The outdoor probe has no area. Sorting it with the other area-less
+  // entities pushed it past the line cap and cut off the one line the whole
+  // comparison exists for.
+  ok("l'esterno non viene tagliato via dal tetto delle linee",
+     temps[0].entity === "sensor.temperatura_esterna", temps.map(l => l.entity).join());
+  ok("il tetto vale anche seguendo una classe", temps.length <= 8, String(temps.length));
+
+  // -- manual stays frozen, on purpose --
+  tc.source = "manual";
+  tc.series = [{ entity: "sensor.sog_t", name: "Solo questo", color: "#fff" }];
+  ok("l'elenco scritto a mano resta com'è", el._trendSeries(tc).length === 1);
+  states["sensor.nuovo_t"] = S("20.0", { friendly_name: "Nuovo", device_class: "temperature" });
+  ok("e non si allarga da solo", el._trendSeries(tc).length === 1);
+  // an entity that has disappeared must not draw a phantom line
+  tc.series.push({ entity: "sensor.sparito", name: "Sparito", color: "#000" });
+  ok("un'entità sparita non disegna una linea fantasma", el._trendSeries(tc).length === 1);
+
+  const ed = el._editing;
+  el._editing = true;
+  el._dashboard = { version: 7, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x",
+      sections: [{ id: "s1", title: "Temperature", icon: "mdi:x", accent: null, collapsed: false,
+        items: [tc] }] }]};
+  el._pageIndex = 0;
+  tc.source = "comfort";
+  el._selected = { kind: "card", sectionId: "s1", itemId: "tr" };
+  el._signature = ""; el.render();
+  const h = el.innerHTML;
+  ok("l'editor offre le tre modalità",
+     h.includes('data-trend-source="comfort"') && h.includes('data-trend-source="class"')
+     && h.includes('data-trend-source="manual"'));
+  ok("in automatico non chiede di aggiungere le linee a mano", !h.includes("data-trend-add"));
+  ok("in automatico mostra le linee risolte", h.includes("Soppalco"));
+  tc.source = "manual";
+  el._signature = ""; el.render();
+  ok("a mano compare il riempimento in un colpo solo",
+     el.innerHTML.includes("data-trend-fill"));
+  el._editing = ed;
+
+  for (const id of ["sensor.temperatura_esterna","sensor.sog_t","sensor.sog_h","sensor.bag_t",
+      "sensor.bag_h","sensor.cam_t","sensor.sop_t","sensor.sop_h","sensor.nuovo_t"]) delete states[id];
+  el._registry = null;
+  el._dashboard = { version: 7, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0; el._selected = null; el._editing = false;
+  ok("stato ripristinato dopo la sezione 28", el._registry === null);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

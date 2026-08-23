@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+#: Hard ceiling on the lines of one comparison chart. Twelve is already past
+#: what most readers can tell apart; it exists so an automatic source cannot
+#: quietly turn a chart into a hairball.
+MAX_TREND_SERIES = 12
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,
@@ -436,6 +441,25 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                     clean[group] = row
         result["limits"] = clean
     if result.get("type") == "trend":
+        # Where the lines come from.
+        #
+        # "manual" is the original behaviour: a fixed list the user picked. It
+        # is a SNAPSHOT, and a snapshot cannot answer "today four rooms,
+        # tomorrow ten" — a sensor added next month never joins the chart.
+        # "comfort" follows the same room discovery the Temperature card uses,
+        # and "class" follows a device_class across the whole instance. Both
+        # are live: what exists when the card renders is what gets drawn.
+        source = result.get("source")
+        result["source"] = source if source in ("manual", "comfort", "class") else "manual"
+        device_class = result.get("device_class")
+        result["device_class"] = (
+            str(device_class)[:32] if isinstance(device_class, str) and device_class else "temperature"
+        )
+        try:
+            result["max_series"] = max(1, min(MAX_TREND_SERIES, int(float(result.get("max_series", 8)))))
+        except (TypeError, ValueError):
+            result["max_series"] = 8
+
         series = result.get("series")
         rows: list[dict[str, Any]] = []
         if isinstance(series, list):
@@ -450,9 +474,10 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                     "name": str(row.get("name") or "")[:60],
                     "color": str(row.get("color") or "")[:32],
                 })
-                # Eight lines is already at the edge of what a reader can tell
-                # apart; past that the chart stops comparing and starts hiding.
-                if len(rows) >= 8:
+                # Past a dozen lines a single cartesian plane stops comparing
+                # and starts hiding: the cap is a legibility limit, not a
+                # storage one.
+                if len(rows) >= MAX_TREND_SERIES:
                     break
         result["series"] = rows
         try:

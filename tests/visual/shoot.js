@@ -700,6 +700,59 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== GRAFICO CHE SEGUE LE STANZE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trend: true, trendSource: "comfort", selectTrend: true });
+  await page.waitForTimeout(1200);
+
+  const tr2 = await page.evaluate(() => {
+    const svg = document.querySelector(".tr-chart, .trend svg, svg");
+    const paths = Array.from(document.querySelectorAll("path.tr-line, .tr-line"));
+    const box = svg ? svg.getBoundingClientRect() : null;
+    const boxes = paths.map((p) => {
+      const b = p.getBoundingClientRect();
+      return { top: Math.round(b.top), bottom: Math.round(b.bottom),
+        left: Math.round(b.left), right: Math.round(b.right),
+        stroke: getComputedStyle(p).stroke };
+    });
+    return { lines: paths.length, boxes,
+      svgTop: box ? Math.round(box.top) : null, svgBottom: box ? Math.round(box.bottom) : null,
+      svgLeft: box ? Math.round(box.left) : null, svgRight: box ? Math.round(box.right) : null,
+      legend: document.querySelectorAll(".tr-leg, .tr-legend span, .tr-dot").length,
+      modes: document.querySelectorAll("[data-trend-source]").length,
+      manualAdd: document.querySelectorAll("[data-trend-add]").length };
+  });
+  ok("una linea per stanza, senza elenco scritto a mano", tr2.lines >= 4, String(tr2.lines));
+  ok("i colori delle linee sono tutti diversi",
+     tr2.boxes.length >= 4 && new Set(tr2.boxes.map((b) => b.stroke)).size === tr2.boxes.length,
+     tr2.boxes.map((b) => b.stroke).join(" "));
+  // "sono all'interno dello stesso piano cartesiano": every line must live
+  // inside the SAME drawing box, not in a chart of its own.
+  ok("tutte le linee stanno nello stesso piano cartesiano",
+     tr2.boxes.length >= 4 && tr2.boxes.every((b) => b.top >= tr2.svgTop - 1 && b.bottom <= tr2.svgBottom + 1
+       && b.left >= tr2.svgLeft - 1 && b.right <= tr2.svgRight + 1),
+     JSON.stringify(tr2.boxes.slice(0, 2)));
+  ok("le linee si sovrappongono in orizzontale, non sono affiancate",
+     tr2.boxes.length >= 4 && tr2.boxes.every((b) => b.right > tr2.boxes[0].left && b.left < tr2.boxes[0].right));
+  ok("c'è una legenda con una voce per linea",
+     tr2.lines > 0 && tr2.legend >= tr2.lines, tr2.legend + " voci per " + tr2.lines + " linee");
+  ok("l'editor mostra le tre modalità", tr2.modes === 3, String(tr2.modes));
+  ok("in modalità automatica non si aggiungono linee a mano", tr2.manualAdd === 0);
+
+  // Same card, following a whole device_class instead.
+  const cls = await page.evaluate(() => {
+    const el = window.__EL__;
+    const card = el._sections()[0].items.find((i) => i.type === "trend");
+    card.source = "class"; card.device_class = "humidity";
+    el._trend = {}; el._signature = ""; el.render();
+    return { series: el._trendSeries(card).map((s2) => s2.entity) };
+  });
+  ok("seguendo una classe il grafico cambia grandezza",
+     cls.series.length >= 3 && cls.series.every((id) => /hum/i.test(id)), cls.series.join());
+
   console.log("\n== TEMPERATURE: ESTERNO E ELENCO A MANO ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

@@ -909,7 +909,10 @@ function kelvinToHex(kelvin) {
 const MAX_VEHICLES_JS = 8;
 
 const SERIES_COLORS = ["#00e5ff", "#ffd166", "#06d6a0", "#c77dff", "#ff8fab",
-                       "#8ecae6", "#ff924c", "#a0e7a0"];
+                       "#8ecae6", "#ff924c", "#a0e7a0", "#f4978e", "#b5e48c",
+                       "#7bdff2", "#e0aaff"];
+/** Mirrors MAX_TREND_SERIES in core/schema.py — keep the two in step. */
+const MAX_TREND_SERIES = 12;
 
 const TREND_RANGES = [
   { h: 6, l: "6 ore" }, { h: 24, l: "24 ore" },
@@ -1692,22 +1695,22 @@ class CyborgDashboard extends HTMLElement {
       return;
     }
     const rooms = this._comfortRooms({});
-    const series = rooms.slice(0, 8).map((r, i) => ({
-      entity: r.temperature, name: r.name,
-      color: SERIES_COLORS[i % SERIES_COLORS.length],
-    }));
     const section = { id: uid("sec"), title: "Temperature", icon: "mdi:home-thermometer",
       accent: "#4cc9f0", collapsed: false, items: [
         { id: uid("card"), type: "comfort", entity_id: "", name: "", size: "xl",
           appearance: { icon: "mdi:home-thermometer" }, states: {}, actions: {},
           rooms: [], bands: {}, filter: "" },
+        // source: "comfort" and not a frozen list of entities. The chart must
+        // follow the rooms: four today, ten when the next sensors arrive, with
+        // nobody going back into the editor to add the lines by hand.
         { id: uid("card"), type: "trend", entity_id: "", name: "Andamento", size: "xl",
           appearance: { icon: "mdi:chart-multiple" }, states: {}, actions: {},
-          series, hours: 24, y_min: null, y_max: null },
+          source: "comfort", device_class: "temperature", max_series: 8,
+          series: [], hours: 24, y_min: null, y_max: null },
       ] };
     this._page().sections.push(section);
     this._selected = { kind: "section", sectionId: section.id };
-    this._error = series.length ? "" : "Nessun sensore di temperatura assegnato a un'area";
+    this._error = rooms.length ? "" : "Nessun sensore di temperatura trovato";
     this._touch();
   }
 
@@ -4324,9 +4327,77 @@ class CyborgDashboard extends HTMLElement {
    * its own range would make a 2-degree wobble and a 20-degree swing look
    * identical.
    */
+  /**
+   * The lines of a comparison chart, resolved at render time.
+   *
+   * The card used to hold a fixed list of entities, chosen once. That is a
+   * SNAPSHOT, and a snapshot cannot answer "oggi quattro stanze, domani
+   * dieci": a sensor added next month never joins the chart, and nothing on
+   * screen says why. So the list is now DERIVED unless the user explicitly
+   * asked to write it himself:
+   *
+   *   manual  — the list he picked. Frozen on purpose.
+   *   comfort — the same rooms the Temperature card discovers, outdoor probe
+   *             included. Add a sensor to an area and the line appears.
+   *   class   — every numeric entity of one device_class in the instance.
+   *
+   * Colours are assigned by POSITION for the derived modes rather than stored,
+   * so a new room does not repaint every existing line: order is stable
+   * because the discovery itself is stable (outdoor first, then areas in
+   * registry order).
+   */
   _trendSeries(item) {
+    const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
+    const source = item.source || "manual";
+    const live = (id) => this._hass.states[id];
+
+    if (source === "comfort") {
+      // Both derived modes depend on the area registry, and the registry is
+      // fetched lazily. Without this the card sat on "scegli le grandezze"
+      // forever after a plain page load: nothing else on the page had asked
+      // for the registry, so the discovery had nothing to discover.
+      if (!this._registry && !this._registryLoading) this._loadRegistry();
+      return this._comfortRooms({}).map((r, i) => ({
+        entity: r.temperature, name: r.name,
+        color: SERIES_COLORS[i % SERIES_COLORS.length],
+      })).filter((r) => live(r.entity)).slice(0, cap);
+    }
+
+    if (source === "class") {
+      const dc = item.device_class || "temperature";
+      const cat = (this._registry && this._registry.category) || {};
+      const area = (this._registry && this._registry.entityArea) || {};
+      if (!this._registry && !this._registryLoading) this._loadRegistry();
+      const ids = Object.keys(this._hass.states).filter((id) => {
+        const st = this._hass.states[id];
+        return st && !cat[id] && st.attributes.device_class === dc
+          && Number.isFinite(parseFloat(st.state));
+      });
+      // Sort key, in order of importance:
+      //   0  outdoor probes  — no area, but the reference every room is read
+      //                        against. Sorting them with the other area-less
+      //                        entities pushed them to the end, where the line
+      //                        cap cut off precisely the line that matters most.
+      //   1  entities in an area, alphabetically by area: a stable human order.
+      //   2  everything else with no area.
+      const rank = (id) => {
+        const st = this._hass.states[id];
+        const hay = (id + " " + ((st && st.attributes.friendly_name) || "")).toLowerCase();
+        if (!area[id]) return OUTDOOR_RE.test(hay) ? 0 : 2;
+        return 1;
+      };
+      ids.sort((a, b) => rank(a) - rank(b)
+        || (area[a] || "").localeCompare(area[b] || "")
+        || a.localeCompare(b));
+      return ids.slice(0, cap).map((id, i) => ({
+        entity: id,
+        name: area[id] || (this._hass.states[id].attributes.friendly_name || id),
+        color: SERIES_COLORS[i % SERIES_COLORS.length],
+      }));
+    }
+
     const rows = Array.isArray(item.series) ? item.series : [];
-    return rows.filter((r) => r && r.entity && this._hass.states[r.entity]);
+    return rows.filter((r) => r && r.entity && live(r.entity)).slice(0, cap);
   }
 
   _loadTrend(item) {
@@ -5928,12 +5999,63 @@ class CyborgDashboard extends HTMLElement {
         return Number.isFinite(parseFloat(st.state)) && st.attributes.unit_of_measurement;
       });
       const chosen = Array.isArray(card.series) ? card.series : [];
-      const dc = (id) => (this._hass.states[id].attributes.device_class || "");
+      const dc = (id) => ((this._hass.states[id] && this._hass.states[id].attributes.device_class) || "");
       const sameKind = chosen.length ? dc(chosen[0].entity) : null;
+      const source = card.source || "manual";
+      const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(card.max_series) || 8));
+      const resolved = this._trendSeries(card);
+      // Every device_class that actually exists here, with how many entities
+      // carry it: offering the full Home Assistant list would mostly be
+      // classes this house does not have.
+      const classes = {};
+      for (const id of Object.keys(this._hass.states)) {
+        const st = this._hass.states[id];
+        const k = st && st.attributes.device_class;
+        if (!k || !Number.isFinite(parseFloat(st.state))) continue;
+        classes[k] = (classes[k] || 0) + 1;
+      }
+      const classKeys = Object.keys(classes).sort();
+
+      const modeBar = `<div class="seg">
+          <button class="${source === "comfort" ? "active" : ""}" data-trend-source="comfort">Segui le stanze</button>
+          <button class="${source === "class" ? "active" : ""}" data-trend-source="class">Tutte di un tipo</button>
+          <button class="${source === "manual" ? "active" : ""}" data-trend-source="manual">Scelte da me</button>
+        </div>`;
+
+      if (source !== "manual") {
+        return `<div class="section">
+          <strong>GRANDEZZE A CONFRONTO</strong>
+          <span class="hint">Le linee <strong>non</strong> sono un elenco fisso: vengono ricalcolate a ogni disegno. Aggiungi domani un sensore e la sua linea compare da sola, senza tornare qui.</span>
+          ${modeBar}
+          ${source === "comfort"
+            ? `<span class="hint">Segue le stesse stanze della card Temperature — sonda esterna compresa — e ne disegna la temperatura. È la modalità giusta per «confronta tutte le stanze»: cambia le stanze lì e il grafico segue.</span>`
+            : `<label>TIPO DI GRANDEZZA<select data-prop="device_class">
+                 ${classKeys.map((k) => `<option value="${esc(k)}" ${(card.device_class || "temperature") === k ? "selected" : ""}>${esc(k)} · ${classes[k]} entità</option>`).join("")}
+               </select><span class="hint">Ogni entità numerica di questo tipo diventa una linea, ordinata per stanza. Una sola unità di misura per grafico: mescolare °C e W su un asse solo non confronta niente.</span></label>`}
+          <label>MASSIMO DI LINEE<input type="number" min="1" max="${MAX_TREND_SERIES}" step="1" data-prop="max_series" value="${cap}"></label>
+          <span class="hint">${resolved.length} linee adesso${resolved.length >= cap ? " · limite raggiunto, le altre restano fuori" : ""}. Oltre le otto un piano cartesiano smette di confrontare e comincia a nascondere: il tetto è di ${MAX_TREND_SERIES}.</span>
+          <div class="eco-dev-list">${resolved.map((row) => `<div class="eco-dev-edit">
+            <i class="tr-dot" style="background:${esc(row.color)}"></i>
+            <div class="ede-txt"><strong>${esc(row.name)}</strong><small>${esc(row.entity)}</small></div>
+          </div>`).join("") || '<div class="entity-result-empty">Nessuna entità trovata per questa scelta.</div>'}</div>
+        </div>
+        <div class="section">
+          <strong>PERIODO E SCALA</strong>
+          <label>PERIODO<select data-prop="hours">
+            ${TREND_RANGES.map((r) => `<option value="${r.h}" ${(card.hours || 24) === r.h ? "selected" : ""}>${esc(r.l)}</option>`).join("")}
+          </select></label>
+          <div class="two">
+            <label>MINIMO<input type="number" step="0.5" data-prop="y_min" value="${card.y_min ?? ""}" placeholder="auto"></label>
+            <label>MASSIMO<input type="number" step="0.5" data-prop="y_max" value="${card.y_max ?? ""}" placeholder="auto"></label>
+          </div>
+        </div>`;
+      }
+
       return `<div class="section">
         <strong>GRANDEZZE A CONFRONTO</strong>
-        <span class="hint">Fino a otto linee sullo stesso grafico, con una scala verticale sola: è quella che rende leggibile "il bagno è più freddo del soggiorno". ${
+        <span class="hint">Elenco scritto da te: resta com'è finché non lo cambi. Se vuoi che il grafico segua le stanze da solo — oggi quattro, domani dieci — usa una delle altre due modalità. ${
           sameKind ? `Stai confrontando grandezze di tipo <strong>${esc(sameKind)}</strong>.` : ""}</span>
+        ${modeBar}
         <div class="eco-dev-list" data-keep-scroll="eco-devices">${chosen.map((row, i) => {
           const st = this._hass.states[row.entity];
           const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
@@ -5949,7 +6071,8 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini danger" data-trend-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>`;
         }).join("") || '<div class="entity-result-empty">Nessuna grandezza scelta.</div>'}</div>
-        ${chosen.length >= 8 ? '<span class="hint">Raggiunto il massimo di otto linee.</span>' : `<label>AGGIUNGI UNA GRANDEZZA<select data-trend-add>
+        ${chosen.length >= MAX_TREND_SERIES ? `<span class="hint">Raggiunto il tetto di ${MAX_TREND_SERIES} linee.</span>` : `<button class="secondary wide" data-trend-fill><ha-icon icon="mdi:playlist-plus"></ha-icon> AGGIUNGI TUTTE LE TEMPERATURE DELLE STANZE</button>
+        <label>AGGIUNGI UNA GRANDEZZA<select data-trend-add>
           <option value="">— scegli un'entità numerica —</option>
           ${numeric.filter((id) => !chosen.some((r) => r.entity === id))
             .map((id) => `<option value="${esc(id)}">${esc(this._hass.states[id].attributes.friendly_name || id)} · ${esc(this._hass.states[id].attributes.unit_of_measurement || "")}</option>`).join("")}
@@ -7301,11 +7424,41 @@ class CyborgDashboard extends HTMLElement {
     const limReset = q("[data-limits-reset]");
     if (limReset && card) limReset.onclick = () => { card.limits = {}; this._touch(); };
 
+    all("[data-trend-source]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const next = el.getAttribute("data-trend-source");
+        // Switching to "scelte da me" MATERIALISES whatever is on screen, so
+        // the chart the user is looking at does not empty itself the moment
+        // he asks to take control of it.
+        if (next === "manual" && (card.source || "manual") !== "manual") {
+          card.series = this._trendSeries(card).map((r) => ({
+            entity: r.entity, name: r.name || "", color: r.color || "" }));
+        }
+        card.source = next;
+        this._trend = {};
+        this._touch();
+      };
+    });
+    const trendFill = q("[data-trend-fill]");
+    if (trendFill && card) trendFill.onclick = () => {
+      card.series = Array.isArray(card.series) ? card.series : [];
+      const have = new Set(card.series.map((r) => r.entity));
+      for (const room of this._comfortRooms({})) {
+        if (card.series.length >= MAX_TREND_SERIES) break;
+        if (have.has(room.temperature)) continue;
+        card.series.push({ entity: room.temperature, name: room.name,
+          color: SERIES_COLORS[card.series.length % SERIES_COLORS.length] });
+        have.add(room.temperature);
+      }
+      this._trend = {};
+      this._touch();
+    };
     const trendAdd = q("[data-trend-add]");
     if (trendAdd && card) trendAdd.onchange = () => {
       if (!trendAdd.value) return;
       card.series = Array.isArray(card.series) ? card.series : [];
-      if (card.series.length < 8 && !card.series.some((r) => r.entity === trendAdd.value)) {
+      if (card.series.length < MAX_TREND_SERIES && !card.series.some((r) => r.entity === trendAdd.value)) {
         card.series.push({ entity: trendAdd.value, name: "",
           color: SERIES_COLORS[card.series.length % SERIES_COLORS.length] });
       }
@@ -9651,7 +9804,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.24.0";
+const CYBORG_BUILD = "0.25.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

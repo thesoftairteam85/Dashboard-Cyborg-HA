@@ -4,6 +4,59 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.25.0] - 2026-08-23
+
+Il grafico di confronto non è più un elenco fisso: segue le stanze da solo.
+Schema alla versione 7.
+
+### Il problema
+La card «Confronto andamenti» faceva già la cosa giusta — più linee sullo
+stesso piano cartesiano, una scala verticale sola — ma teneva un **elenco di
+entità scelto una volta**. Un elenco scelto una volta è una fotografia, e una
+fotografia non può rispondere a «oggi quattro stanze, domani dieci»: il
+sensore che installi il mese prossimo non entra nel grafico, e niente sullo
+schermo spiega perché. Andava aggiunto a mano, una tendina alla volta.
+
+### Novità
+- **Tre modalità per decidere da dove arrivano le linee** (segmentato in cima
+  all'editor del grafico):
+  - **Segui le stanze** — le stesse stanze della card Temperature, sonda
+    esterna compresa. Aggiungi un sensore a un'area e la linea compare da
+    sola, senza riaprire l'editor. È la modalità con cui nasce il grafico
+    creato dal pulsante TEMPERATURE.
+  - **Tutte di un tipo** — segue un `device_class` (temperatura, umidità,
+    potenza…) su tutta l'istanza, ordinate per stanza. Il menù elenca solo le
+    classi che esistono davvero qui, con quante entità le portano.
+  - **Scelte da me** — il comportamento di prima, congelato apposta.
+- **Il tetto passa da 8 a 12 linee**, con il numero massimo impostabile.
+  Oltre le otto un piano cartesiano smette di confrontare e comincia a
+  nascondere: il limite resta, ma ora è una tua decisione dentro un tetto
+  dichiarato. Aggiunti quattro colori distinti per le linee 9-12.
+- **Passare a «scelte da me» materializza quello che c'è a schermo**, invece
+  di svuotare il grafico nel momento in cui chiedi di comandarlo tu.
+- Nella modalità manuale, **AGGIUNGI TUTTE LE TEMPERATURE DELLE STANZE**
+  riempie l'elenco in un colpo solo.
+
+### Correzioni
+- **Il grafico «segui le stanze» restava vuoto dopo un semplice ricaricamento
+  della pagina.** Le modalità automatiche dipendono dal registro aree, che
+  viene letto pigramente: se nient'altro nella pagina lo aveva già chiesto,
+  la ricerca non aveva niente su cui lavorare e la card mostrava per sempre
+  «scegli le grandezze». Ora è la card stessa a richiederlo.
+- **Seguendo un `device_class`, la temperatura esterna veniva tagliata via dal
+  limite di linee.** Non avendo area finiva in fondo all'ordinamento, quindi
+  era la prima a cadere fuori: si perdeva esattamente la linea per cui il
+  confronto esiste. Ora le sonde esterne sono ordinate per prime.
+
+### Verifiche
+- 723 asserzioni frontend (21 nuove) e **134 misurate** in Chromium (8 nuove).
+  Fra le nuove: che una stanza aggiunta *dopo* la creazione della card entri
+  da sola nel grafico, che aggiungerla non ricolori le linee già presenti, e
+  — misurando i rettangoli reali dei tracciati — che tutte le linee stiano
+  dentro **lo stesso** riquadro di disegno e si sovrappongano in orizzontale,
+  cioè che siano davvero sullo stesso piano cartesiano e non affiancate.
+
+
 ## [0.24.0] - 2026-08-23
 
 La sezione Temperature c'era, ma sceglieva male e ti lasciava fuori

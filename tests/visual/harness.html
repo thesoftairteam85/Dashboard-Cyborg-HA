@@ -114,7 +114,9 @@ const hass={states,
     if(m.type==="history/history_during_period"){
       const out={}; const now=Date.now();
       const base={"sensor.balcone_temp":28.9,"sensor.soggiorno_temp":26.3,
-                  "sensor.bagno_temp":24.8,"sensor.camera_temp":21.8};
+                  "sensor.bagno_temp":24.8,"sensor.camera_temp":21.8,
+                  "sensor.cucina_temp":24.6,"sensor.temperatura_esterna":24.0,
+                  "sensor.soggiorno_hum":49,"sensor.bagno_hum":51,"sensor.camera_hum":47};
       for(const id of m.entity_ids||[]){
         const b=base[id]; if(b===undefined){out[id]=[];continue;}
         const pts=[];
@@ -240,6 +242,10 @@ window.__mount=(dash,opts)=>{
                     {entity:"sensor.soggiorno_temp",name:"Soggiorno",color:"#ffd166"},
                     {entity:"sensor.bagno_temp",name:"Bagno",color:"#06d6a0"},
                     {entity:"sensor.camera_temp",name:"Soppalco",color:"#c77dff"}]});
+          if(opts.trendSource){sec.items[0].source=opts.trendSource;sec.items[0].series=[];
+            sec.items[0].device_class=opts.trendClass||"temperature";
+            sec.items[0].max_series=opts.trendMax||8;}
+          if(opts.selectTrend){el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"trcard"};}
         }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
