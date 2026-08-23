@@ -54,6 +54,7 @@ const states={
  "sensor.v_l3":S("229.8",{friendly_name:"Tensione L3",device_class:"voltage",unit_of_measurement:"V"}),
  "sensor.i_l1":S("4.85",{friendly_name:"Corrente L1",device_class:"current",unit_of_measurement:"A"}),
  "sensor.i_l2":S("2.14",{friendly_name:"Corrente L2",device_class:"current",unit_of_measurement:"A"}),
+ "sensor.temperatura_esterna":S("24.0",{friendly_name:"Temperatura esterna",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_cpu":S("52.1",{friendly_name:"Raspberry CPU",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_inv":S("91.3",{friendly_name:"Inverter",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_batt":S("34.6",{friendly_name:"Pacco batteria",device_class:"temperature",unit_of_measurement:"°C"}),
@@ -267,6 +268,7 @@ window.__mount=(dash,opts)=>{
           const sec=el._sections()[0]||{items:[]};
           sec.items.unshift({id:"cfcard",type:"comfort",entity_id:"",name:"",size:"xl",
             appearance:{},states:{},actions:{},rooms:[],bands:{},filter:""});
+          if(opts.selectComfort){el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"cfcard"};}
         }
         if(opts&&opts.rotate&&el._rooms().length){ el._rooms()[0].rotation=35; }
         if(opts&&opts.balcony&&el._rooms().length){
@@ -295,7 +297,22 @@ window.__mount=(dash,opts)=>{
           });
         }
         el._signature="";el.render();
-        setTimeout(()=>r(true),350);
+        setTimeout(function(){
+          // materialised LAST, after the registry has certainly arrived:
+          // _comfortRooms returns nothing without it, and a silently empty
+          // list would make the test pass for the wrong reason.
+          if(opts&&opts.manualComfort){
+            el._sections().forEach(function(sec){
+              (sec.items||[]).forEach(function(it){
+                if(it.type!=="comfort")return;
+                it.rooms=el._comfortRooms(it).map(function(r){
+                  return {temperature:r.temperature,humidity:r.humidity||null,name:r.name||"",icon:r.icon||""};});
+              });
+            });
+            el._signature="";el.render();
+          }
+          r(true);
+        },350);
       };
       wait();
     };

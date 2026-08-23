@@ -4,6 +4,52 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.24.0] - 2026-08-23
+
+La sezione Temperature c'era, ma sceglieva male e ti lasciava fuori
+l'esterno. Corretta alla radice.
+
+### Correzioni
+- **Veniva scelto il sensore sbagliato dentro una stanza.** La ricerca
+  prendeva il *primo* sensore di temperatura dell'area, e l'ordine del
+  registro entità non dice niente sulla rilevanza. Nel tuo bagno c'è una
+  Shelly Plug che pubblica la temperatura del proprio chip: bastava che fosse
+  elencata per prima e la card avrebbe annunciato il bagno a 46 °C. Ora i
+  candidati vengono **ordinati per merito**: chi misura anche l'umidità dallo
+  stesso dispositivo è un sensore ambientale e vince; chi si chiama
+  presa/relè/CPU/batteria/inverter sta misurando se stesso e viene retrocesso.
+  A parità, vince il nome più corto — il sensore principale di un dispositivo
+  è quasi sempre quello senza qualificatori aggiunti.
+- **La temperatura esterna era strutturalmente esclusa.** In Home Assistant
+  non esiste un'area «fuori», quindi `sensor.temperatura_esterna` non
+  appartiene a nessuna e la ricerca per aree non poteva vederla: proprio il
+  confronto dentro/fuori che avevi chiesto era l'unico impossibile. Ora i
+  sensori che parlano dell'esterno entrano **in cima**, con l'icona del sole,
+  perché l'esterno è il riferimento contro cui si leggono le stanze.
+- **L'umidità viene abbinata per dispositivo, non per area.** Due sensori
+  nella stessa stanza possono discordare; accoppiare temperatura e umidità
+  dello stesso apparecchio evita che una card descriva due posti diversi.
+
+### Novità
+- **Elenco delle stanze modificabile a mano.** Prima l'editor mostrava cosa
+  era stato rilevato e basta. Ora c'è **SCEGLI LE STANZE A MANO**: nome,
+  icona, sensore di temperatura e sensore di umidità per ogni riga, con
+  spostamento su/giù, aggiunta e rimozione. I menù propongono **tutti** i
+  sensori, area o non area — è così che ci metti dentro l'esterno o un
+  sensore che Home Assistant non ha classificato. Un pulsante riporta al
+  rilevamento automatico.
+- Prendere il comando **parte dall'elenco già rilevato**, non da una lista
+  vuota: chi personalizza quasi sempre vuole correggere una riga su cinque,
+  non riscriverle tutte.
+
+### Verifiche
+- 702 asserzioni frontend (16 nuove) e **126 misurate** in Chromium (7 nuove).
+  Le nuove riproducono la disposizione reale dei sensori di casa tua — sonda
+  esterna senza area, bagno con la Shelly Plug elencata per prima, camera con
+  due sensori di temperatura — e verificano che il bagno legga il sensore a
+  muro e non il chip della presa.
+
+
 ## [0.23.0] - 2026-08-23
 
 L'ordine delle schede e delle sezioni lo decidi tu.

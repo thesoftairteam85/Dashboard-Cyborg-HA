@@ -942,6 +942,17 @@ const WHITE_PRESETS = [
  * balcony do not share an opinion about what is warm.
  * ======================================================================== */
 
+/**
+ * A temperature reading that is about a DEVICE, not about a room.
+ *
+ * Plugs, relays, inverters and computers all publish their own operating
+ * temperature with `device_class: temperature`, indistinguishable from a wall
+ * sensor as far as the state machine is concerned. Only the name tells them
+ * apart, so the name is what gets tested.
+ */
+const CHIP_TEMP_RE = /(cpu|processor|core temp|chip|board|battery|batteria|plug|presa|relay|rel\u00e8|inverter|charger|caricat|device_temp|internal_temp|_pm[0-9]?_|heatsink|dissipat)/;
+/** Sensors that describe the outside, which belongs to no Home Assistant area. */
+const OUTDOOR_RE = /(esterno|esterna|external|outdoor|outside|giardino|meteo|weather|open_meteo|fuori)/;
 const COMFORT_DEFAULTS = { cold: 18, warm: 26, dry: 30, humid: 60 };
 
 function comfortBands(item) {
@@ -3883,20 +3894,89 @@ class CyborgDashboard extends HTMLElement {
       }));
     }
     if (!this._registry) return [];
+    const cat = this._registry.category || {};
+    const dev = this._registry.entityDevice || {};
+    const numeric = (id) => {
+      const st = this._hass.states[id];
+      return st && !cat[id] && Number.isFinite(parseFloat(st.state)) ? st : null;
+    };
+    const ofClass = (id, dc) => {
+      const st = numeric(id);
+      return st && st.attributes.device_class === dc;
+    };
+
+    // Every device that reports humidity. A thing that measures BOTH
+    // temperature and humidity is a climate sensor; a thing that reports only
+    // temperature may well be a relay reporting how hot its own chip is.
+    const humidDevices = new Set();
+    for (const id of Object.keys(this._hass.states)) {
+      if (ofClass(id, "humidity") && dev[id]) humidDevices.add(dev[id]);
+    }
+
+    /**
+     * Which temperature sensor represents a room.
+     *
+     * The previous version took the FIRST match in the area, which is
+     * arbitrary: a Shelly plug in the bathroom exposes its internal chip
+     * temperature, and if the registry happened to list it first the card
+     * would proudly report the bathroom at 45 °C. Order in the entity registry
+     * is not a statement about relevance, so it must not be treated as one.
+     *
+     * Ranking, strongest signal first:
+     *  +60  the same physical device also reports humidity -> climate sensor
+     * -120  the name says plug/relay/CPU/battery -> it is measuring itself
+     *  tie  shorter entity_id wins: the primary sensor of a device is almost
+     *       always the one without the extra qualifier in its name.
+     */
+    const score = (id) => {
+      let s = 0;
+      const st = this._hass.states[id];
+      const hay = (id + " " + ((st && st.attributes.friendly_name) || "")).toLowerCase();
+      if (CHIP_TEMP_RE.test(hay)) s -= 120;
+      if (dev[id] && humidDevices.has(dev[id])) s += 60;
+      return s;
+    };
+    const best = (ids) => ids.slice().sort((a, b) => {
+      const d = score(b) - score(a);
+      return d !== 0 ? d : a.length - b.length;
+    })[0] || null;
+
     const rows = [];
+    const claimed = new Set();
     for (const area of this._registry.areas) {
       const pool = this._registry.byArea[area.area_id] || [];
-      const cat = this._registry.category || {};
-      const find = (dc) => pool.find((id) => {
-        const st = this._hass.states[id];
-        return st && !cat[id] && st.attributes.device_class === dc
-          && Number.isFinite(parseFloat(st.state));
-      });
-      const temperature = find("temperature");
+      const temps = pool.filter((id) => ofClass(id, "temperature"));
+      const hums = pool.filter((id) => ofClass(id, "humidity"));
+      const temperature = best(temps);
       if (!temperature) continue;
+      // Prefer the humidity reading from the SAME device: two sensors in one
+      // room can disagree, and pairing them by device keeps a single card from
+      // describing two different places.
+      const sameDevice = hums.find((h) => dev[h] && dev[h] === dev[temperature]);
+      pool.forEach((id) => claimed.add(id));
       rows.push({ key: area.area_id, name: area.name || area.area_id,
         icon: area.icon || roomIconFor(area.name || area.area_id),
-        temperature, humidity: find("humidity") || null });
+        temperature, humidity: sameDevice || hums[0] || null });
+    }
+
+    // The outdoor sensor almost never belongs to an area — there is no
+    // "outside" room in Home Assistant — and excluding it made the one
+    // comparison people actually want (inside vs outside) impossible. It goes
+    // FIRST: outside is the reference the rooms are read against.
+    const outdoor = Object.keys(this._hass.states)
+      .filter((id) => !claimed.has(id) && ofClass(id, "temperature"))
+      .filter((id) => {
+        const st = this._hass.states[id];
+        return OUTDOOR_RE.test((id + " " + ((st && st.attributes.friendly_name) || "")).toLowerCase());
+      })
+      .sort((a, b) => a.length - b.length);
+    for (const id of outdoor.slice(0, 3)) {
+      const st = this._hass.states[id];
+      rows.unshift({ key: id, name: (st && st.attributes.friendly_name) || "Esterno",
+        icon: "mdi:sun-thermometer-outline", temperature: id,
+        humidity: Object.keys(this._hass.states).find((h) =>
+          !claimed.has(h) && ofClass(h, "humidity") && dev[h] && dev[h] === dev[id]) || null,
+        outdoor: true });
     }
     return rows;
   }
@@ -5697,16 +5777,50 @@ class CyborgDashboard extends HTMLElement {
     if (card.type === "comfort") {
       const bands = comfortBands(card);
       const rooms = this._comfortRooms(card);
-      return `<div class="section">
-        <strong>STANZE</strong>
-        <span class="hint">${rooms.length
-          ? `${rooms.length} stanze rilevate dalle aree di Home Assistant: ogni area con un sensore di temperatura diventa una riga, e l'umidità della stessa area le viene abbinata. Un sensore spostato di area si sposta anche qui, da solo.`
-          : "Nessuna area con un sensore di temperatura. Assegna i sensori alle aree in Home Assistant."}</span>
-        ${rooms.map((r) => `<div class="eco-dev-edit">
+      const manual = Array.isArray(card.rooms) && card.rooms.length > 0;
+      // Every numeric sensor of the right class, area or no area: the outdoor
+      // probe belongs to no room and must still be selectable by hand.
+      const pick = (dc) => Object.keys(this._hass.states).filter((id) => {
+        const st = this._hass.states[id];
+        return st && st.attributes.device_class === dc && Number.isFinite(parseFloat(st.state));
+      }).sort();
+      const opts = (list, sel, none) => `<option value="">${esc(none)}</option>` + list.map((id) =>
+        `<option value="${esc(id)}" ${id === sel ? "selected" : ""}>${
+          esc((this._hass.states[id].attributes.friendly_name || id))}</option>`).join("");
+      const temps = pick("temperature");
+      const hums = pick("humidity");
+
+      const autoList = `${rooms.map((r) => `<div class="eco-dev-edit">
           <ha-icon icon="${esc(r.icon)}"></ha-icon>
-          <div class="ede-txt"><strong>${esc(r.name)}</strong>
+          <div class="ede-txt"><strong>${esc(r.name)}${r.outdoor ? " · esterno" : ""}</strong>
             <small>${esc(r.temperature)}${r.humidity ? " · " + esc(r.humidity) : " · senza umidità"}</small></div>
         </div>`).join("")}
+        <button class="secondary wide" data-comfort-customize><ha-icon icon="mdi:pencil-outline"></ha-icon> SCEGLI LE STANZE A MANO</button>`;
+
+      const manualList = `${(card.rooms || []).map((r, i) => `<div class="cf-edit-row">
+          <div class="two">
+            <label>NOME<input type="text" data-comfort-room="${i}|name" value="${esc(r.name || "")}" placeholder="Soggiorno"></label>
+            <label>ICONA<input type="text" data-comfort-room="${i}|icon" value="${esc(r.icon || "")}" placeholder="mdi:sofa-outline"></label>
+          </div>
+          <label>TEMPERATURA<select data-comfort-room="${i}|temperature">${opts(temps, r.temperature, "— scegli —")}</select></label>
+          <label>UMIDITÀ<select data-comfort-room="${i}|humidity">${opts(hums, r.humidity, "— nessuna —")}</select></label>
+          <div class="cf-edit-tools">
+            <button class="mini" data-comfort-move="${i}:-1" ${i === 0 ? "disabled" : ""} title="Sposta su"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+            <button class="mini" data-comfort-move="${i}:1" ${i === (card.rooms || []).length - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+            <button class="mini danger" data-comfort-remove="${i}" title="Togli"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+          </div>
+        </div>`).join("")}
+        <button class="secondary wide" data-comfort-add><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI UNA STANZA</button>
+        <button class="secondary wide" data-comfort-auto><ha-icon icon="mdi:restore"></ha-icon> TORNA AL RILEVAMENTO AUTOMATICO</button>`;
+
+      return `<div class="section">
+        <strong>STANZE</strong>
+        <span class="hint">${manual
+          ? "Elenco scritto da te: queste righe valgono e il rilevamento automatico è sospeso. Puoi mettere qui qualsiasi sensore, anche uno che non appartiene a nessuna area — è così che entra la temperatura esterna."
+          : rooms.length
+            ? `${rooms.length} righe rilevate da sole. Ogni area con un sensore di temperatura diventa una riga e l'umidità della stessa area le viene abbinata; i sensori che parlano dell'esterno entrano in cima anche senza area. Se la scelta automatica non ti convince, prendi il comando.`
+            : "Nessun sensore di temperatura trovato. Assegna i sensori alle aree in Home Assistant, oppure scegli le stanze a mano."}</span>
+        ${manual ? manualList : autoList}
       </div>
       <div class="section">
         <strong>SOGLIE DI COMFORT</strong>
@@ -6953,6 +7067,68 @@ class CyborgDashboard extends HTMLElement {
     });
     const cfReset = q("[data-comfort-reset]");
     if (cfReset && card) cfReset.onclick = () => { card.bands = {}; this._touch(); };
+
+    // --- l'elenco delle stanze scritto a mano
+    //
+    // "Personalizza" MATERIALIZZA il rilevamento automatico invece di partire
+    // da un elenco vuoto: chi prende il comando quasi sempre vuole correggere
+    // una riga su cinque, non riscriverle tutte. Partire dal vuoto gli
+    // farebbe rifare a mano il lavoro che il sistema aveva già fatto bene.
+    const cfCustom = q("[data-comfort-customize]");
+    if (cfCustom && card) cfCustom.onclick = () => {
+      card.rooms = this._comfortRooms(card).map((r) => ({
+        temperature: r.temperature, humidity: r.humidity || null,
+        name: r.name || "", icon: r.icon || "",
+      }));
+      if (!card.rooms.length) card.rooms = [{ temperature: "", humidity: null, name: "", icon: "" }];
+      this._touch();
+    };
+    const cfAuto = q("[data-comfort-auto]");
+    if (cfAuto && card) cfAuto.onclick = () => { card.rooms = []; this._touch(); };
+    const cfAdd = q("[data-comfort-add]");
+    if (cfAdd && card) cfAdd.onclick = () => {
+      card.rooms = Array.isArray(card.rooms) ? card.rooms : [];
+      const used = new Set(card.rooms.map((r) => r.temperature));
+      const free = Object.keys(this._hass.states).find((id) => {
+        const st = this._hass.states[id];
+        return st && !used.has(id) && st.attributes.device_class === "temperature"
+          && Number.isFinite(parseFloat(st.state));
+      }) || "";
+      const st = free && this._hass.states[free];
+      card.rooms.push({ temperature: free, humidity: null,
+        name: (st && st.attributes.friendly_name) || "", icon: "" });
+      this._touch();
+    };
+    all("[data-comfort-room]").forEach((el) => {
+      el.onchange = () => {
+        if (!card || !Array.isArray(card.rooms)) return;
+        const [i, key] = el.getAttribute("data-comfort-room").split("|");
+        const row = card.rooms[Number(i)];
+        if (!row) return;
+        row[key] = el.value || (key === "humidity" ? null : "");
+        this._touch();
+      };
+    });
+    all("[data-comfort-move]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.rooms)) return;
+        const [i, d] = el.getAttribute("data-comfort-move").split(":").map(Number);
+        const j = i + d;
+        if (j < 0 || j >= card.rooms.length) return;
+        [card.rooms[i], card.rooms[j]] = [card.rooms[j], card.rooms[i]];
+        this._touch();
+      };
+    });
+    all("[data-comfort-remove]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.rooms)) return;
+        card.rooms.splice(Number(el.getAttribute("data-comfort-remove")), 1);
+        // An empty manual list would silently fall back to auto-detection and
+        // look like the removal was ignored, so the last row taken out is an
+        // explicit return to automatic.
+        this._touch();
+      };
+    });
 
     // --- auto elettriche (definite a livello di dashboard)
     const flowVeh = q("[data-flow-vehicles]");
@@ -8793,6 +8969,8 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .eco-dev-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}
 .eco-dev-edit{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;
   background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.cf-edit-row{padding:10px;margin-bottom:8px;border-radius:12px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 70%,transparent)}
+.cf-edit-tools{display:flex;gap:6px;justify-content:flex-end;margin-top:8px}
 .eco-dev-edit>ha-icon{--mdc-icon-size:16px;color:var(--accent);flex-shrink:0}
 .ede-txt{flex:1;min-width:0}
 .ede-txt strong{display:block;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -9473,7 +9651,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.23.0";
+const CYBORG_BUILD = "0.24.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

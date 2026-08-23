@@ -2094,6 +2094,100 @@ console.log("\n== 26. ORDINE DECISO DALL'UTENTE: PAGINE E SEZIONI ==");
   ok("stato ripristinato dopo la sezione 26", el._dashboard.pages.length === 1);
 }
 
+console.log("\n== 27. TEMPERATURE: SENSORE GIUSTO, ESTERNO COMPRESO, ELENCO A MANO ==");
+{
+  // The real layout of Oscar's house, faithfully: an outdoor probe with no
+  // area at all, a bathroom whose area also contains a Shelly plug that
+  // reports its own chip temperature, and a bedroom with TWO temperature
+  // sensors (a wall sensor and the air conditioner).
+  states["sensor.temperatura_esterna"] = S("24.0", { friendly_name: "Temperatura esterna", device_class: "temperature" });
+  states["sensor.system_monitor_processor_temperature"] = S("54.0", { friendly_name: "Processor temperature", device_class: "temperature" });
+  states["sensor.sensore_t_h_salotto_temperatura"] = S("24.5", { friendly_name: "Salotto temperatura", device_class: "temperature" });
+  states["sensor.sensore_t_h_salotto_umidita"] = S("49.0", { friendly_name: "Salotto umidità", device_class: "humidity" });
+  states["sensor.t_u_bagno_temperatura"] = S("24.8", { friendly_name: "Bagno temperatura", device_class: "temperature" });
+  states["sensor.t_u_bagno_umidita"] = S("51.0", { friendly_name: "Bagno umidità", device_class: "humidity" });
+  states["sensor.shellyplusplugs_e465b8b19f24_temperature"] = S("46.2", { friendly_name: "Shelly Plug S temperature", device_class: "temperature" });
+  states["sensor.camera_soppalco_temperatura"] = S("24.8", { friendly_name: "Soppalco temperatura", device_class: "temperature" });
+  states["sensor.camera_soppalco_umidita"] = S("49.0", { friendly_name: "Soppalco umidità", device_class: "humidity" });
+  states["sensor.condizionatore_dati_ambientali_temperatura"] = S("24.1", { friendly_name: "Condizionatore temperatura", device_class: "temperature" });
+
+  el._registry = {
+    areas: [{ area_id: "soggiorno", name: "Soggiorno", icon: null },
+            { area_id: "bagno", name: "Bagno", icon: "mdi:toilet" },
+            { area_id: "camera", name: "Camera da letto", icon: null }],
+    byArea: {
+      soggiorno: ["sensor.sensore_t_h_salotto_temperatura", "sensor.sensore_t_h_salotto_umidita"],
+      // the plug is listed FIRST on purpose: registry order must not decide
+      bagno: ["sensor.shellyplusplugs_e465b8b19f24_temperature",
+              "sensor.t_u_bagno_temperatura", "sensor.t_u_bagno_umidita"],
+      camera: ["sensor.condizionatore_dati_ambientali_temperatura",
+               "sensor.camera_soppalco_temperatura", "sensor.camera_soppalco_umidita"] },
+    entityArea: {}, category: {},
+    entityDevice: {
+      "sensor.sensore_t_h_salotto_temperatura": "d_salotto",
+      "sensor.sensore_t_h_salotto_umidita": "d_salotto",
+      "sensor.t_u_bagno_temperatura": "d_bagno",
+      "sensor.t_u_bagno_umidita": "d_bagno",
+      "sensor.shellyplusplugs_e465b8b19f24_temperature": "d_plug",
+      "sensor.camera_soppalco_temperatura": "d_soppalco",
+      "sensor.camera_soppalco_umidita": "d_soppalco",
+      "sensor.condizionatore_dati_ambientali_temperatura": "d_cdz" },
+    deviceName: {} };
+
+  const cc = { id: "cf", type: "comfort", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, rooms: [], bands: {}, filter: "" };
+  const found = el._comfortRooms(cc);
+  const byName = (n) => found.find(r => r.name === n);
+
+  ok("la temperatura esterna entra anche senza area", !!byName("Temperatura esterna"));
+  ok("l'esterno sta in cima, è il riferimento", found[0].name === "Temperatura esterna", found[0].name);
+  ok("l'esterno è marcato come tale", found[0].outdoor === true);
+  ok("la CPU del server non è una stanza",
+     !found.some(r => /processor/i.test(r.temperature)), found.map(r => r.temperature).join());
+
+  // The regression that made the card lie: first-match-wins picked the plug.
+  ok("il bagno legge il sensore a muro, non il chip della presa",
+     byName("Bagno").temperature === "sensor.t_u_bagno_temperatura",
+     byName("Bagno").temperature);
+  ok("il bagno abbina l'umidità dello stesso dispositivo",
+     byName("Bagno").humidity === "sensor.t_u_bagno_umidita", String(byName("Bagno").humidity));
+  ok("la camera preferisce il sensore che misura anche l'umidità",
+     byName("Camera da letto").temperature === "sensor.camera_soppalco_temperatura",
+     byName("Camera da letto").temperature);
+  ok("il soggiorno resta corretto",
+     byName("Soggiorno").temperature === "sensor.sensore_t_h_salotto_temperatura");
+  ok("quattro righe in tutto: esterno più tre stanze", found.length === 4, String(found.length));
+
+  // -- taking over by hand --
+  el._selected = null;
+  cc.rooms = [
+    { temperature: "sensor.temperatura_esterna", humidity: null, name: "Esterno", icon: "mdi:sun-thermometer-outline" },
+    { temperature: "sensor.t_u_bagno_temperatura", humidity: "sensor.t_u_bagno_umidita", name: "Bagno", icon: "" }];
+  const manual = el._comfortRooms(cc);
+  ok("l'elenco scritto a mano ha la precedenza", manual.length === 2, String(manual.length));
+  ok("l'ordine scritto a mano è rispettato",
+     manual.map(r => r.name).join(">") === "Esterno>Bagno", manual.map(r => r.name).join(">"));
+  ok("una riga a mano senza umidità è ammessa", manual[0].humidity === null);
+
+  const body = el._comfortBody(cc);
+  ok("il corpo disegna solo le righe scelte",
+     (body.match(/class="cf-room/g) || []).length === 2,
+     String((body.match(/class="cf-room/g) || []).length));
+  ok("l'esterno compare col suo nome", body.includes("Esterno"));
+
+  // an empty manual list must fall back, not show an empty card
+  cc.rooms = [];
+  ok("svuotare l'elenco torna al rilevamento automatico", el._comfortRooms(cc).length === 4);
+
+  for (const id of ["sensor.temperatura_esterna","sensor.system_monitor_processor_temperature",
+      "sensor.sensore_t_h_salotto_temperatura","sensor.sensore_t_h_salotto_umidita",
+      "sensor.t_u_bagno_temperatura","sensor.t_u_bagno_umidita",
+      "sensor.shellyplusplugs_e465b8b19f24_temperature","sensor.camera_soppalco_temperatura",
+      "sensor.camera_soppalco_umidita","sensor.condizionatore_dati_ambientali_temperatura"]) delete states[id];
+  el._registry = null;
+  ok("stato ripristinato dopo la sezione 27", el._registry === null);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

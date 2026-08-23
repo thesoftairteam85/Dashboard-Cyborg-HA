@@ -700,6 +700,50 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== TEMPERATURE: ESTERNO E ELENCO A MANO ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, comfort: true, selectComfort: true, manualComfort: true });
+  await page.waitForTimeout(500);
+
+  const cf = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll(".cf-room")).map((c) => {
+      const b = c.getBoundingClientRect();
+      return { name: (c.querySelector(".cf-name") || c.querySelector("strong") || {}).textContent,
+        w: Math.round(b.width), right: Math.round(b.right) };
+    });
+    const rows = Array.from(document.querySelectorAll(".cf-edit-row")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { w: Math.round(b.width), right: Math.round(b.right),
+        selects: r.querySelectorAll("select").length,
+        inputs: r.querySelectorAll("input").length };
+    });
+    const panel = document.querySelector(".editor, aside, .editor-panel");
+    const tempOpts = rows.length
+      ? Array.from(document.querySelectorAll('[data-comfort-room$="|temperature"]')[0].options).map((o) => o.value)
+      : [];
+    return { cards, rows, panelRight: panel ? Math.round(panel.getBoundingClientRect().right) : null,
+      winW: window.innerWidth, tempOpts,
+      hasAdd: !!document.querySelector("[data-comfort-add]"),
+      hasAuto: !!document.querySelector("[data-comfort-auto]") };
+  });
+  ok("l'elenco a mano ha una riga per stanza", cf.rows.length >= 4, String(cf.rows.length));
+  ok("ogni riga ha nome, icona, temperatura e umidità",
+     cf.rows.every((r) => r.selects === 2 && r.inputs === 2),
+     cf.rows.map((r) => r.selects + "/" + r.inputs).join());
+  ok("le righe dell'editor non debordano",
+     cf.rows.every((r) => r.w > 100 && r.right <= cf.winW + 1),
+     cf.rows.map((r) => r.right).join() + " vs " + cf.winW);
+  ok("si può aggiungere e tornare all'automatico", cf.hasAdd && cf.hasAuto);
+  ok("il menù propone anche i sensori senza area",
+     cf.tempOpts.includes("sensor.temperatura_esterna"), cf.tempOpts.join());
+  ok("la temperatura esterna è fra le schede",
+     cf.cards.some((c) => /esterna/i.test(c.name || "")), cf.cards.map((c) => c.name).join());
+  ok("nessuna scheda temperatura deborda",
+     cf.cards.every((c) => c.right <= cf.winW + 1), cf.cards.map((c) => c.right).join());
+
   console.log("\n== ORDINE DELLE SCHEDE ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
