@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 7 and len(d["pages"][1]["sections"]) == 6
+assert d["version"] == 8 and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -13,7 +13,7 @@ v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c4", "entity_id": "event.backup"}]}]}
 m = schema.normalize_dashboard(v2)
 secs = m["pages"][0]["sections"]
-assert m["version"] == 7 and m["revision"] == 7
+assert m["version"] == 8 and m["revision"] == 7
 assert len(secs) == 3 and len(secs[1]["items"]) == 2, "case-insensitive merge"
 assert secs[2]["title"] == "Generale"
 assert "items" not in m["pages"][0], "legacy items must be dropped"
@@ -25,7 +25,7 @@ print("schema: all tests passed")
 
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
-assert d["version"] == 7
+assert d["version"] == 8
 assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
 assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
 assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
@@ -35,7 +35,7 @@ assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
     {"id": "s", "title": "X", "items": [{"id": "c", "entity_id": "light.a"}]}]}]}
 r = schema.normalize_dashboard(v3)
-assert r["version"] == 7
+assert r["version"] == 8
 assert r["pages"][0]["type"] == "sections"
 assert r["pages"][0]["sections"][0]["items"][0]["entity_id"] == "light.a"
 assert "rooms" not in r["pages"][0] and "view" not in r["pages"][0]
@@ -231,7 +231,7 @@ stored = {"version": 4, "revision": 12, "pages": [
                 "area_id": "salotto", "entities": None}]}]}
 mig = schema.normalize_dashboard(stored)
 room = mig["pages"][0]["rooms"][0]
-assert mig["version"] == 7 and mig["revision"] == 12
+assert mig["version"] == 8 and mig["revision"] == 12
 assert room["title"] == "Salotto" and room["area_id"] == "salotto" and room["w"] == 230
 assert room["level"] == 0 and room["points"] is None and room["spots"] == {}
 assert mig["pages"][0]["view"]["level_gap"] == 150
@@ -379,7 +379,7 @@ assert [v["id"] for v in d6["vehicles"]] == ["ev1", "ev1-2"], [v["id"] for v in 
 assert d6["vehicles"][0]["capacity"] == 60.0
 assert d6["vehicles"][0]["charging"] == "binary_sensor.ch"
 assert d6["vehicles"][0]["range"] is None
-assert d6["version"] == 7
+assert d6["version"] == 8
 # a vehicle with no entity at all would be a name and nothing else
 assert all(v["name"] != "Senza entita" for v in d6["vehicles"])
 assert all(v["name"] != "" for v in d6["vehicles"])
@@ -417,7 +417,7 @@ old5 = {"version": 5, "revision": 3, "pages": [
         {"id": "s", "title": "Energia", "icon": "mdi:flash", "accent": "#ffd166",
          "items": [{"id": "c", "type": "energyflow", "entity_id": "", "flow": {"grid": "sensor.g"}}]}]}]}
 m6 = schema.normalize_dashboard(old5)
-assert m6["version"] == 7 and m6["revision"] == 3 and m6["vehicles"] == []
+assert m6["version"] == 8 and m6["revision"] == 3 and m6["vehicles"] == []
 assert m6["pages"][0]["sections"][0]["items"][0]["flow"]["grid"] == "sensor.g"
 assert schema.normalize_dashboard(m6) == m6
 
@@ -456,5 +456,35 @@ assert exc["exclude"] == ["switch.a", "light.b"]
 assert schema.normalize_item({"type": "active"}, 0)["exclude"] == []
 assert schema.normalize_item({"type": "active", "exclude": "no"}, 0)["exclude"] == []
 assert schema.normalize_item(exc, 0) == exc
+
+# --- v8: the lighting card's tap action was a dead setting -------------------
+# Whatever an older document stores there was written by a build that never
+# read it, so it carries no intent. Resetting it once reproduces the behaviour
+# those users actually saw; keeping it would invert every existing card.
+old_doc = {"version": 7, "revision": 4, "pages": [
+    {"id": "p", "type": "sections", "title": "Casa", "sections": [
+        {"id": "s", "title": "Luci", "items": [
+            {"id": "lc", "type": "lights", "row_action": "toggle"},
+            {"id": "rc", "type": "room", "row_action": "toggle"},
+        ]}]}]}
+mig8 = schema.normalize_dashboard(old_doc)
+lights_card = mig8["pages"][0]["sections"][0]["items"][0]
+room_card = mig8["pages"][0]["sections"][0]["items"][1]
+assert mig8["version"] == 8
+assert lights_card["row_action"] == "more-info", lights_card
+# the room card's setting DID work, so it must be left exactly as chosen
+assert room_card["row_action"] == "toggle", room_card
+# and a document already at v8 is never rewritten again
+at8 = schema.normalize_dashboard(mig8)
+assert at8["pages"][0]["sections"][0]["items"][0]["row_action"] == "more-info"
+mig8["pages"][0]["sections"][0]["items"][0]["row_action"] = "toggle"
+again = schema.normalize_dashboard(mig8)
+assert again["pages"][0]["sections"][0]["items"][0]["row_action"] == "toggle", "una scelta a v8 va rispettata"
+
+# --- the 3D map now has its own tap action ----------------------------------
+view = schema.normalize_view({})
+assert view["tap_action"] == "toggle"
+assert schema.normalize_view({"tap_action": "more-info"})["tap_action"] == "more-info"
+assert schema.normalize_view({"tap_action": "boh"})["tap_action"] == "toggle"
 
 print("schema: rotazione, azione di riga ed esclusioni ok")

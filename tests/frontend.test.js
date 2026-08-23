@@ -2405,6 +2405,105 @@ console.log("\n== 29. AVVISI: LETTI, DA LEGGERE, ELIMINATI ==");
   ok("stato ripristinato dopo la sezione 29", el._sentNotifs === null);
 }
 
+console.log("\n== 30. GUARDARE SENZA TOCCARE ==");
+{
+  states["light.luci_scale"] = S("on", { friendly_name: "Luci scale", supported_color_modes: ["onoff"] });
+  states["sensor.scale_t"] = S("22.0", { friendly_name: "Scale T", device_class: "temperature" });
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+      view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true,
+              show_labels: true, level_gap: 150, active_level: null, tap_action: "toggle" },
+      rooms: [{ id: "r1", area_id: null, title: "Scale", icon: "mdi:stairs", color: "#00e5ff",
+        x: 0, y: 0, w: 200, h: 160, level: 0, points: null, spots: {}, hidden: [],
+        walls: [], entities: ["light.luci_scale", "sensor.scale_t"], vehicles: [], rotation: 0 }] }]};
+  el._pageIndex = 0; el._editing = false; el._selected = null;
+
+  const called = [];
+  const info = [];
+  const realSvc = el._hass.callService;
+  el._hass.callService = (d, sv, data) => { called.push(d + "." + sv + ":" + (data && data.entity_id)); };
+  // The harness element has no real event target, so the details request is
+  // observed where it is actually made: dispatchEvent.
+  const realDispatch = el.dispatchEvent;
+  el.dispatchEvent = (ev) => {
+    if (ev && ev.type === "hass-more-info") info.push(ev.detail.entityId);
+    return true;
+  };
+
+  // This is the reported bug: a tap on the map switched the light off with no
+  // way to ask for the details instead.
+  el._badgeTap("light.luci_scale");
+  ok("con l'impostazione «accendi/spegni» il tocco comanda",
+     called.length === 1 && !info.length, called.join());
+
+  called.length = 0;
+  el._badgeTap("light.luci_scale", true);
+  ok("tenendo premuto si aprono i dettagli invece",
+     !called.length && info[0] === "light.luci_scale", info.join());
+
+  info.length = 0;
+  el._page().view.tap_action = "more-info";
+  el._badgeTap("light.luci_scale");
+  ok("scegliendo «apri i dettagli» il tocco non tocca niente",
+     !called.length && info[0] === "light.luci_scale", called.join() + "|" + info.join());
+
+  info.length = 0;
+  el._badgeTap("light.luci_scale", true);
+  ok("e tenendo premuto si comanda", called.length === 1 && !info.length, called.join());
+
+  // A thermometer has nothing to switch: both ways must open the details
+  // rather than calling a service that does not exist for it.
+  called.length = 0; info.length = 0;
+  el._page().view.tap_action = "toggle";
+  el._badgeTap("sensor.scale_t");
+  ok("un sensore apre sempre i dettagli, non c'è niente da accendere",
+     !called.length && info[0] === "sensor.scale_t", called.join());
+
+  // the device list under the map
+  // built by the panel, not by hand: the focus object carries the camera
+  // offsets the renderer needs
+  el._focusRoom("r1");
+  el._signature = ""; el.render();
+  let h = el.innerHTML;
+  ok("nell'elenco sotto la mappa la luce ha il tasto opposto",
+     h.includes('data-fp-badge-alt="light.luci_scale"'));
+  ok("il sensore non finge di avere un interruttore",
+     !h.includes('data-fp-badge-alt="sensor.scale_t"'));
+  ok("il corpo della riga porta l'azione principale",
+     h.includes('data-fp-badge="light.luci_scale"'));
+
+  el._editing = true;
+  el._signature = ""; el.render();
+  ok("l'impostazione è raggiungibile dall'editor della mappa",
+     el.innerHTML.includes("data-view-tap"));
+  el._editing = false; el._focus = null;
+
+  // -- the lighting card's setting was dead: now it works both ways --
+  const lightsCard = { id: "lc", type: "lights", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, lights: ["light.luci_scale"],
+    group_by_area: false, row_action: "more-info" };
+  let row = el._lightRow("light.luci_scale", lightsCard);
+  ok("sulla card luci il nome apre i dettagli",
+     /class="li-name" data-more-info="light\.luci_scale"/.test(row), row.slice(0, 0) || "");
+  ok("e la lampadina accende e spegne",
+     /class="li-bulb" data-light-toggle="light\.luci_scale"/.test(row));
+
+  lightsCard.row_action = "toggle";
+  row = el._lightRow("light.luci_scale", lightsCard);
+  ok("scegliendo «accendi/spegni» il nome comanda",
+     /class="li-name" data-light-toggle="light\.luci_scale"/.test(row));
+  ok("e l'icona fa l'altra cosa",
+     /class="li-bulb" data-more-info="light\.luci_scale"/.test(row));
+
+  el.dispatchEvent = realDispatch;
+  el._hass.callService = realSvc;
+  delete states["light.luci_scale"]; delete states["sensor.scale_t"];
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 30", !el._isFloorplan());
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

@@ -1735,7 +1735,10 @@ class CyborgDashboard extends HTMLElement {
       accent: "#ffd166", collapsed: false,
       items: [{ id: uid("card"), type: "lights", entity_id: "", name: "", size: "xl",
         appearance: { icon: "mdi:lightbulb-group" }, states: {}, actions: {},
-        lights: [], group_by_area: true, row_action: "toggle" }] };
+        // more-info: on a lighting card the row is a NAME, and tapping a name
+        // to read it should not switch the room off. The bulb icon next to it
+        // is the switch, and it is already the thing the hand goes to.
+        lights: [], group_by_area: true, row_action: "more-info" }] };
     this._page().sections.push(section);
     this._selected = { kind: "section", sectionId: section.id };
     this._touch();
@@ -2561,10 +2564,22 @@ class CyborgDashboard extends HTMLElement {
           const value = Number.isFinite(n)
             ? (Math.abs(n) >= 100 ? Math.round(n) : n.toFixed(1)) + (unit ? " " + unit : "")
             : stateWords(dst.state, dst.attributes.device_class);
-          return `<button class="fp-dev${on ? " on" : ""}" data-fp-badge="${esc(id)}">
-            <ha-icon icon="${esc(autoIcon(id, dst))}"></ha-icon>
-            <span><strong>${esc(dst.attributes.friendly_name || id)}</strong><small>${esc(value)}</small></span>
-          </button>`;
+          // The list has room for a companion control, unlike a 38 px pin, so
+          // here the counterpart action gets a real button instead of relying
+          // on the long press: an affordance you can see beats one you have to
+          // know about. Only switchable things get it — a thermometer has
+          // nothing to flip.
+          const kind = this._badgeKind(id);
+          const actionable = kind === "toggle" || (kind === "binary" && domainOf(id) === "lock");
+          const tapToggles = (view.tap_action || "toggle") === "toggle";
+          return `<div class="fp-dev${on ? " on" : ""}">
+            ${actionable ? `<button class="fp-dev-alt" data-fp-badge-alt="${esc(id)}" title="${tapToggles ? "Apri i dettagli" : "Accendi / spegni"}">
+              <ha-icon icon="${esc(autoIcon(id, dst))}"></ha-icon></button>`
+              : `<ha-icon icon="${esc(autoIcon(id, dst))}"></ha-icon>`}
+            <button class="fp-dev-main" data-fp-badge="${esc(id)}">
+              <span><strong>${esc(dst.attributes.friendly_name || id)}</strong><small>${esc(value)}</small></span>
+            </button>
+          </div>`;
         }).join("")}
       </div>` : "";
 
@@ -3190,6 +3205,13 @@ class CyborgDashboard extends HTMLElement {
         <label>DISTANZA TRA I PIANI · ${view.level_gap}<input type="range" min="40" max="400" step="5" data-view-prop="level_gap" value="${view.level_gap}"></label>
         <label class="check"><input type="checkbox" data-view-prop="show_walls" ${view.show_walls ? "checked" : ""}> Mostra muri</label>
         <label class="check"><input type="checkbox" data-view-prop="show_labels" ${view.show_labels ? "checked" : ""}> Mostra nomi stanze</label>
+        <label>AZIONE AL TOCCO SUI DISPOSITIVI
+          <select data-view-tap>
+            <option value="toggle" ${(view.tap_action || "toggle") === "toggle" ? "selected" : ""}>Accendi / spegni</option>
+            <option value="more-info" ${view.tap_action === "more-info" ? "selected" : ""}>Apri i dettagli</option>
+          </select>
+          <span class="hint">Vale per le icone sulla mappa e per l'elenco sotto. <strong>Tenendo premuto</strong> si fa sempre l'altra cosa, così comando e dettagli restano entrambi raggiungibili senza cambiare impostazione.</span>
+        </label>
       </div>
     </aside>`;
   }
@@ -4686,12 +4708,23 @@ class CyborgDashboard extends HTMLElement {
 
     return `<div class="li-item${on ? " on" : ""}${open ? " open" : ""}" ${swatch ? `style="--lc:${esc(swatch)}"` : ""}>
       <div class="li-row">
-        <button class="li-bulb" data-light-toggle="${esc(id)}" title="${on ? "Spegni" : "Accendi"} ${esc(name)}">
-          <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
-        </button>
-        <button class="li-name" data-more-info="${esc(id)}">
-          <strong>${esc(name)}</strong><small>${esc(sub)}</small>
-        </button>
+        ${(() => {
+          // The card exposed an "azione al tocco" setting that this row simply
+          // ignored: whatever you chose, the name opened the details and the
+          // bulb switched. A control that does nothing is worse than no
+          // control, because it makes the user believe the feature is broken
+          // everywhere else too. Now the setting is honoured here as well, and
+          // as everywhere the icon does the opposite of the row.
+          const toggleFirst = (item.row_action || "toggle") === "toggle";
+          const bulb = `<button class="li-bulb" data-${toggleFirst ? `more-info="${esc(id)}"` : `light-toggle="${esc(id)}"`}
+              title="${toggleFirst ? "Apri i dettagli" : (on ? "Spegni" : "Accendi") + " " + esc(name)}">
+            <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+          </button>`;
+          const label = `<button class="li-name" data-${toggleFirst ? `light-toggle="${esc(id)}"` : `more-info="${esc(id)}"`}>
+            <strong>${esc(name)}</strong><small>${esc(sub)}</small>
+          </button>`;
+          return bulb + label;
+        })()}
         ${caps.dimmable ? `<input class="li-dim" type="range" min="1" max="100" step="1"
           value="${pct === null ? (on ? 100 : 0) : pct}" data-light-bri="${esc(id)}"
           title="Intensità" ${on ? "" : "disabled"}>` : ""}
@@ -7202,6 +7235,13 @@ class CyborgDashboard extends HTMLElement {
       view.yaw = isFlat ? 32 : 0;
       this._touch();
     };
+    const viewTap = q("[data-view-tap]");
+    if (viewTap) viewTap.onchange = () => {
+      // Its own attribute rather than data-view-prop: that handler runs every
+      // value through parseFloat, which would turn "more-info" into NaN.
+      const view = this._page().view;
+      if (view) { view.tap_action = viewTap.value; this._touch(); }
+    };
     all("[data-view-prop]").forEach((el) => {
       const apply = () => {
         const key = el.getAttribute("data-view-prop");
@@ -7842,11 +7882,47 @@ class CyborgDashboard extends HTMLElement {
         this._hass.callService(group.off.domain, group.off.service, { entity_id: ids });
       };
     });
-    all("[data-fp-badge]").forEach((el) => {
+    all("[data-fp-badge-alt]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
-        this._badgeTap(el.getAttribute("data-fp-badge"));
+        this._badgeTap(el.getAttribute("data-fp-badge-alt"), true);
       };
+    });
+    all("[data-fp-badge]").forEach((el) => {
+      const id = el.getAttribute("data-fp-badge");
+      let timer = null, fired = false, startX = 0, startY = 0;
+      const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      // 500 ms is the usual long-press threshold and it is what Home
+      // Assistant's own cards use, so the gesture is already in the user's
+      // hands. The pointer is allowed to wander 10 px: a finger never holds
+      // perfectly still, and cancelling on the first pixel would make the
+      // gesture feel broken rather than precise.
+      el.onpointerdown = (ev) => {
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        fired = false; startX = ev.clientX; startY = ev.clientY;
+        cancel();
+        timer = setTimeout(() => {
+          timer = null; fired = true;
+          this._badgeTap(id, true);
+        }, 500);
+      };
+      el.onpointermove = (ev) => {
+        if (!timer) return;
+        if (Math.abs(ev.clientX - startX) > 10 || Math.abs(ev.clientY - startY) > 10) cancel();
+      };
+      el.onpointerup = cancel;
+      el.onpointercancel = () => { cancel(); fired = false; };
+      el.onpointerleave = cancel;
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        // The click that follows a long press must not ALSO run the short
+        // action, or a hold would both open the details and flip the switch.
+        if (fired) { fired = false; return; }
+        this._badgeTap(id);
+      };
+      // Holding on a touch screen otherwise pops the browser's own context
+      // menu over the map, which eats the gesture.
+      el.oncontextmenu = (ev) => ev.preventDefault();
     });
     all("[data-room-prop]").forEach((el) => {
       el.onchange = () => {
@@ -8751,12 +8827,29 @@ class CyborgDashboard extends HTMLElement {
     });
   }
 
-  _badgeTap(entityId) {
+  /**
+   * Tapping a device on the 3D map.
+   *
+   * This used to switch the device unconditionally: there was NO way to
+   * inspect something from the map without operating it. Tapping "luci scale"
+   * to see what it was turned it off. The same defect was already fixed on the
+   * card rows in 0.21.0 and survived here, because the map has its own tap
+   * path that never went through `row_action`.
+   *
+   * Now the page decides (``view.tap_action``), and a LONG PRESS always does
+   * the other thing. Long press rather than a second button because a map pin
+   * is a 38 px circle floating over a wall: there is no room for a companion
+   * control, and adding one would make the map unreadable at the exact zoom
+   * levels where it is most useful.
+   */
+  _badgeTap(entityId, other) {
     const st = this._hass.states[entityId];
     if (!st) return;
     const kind = this._badgeKind(entityId);
     const domain = domainOf(entityId);
-    if (kind === "toggle" || (kind === "binary" && domain === "lock")) {
+    const wantToggle = ((this._page().view || {}).tap_action || "toggle") === "toggle";
+    const doToggle = other ? !wantToggle : wantToggle;
+    if (doToggle && (kind === "toggle" || (kind === "binary" && domain === "lock"))) {
       const serviceDomain = ["switch", "light", "fan", "media_player", "lock", "cover", "input_boolean"].includes(domain)
         ? domain : "homeassistant";
       this._hass.callService(serviceDomain, domain === "lock" ? (ON_STATES.has(st.state) ? "lock" : "unlock") : "toggle",
@@ -9807,6 +9900,15 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-dev>ha-icon{--mdc-icon-size:18px;color:#93a3b5;flex-shrink:0}
 .fp-dev.on>ha-icon{color:#ffd166}
 .fp-dev span{min-width:0;flex:1}
+/* The row is now two controls, not one button: the icon does the opposite of
+   whatever the row does, so command and details are both one tap away. */
+.fp-dev-alt{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;flex-shrink:0;
+  border-radius:9px;border:1px solid rgba(255,255,255,.09);background:transparent;color:#93a3b5}
+.fp-dev-alt ha-icon{--mdc-icon-size:18px}
+.fp-dev.on .fp-dev-alt{color:#ffd166;border-color:rgba(255,209,102,.3)}
+.fp-dev-alt:hover{border-color:var(--accent);color:var(--accent)}
+.fp-dev-main{display:flex;align-items:center;min-width:0;flex:1;padding:0;border:0;background:transparent;
+  color:inherit;text-align:left;font:inherit;letter-spacing:0}
 .fp-dev strong{display:block;font-size:11.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fp-dev small{display:block;font:9.5px ui-monospace,monospace;letter-spacing:.5px;opacity:.5;text-transform:uppercase}
 
@@ -9929,7 +10031,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.26.0";
+const CYBORG_BUILD = "0.27.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

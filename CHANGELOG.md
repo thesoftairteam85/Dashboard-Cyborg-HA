@@ -4,6 +4,56 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.27.0] - 2026-08-23
+
+Guardare un dispositivo senza azionarlo. Schema alla versione 8.
+
+### Il problema
+Toccare «luci scale» sulla mappa 3D le spegneva, e non c'era modo di chiedere
+i dettagli. L'azione al tocco era stata sistemata in 0.21.0 sulle **righe delle
+card**, ma la mappa ha un proprio percorso di tocco che non passava di lì ed è
+rimasto **cablato**: qualunque cosa fosse comandabile, si comandava.
+
+Peggio: la card **Illuminazione** mostrava nell'editor il menù «Azione al
+tocco» e le sue righe **ignoravano completamente il valore**. Una tendina che
+non faceva niente — il modo migliore per convincere l'utente che la funzione
+sia rotta ovunque.
+
+### Correzioni
+- **La mappa 3D ha la sua azione al tocco** (nell'editor della mappa):
+  *Accendi/spegni* oppure *Apri i dettagli*. Vale per le icone dei
+  dispositivi e per l'elenco sotto la mappa.
+- **Tenendo premuto (500 ms) si fa sempre l'altra cosa.** Pressione prolungata
+  e non un secondo pulsante perché un'icona sulla mappa è un cerchio da 38 px
+  sopra un muro: un controllo gemello lì accanto renderebbe la mappa
+  illeggibile proprio agli ingrandimenti in cui serve di più. Trascinare non
+  conta come pressione prolungata — quello è spostare la mappa — e il clic che
+  segue il rilascio **non** esegue anche l'azione breve.
+- **Nell'elenco sotto la mappa il pulsante opposto è visibile**, perché lì lo
+  spazio c'è e un comando che si vede batte uno che bisogna sapere. Ce l'hanno
+  solo le cose comandabili: un termometro non ha niente da accendere, e
+  fingere il contrario sarebbe un pulsante che non funziona.
+- **La card Illuminazione onora davvero l'azione al tocco.**
+
+### Migrazione (schema v8)
+Le card `lights` esistenti hanno `row_action` salvato da build che quel campo
+non leggevano, quindi quel valore **non porta nessuna intenzione**. Farlo
+funzionare così com'era avrebbe **invertito** ogni card di illuminazione già
+installata: il nome avrebbe cominciato a spegnere le luci, cioè esattamente il
+difetto segnalato. La migrazione lo riporta una volta sola a *Apri i dettagli*,
+che riproduce ciò che era sullo schermo. Le card `room`, dove l'impostazione
+funzionava, non vengono toccate.
+
+### Verifiche
+- 759 asserzioni frontend (14 nuove), suite schema (con la migrazione v8 e il
+  fatto che una scelta fatta a v8 vada rispettata), suite notifiche, e **159
+  misurate** in Chromium (12 nuove).
+- Le nuove misurate usano **eventi pointer reali**: pressione breve, pressione
+  tenuta 700 ms, e pressione trascinata. Verificano ai punti di uscita — la
+  chiamata di servizio e l'evento `hass-more-info` — cosa riceverebbe davvero
+  Home Assistant, non cosa sembra a schermo.
+
+
 ## [0.26.0] - 2026-08-23
 
 Gli avvisi si possono leggere, segnare e buttare via. Uno alla volta.

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -117,7 +117,7 @@ def normalize_vehicle(vehicle: Any, index: int) -> dict[str, Any] | None:
 # shallow enough that extruded walls still communicate height.
 DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
                 "show_walls": True, "show_labels": True, "level_gap": 150,
-                "active_level": None}
+                "active_level": None, "tap_action": "toggle"}
 
 # A storey index is deliberately signed and bounded: -3 covers cellars and
 # garages below grade, +8 is far past any residential building. Bounding it at
@@ -292,6 +292,11 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
             result["active_level"] = None
     result["show_walls"] = bool(result.get("show_walls", True))
     result["show_labels"] = bool(result.get("show_labels", True))
+    # What a tap on a device on the map does. It was hard-wired to "toggle",
+    # so there was no way to INSPECT something on the map without operating
+    # it — the same defect already fixed on the card rows, still present here.
+    tap = result.get("tap_action")
+    result["tap_action"] = tap if tap in ("toggle", "more-info") else "toggle"
     return result
 
 
@@ -742,6 +747,14 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
         data = {}
     result = default_dashboard()
     result.update(data)
+
+    # The stored version BEFORE this normalization: a few fixes have to know
+    # whether a value was chosen by the user or merely written by an older
+    # build that ignored it.
+    try:
+        stored_version = int(data.get("version", 0))
+    except (TypeError, ValueError):
+        stored_version = 0
     result["version"] = SCHEMA_VERSION
     try:
         result["revision"] = int(data.get("revision", 0))
@@ -788,6 +801,20 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
     result["pages"] = normalized or [
         normalize_page(pg, i) for i, pg in enumerate(default_dashboard()["pages"])
     ]
+
+    # v8: the Illuminazione card advertised an "azione al tocco" setting that
+    # its rows never read. Whatever is stored there was written by a build that
+    # ignored it, so it carries no user intent — and the behaviour those users
+    # actually saw (name opens the details, bulb switches) is "more-info".
+    # Resetting it once reproduces exactly what was on screen before; leaving
+    # the old value would silently INVERT every existing lighting card the
+    # moment the setting started working.
+    if stored_version and stored_version < 8:
+        for page in result["pages"]:
+            for section in page.get("sections") or []:
+                for card in section.get("items") or []:
+                    if card.get("type") == "lights":
+                        card["row_action"] = "more-info"
 
     # A dashboard saved before the 3D map existed keeps only the pages it was
     # stored with: ``result.update(data)`` replaces the whole page list, so

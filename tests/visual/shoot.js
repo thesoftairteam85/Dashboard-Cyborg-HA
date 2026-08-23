@@ -700,6 +700,114 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== GUARDARE SENZA TOCCARE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true, focusRoom: true });
+  await page.waitForTimeout(600);
+
+  // Instrument the two outcomes at their exit points, so what is measured is
+  // what Home Assistant would actually receive.
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    window.__svc = []; window.__info = [];
+    el._hass.callService = (d, s2, data) => { window.__svc.push(d + "." + s2 + ":" + (data && data.entity_id)); };
+    const real = el.dispatchEvent.bind(el);
+    el.dispatchEvent = (ev) => {
+      if (ev && ev.type === "hass-more-info") window.__info.push(ev.detail.entityId);
+      return real(ev);
+    };
+  });
+
+  const pin = await page.evaluate(() => {
+    const p2 = document.querySelector(".fp-spot-btn[data-fp-badge], .fp-dev-main[data-fp-badge]");
+    if (!p2) return null;
+    const b = p2.getBoundingClientRect();
+    return { id: p2.getAttribute("data-fp-badge"),
+      x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  });
+  ok("c'è un dispositivo toccabile sulla mappa", !!pin, JSON.stringify(pin));
+
+  // short tap -> the configured action (toggle by default)
+  await page.mouse.click(pin.x, pin.y);
+  await page.waitForTimeout(150);
+  let out = await page.evaluate(() => ({ svc: window.__svc.slice(), info: window.__info.slice() }));
+  ok("un tocco breve fa l'azione impostata", out.svc.length === 1 && out.info.length === 0,
+     JSON.stringify(out));
+
+  // long press -> the other one. Real pointer events, held for 700 ms.
+  await page.evaluate(() => { window.__svc = []; window.__info = []; });
+  await page.mouse.move(pin.x, pin.y);
+  await page.mouse.down();
+  await page.waitForTimeout(700);
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  out = await page.evaluate(() => ({ svc: window.__svc.slice(), info: window.__info.slice() }));
+  ok("tenendo premuto si aprono i dettagli", out.info.length === 1, JSON.stringify(out));
+  // the click that follows the release must not ALSO fire the short action
+  ok("il rilascio non esegue anche l'azione breve", out.svc.length === 0, JSON.stringify(out));
+
+  // a press that drags is a pan of the map, not a long press
+  await page.evaluate(() => { window.__svc = []; window.__info = []; });
+  await page.mouse.move(pin.x, pin.y);
+  await page.mouse.down();
+  await page.mouse.move(pin.x + 60, pin.y + 40, { steps: 6 });
+  await page.waitForTimeout(700);
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  out = await page.evaluate(() => ({ svc: window.__svc.slice(), info: window.__info.slice() }));
+  ok("trascinare non conta come pressione prolungata",
+     out.info.length === 0, JSON.stringify(out));
+
+  const alt = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".fp-dev"));
+    const withAlt = rows.filter((r) => r.querySelector("[data-fp-badge-alt]"));
+    const sizes = withAlt.map((r) => {
+      const b = r.querySelector("[data-fp-badge-alt]").getBoundingClientRect();
+      const rb = r.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height),
+        inside: b.left >= rb.left - 1 && b.right <= rb.right + 1 };
+    });
+    return { rows: rows.length, withAlt: withAlt.length, sizes };
+  });
+  ok("le righe comandabili hanno il tasto opposto", alt.withAlt > 0, JSON.stringify(alt));
+  ok("il tasto opposto è toccabile e sta nella riga",
+     alt.sizes.every((z) => z.w >= 28 && z.h >= 28 && z.inside), JSON.stringify(alt.sizes));
+  ok("non tutte le righe ce l'hanno: i sensori no", alt.withAlt < alt.rows,
+     alt.withAlt + "/" + alt.rows);
+
+  const phoneT = await browser.newPage({ viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneT.on("pageerror", (e) => errors.push("PHONE-TAP: " + e.message));
+  await phoneT.goto("http://127.0.0.1:8899/harness.html");
+  await phoneT.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneT.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneT.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true, focusRoom: true });
+  await phoneT.waitForTimeout(700);
+  const pt = await phoneT.evaluate(() => {
+    const alts = Array.from(document.querySelectorAll("[data-fp-badge-alt]")).map((a) => {
+      const b = a.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height), right: Math.round(b.right) };
+    });
+    const rows = Array.from(document.querySelectorAll(".fp-dev")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { right: Math.round(b.right), h: Math.round(b.height) };
+    });
+    return { alts, rows, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: il tasto opposto resta nello schermo",
+     pt.alts.length > 0 && pt.alts.every((a) => a.right <= pt.winW + 1), JSON.stringify(pt.alts));
+  ok("telefono: è abbastanza grande per un dito",
+     pt.alts.every((a) => a.w >= 28 && a.h >= 28), pt.alts.map((a) => a.w + "x" + a.h).join());
+  ok("telefono: le righe non debordano né si schiacciano",
+     pt.rows.every((r) => r.right <= pt.winW + 1 && r.h >= 34), JSON.stringify(pt.rows.slice(0, 3)));
+  ok("telefono: nessuno scorrimento orizzontale", pt.scrollW <= pt.winW + 1,
+     pt.scrollW + " vs " + pt.winW);
+  await phoneT.close();
+
   console.log("\n== AVVISI: LETTI ED ELIMINATI ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
