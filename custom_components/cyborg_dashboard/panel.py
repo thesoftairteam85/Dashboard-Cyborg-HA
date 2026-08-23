@@ -1,12 +1,15 @@
 """Cyborg Dashboard sidebar panel."""
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant, callback
-import json
+
+_LOGGER = logging.getLogger(__name__)
 
 PANEL_PATH = "cyborg-dashboard"
 WEB_COMPONENT = "cyborg-dashboard"
@@ -28,6 +31,28 @@ def _integration_version() -> str:
         return json.loads(manifest_path.read_text(encoding="utf-8"))["version"]
     except (OSError, KeyError, ValueError):
         return "0"
+
+
+async def _async_prune_stale_resources(hass: HomeAssistant) -> None:
+    """Drop any un-versioned Lovelace resource pointing at this module.
+
+    Earlier versions registered one as a belt-and-braces measure against
+    "Custom element doesn't exist". It turned out to be the opposite: a URL
+    with no version is cached indefinitely by the browser, loads before the
+    panel's own versioned module and permanently claims the element name.
+    """
+    try:
+        resources = hass.data.get("lovelace")
+        collection = getattr(resources, "resources", None) if resources else None
+        if collection is None:
+            return
+        for item in list(collection.async_items() or []):
+            url = str(item.get("url") or "")
+            if url.startswith(STATIC_PATH) and "?v=" not in url:
+                await collection.async_delete_item(item["id"])
+                _LOGGER.info("Rimossa risorsa Lovelace senza versione: %s", url)
+    except Exception:  # noqa: BLE001 - never block panel setup over a cleanup
+        _LOGGER.debug("Impossibile ripulire le risorse Lovelace", exc_info=True)
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
@@ -60,6 +85,14 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     # the default dashboard; a Lovelace dashboard holding the equivalent card
     # can. add_extra_js_url is verified present in core 2026.8.3
     # (components/frontend/__init__.py) and is idempotent per URL.
+    # The module is loaded once, from a URL that carries the version. A second
+    # copy registered as a Lovelace resource *without* a version would be
+    # served from the browser cache, win the custom-element name (an element
+    # can only be defined once) and make every later copy a no-op — the panel
+    # would keep running old code while the integration reported the new
+    # version. add_extra_js_url already loads this module on every frontend
+    # page, Lovelace included, so no separate resource is needed.
+    await _async_prune_stale_resources(hass)
     frontend.add_extra_js_url(hass, f"{STATIC_PATH}/cyborg-dashboard.js?v={version}")
     await panel_custom.async_register_panel(
         hass,

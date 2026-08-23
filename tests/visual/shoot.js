@@ -320,6 +320,62 @@ const DEFAULT_DASH = {
   ok("le linee non sono piatte", tr.lines.every((l) => l.h > 5), tr.lines.map((l) => l.h).join());
   ok("la legenda ha una voce per linea", tr.legend === 4, String(tr.legend));
 
+  // ---- rotazione della stanza e scorrimento -------------------------------
+  console.log("\n== ROTAZIONE E SCORRIMENTO ==");
+  const plain = await scene({ pageIndex: 1, autoRooms: true, editing: true, selectRoom: true });
+  const spun = await scene({ pageIndex: 1, autoRooms: true, editing: true, selectRoom: true, rotate: true });
+  const rotGeom = await page.evaluate(() => {
+    const room = document.querySelector(".fp-room");
+    const f = room.querySelector(".fp-floor").getBoundingClientRect();
+    const rotHandle = room.querySelector("[data-rotate]");
+    const walls = room.querySelectorAll(".fp-wall").length;
+    return { w: Math.round(f.width), h: Math.round(f.height),
+      handle: !!rotHandle,
+      handleW: rotHandle ? Math.round(rotHandle.getBoundingClientRect().width) : 0,
+      transform: room.style.transform };
+  });
+  ok("la stanza ruotata porta il rotateZ", /rotateZ\(35deg\)/.test(rotGeom.transform), rotGeom.transform);
+  // rotating in the floor plane changes the projected bounding box; if it did
+  // not, the rotation would be doing nothing visible
+  ok("ruotare cambia davvero la proiezione a schermo",
+     Math.abs(rotGeom.w - plain.rooms[0].w) > 10 || Math.abs(rotGeom.h - plain.rooms[0].h) > 10,
+     `${plain.rooms[0].w}x${plain.rooms[0].h} -> ${rotGeom.w}x${rotGeom.h}`);
+  ok("la maniglia di rotazione c'è ed è afferrabile",
+     rotGeom.handle && rotGeom.handleW >= 24, String(rotGeom.handleW));
+  ok("la stanza ruotata conserva i suoi muri", spun.rooms[0].walls === 4, String(spun.rooms[0].walls));
+
+  // scrolling a long list in the editor must survive a click on it
+  const keptScroll = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._selected = { kind: "room", roomId: el._rooms()[0].id };
+    el._signature = ""; el.render();
+    const box = document.querySelector('[data-keep-scroll="editor"]');
+    if (!box) return { error: "no editor" };
+    box.scrollTop = 220;
+    const before = box.scrollTop;
+    // any interaction re-renders the whole panel
+    el._signature = ""; el.render();
+    const after = document.querySelector('[data-keep-scroll="editor"]').scrollTop;
+    return { before, after };
+  });
+  ok("il pannello non torna in cima a ogni clic",
+     keptScroll.before > 0 && Math.abs(keptScroll.after - keptScroll.before) <= 2,
+     JSON.stringify(keptScroll));
+
+  // the orbit gesture must not be fighting a CSS transition
+  const dragCss = await page.evaluate(() => {
+    const vp = document.querySelector("[data-fp-viewport]");
+    const world = vp.querySelector(".fp-world");
+    const idle = getComputedStyle(world).transitionDuration;
+    vp.classList.add("dragging");
+    const dragging = getComputedStyle(world).transitionDuration;
+    vp.classList.remove("dragging");
+    return { idle, dragging };
+  });
+  ok("durante il trascinamento la scena non ha inerzia",
+     parseFloat(dragCss.dragging) === 0 && parseFloat(dragCss.idle) > 0,
+     dragCss.idle + " -> " + dragCss.dragging);
+
   // ---- auto elettrica -----------------------------------------------------
   console.log("\n== AUTO ELETTRICA ==");
   const garage = await scene({ pageIndex: 1, autoRooms: true, garage: true });

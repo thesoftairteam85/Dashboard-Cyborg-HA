@@ -422,3 +422,27 @@ assert schema.normalize_dashboard({"pages": []}) == fresh
 assert schema.normalize_dashboard({"pages": "no"}) == fresh
 
 print("schema: valori di fabbrica idempotenti")
+
+# ---- rotazione, azione di riga, esclusioni ---------------------------------
+
+assert schema.normalize_room({}, 0)["rotation"] == 0.0
+assert schema.normalize_room({"rotation": 30}, 0)["rotation"] == 30.0
+# a handle spun round and round must not leave a five-figure angle in the store
+assert schema.normalize_room({"rotation": 725}, 0)["rotation"] == 5.0
+assert schema.normalize_room({"rotation": -90}, 0)["rotation"] == 270.0
+assert schema.normalize_room({"rotation": "storto"}, 0)["rotation"] == 0.0
+
+for kind in ("active", "room", "lights"):
+    assert schema.normalize_item({"type": kind}, 0)["row_action"] == "toggle"
+    assert schema.normalize_item({"type": kind, "row_action": "more-info"}, 0)["row_action"] == "more-info"
+    # anything unrecognised falls back to the safe historical behaviour
+    assert schema.normalize_item({"type": kind, "row_action": "boh"}, 0)["row_action"] == "toggle"
+assert "row_action" not in schema.normalize_item({"type": "sensor", "entity_id": "sensor.x"}, 0)
+
+exc = schema.normalize_item({"type": "active", "exclude": ["switch.a", 7, "", "light.b"]}, 0)
+assert exc["exclude"] == ["switch.a", "light.b"]
+assert schema.normalize_item({"type": "active"}, 0)["exclude"] == []
+assert schema.normalize_item({"type": "active", "exclude": "no"}, 0)["exclude"] == []
+assert schema.normalize_item(exc, 0) == exc
+
+print("schema: rotazione, azione di riga ed esclusioni ok")

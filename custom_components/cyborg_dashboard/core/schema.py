@@ -167,6 +167,15 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     # exclusion list rather than an inclusion one so that a device added to the
     # area later shows up by itself: an inclusion list would silently swallow
     # every new device until somebody remembered to tick it.
+    # Rotation of the room in the floor plane, degrees. A flat's rooms are not
+    # all axis-aligned, and forcing them to be turns an accurate plan into a
+    # diagram. Stored modulo 360 so a handle that has been spun ten times does
+    # not accumulate a five-figure angle in the document.
+    try:
+        result["rotation"] = round(float(result.get("rotation", 0)) % 360, 2)
+    except (TypeError, ValueError):
+        result["rotation"] = 0.0
+
     # What stands on each side of the room, one entry per polygon edge. An
     # unknown value becomes a plain wall rather than disappearing: a missing
     # side would silently open the room up.
@@ -329,6 +338,12 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if not isinstance(result.get("actions"), dict):
         result["actions"] = {}
     if result.get("type") == "active":
+        # Entities the user has taken out one by one. Kept as an exclusion list
+        # so that a device added tomorrow still appears instead of silently
+        # never showing up.
+        exclude = result.get("exclude")
+        result["exclude"] = ([e for e in exclude if isinstance(e, str) and "." in e][:400]
+                             if isinstance(exclude, list) else [])
         domains = result.get("domains")
         result["domains"] = [d for d in domains if isinstance(d, str)] if isinstance(domains, list) else []
         try:
@@ -350,6 +365,11 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["vehicles"] = ([v for v in vehicles if isinstance(v, str) and v][:MAX_VEHICLES]
                               if isinstance(vehicles, list) else [])
         result["show_controls"] = bool(result.get("show_controls", True))
+    if result.get("type") in ("active", "room", "lights"):
+        # What tapping a device row does. The icon always does the other thing,
+        # so a card set to "details" can still be operated and vice versa.
+        result["row_action"] = ("more-info" if result.get("row_action") == "more-info"
+                                else "toggle")
     if result.get("type") == "room":
         area = result.get("area")
         result["area"] = area if isinstance(area, str) and area else None

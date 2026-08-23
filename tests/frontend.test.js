@@ -58,6 +58,9 @@ function ok(name, cond, extra) { if (cond) { pass++; console.log("  ok  " + name
 
 const el = new Cls();
 el._hass = hass;
+// const declarations do not escape a direct eval; read the build straight from
+// the source so the test cannot drift from the file it is testing
+const CYBORG_BUILD_TEST = (/const CYBORG_BUILD = "([^"]+)"/.exec(src) || [, ""])[1];
 // const declarations do not escape a direct eval, so the group table is
 // reconstructed here from the same default limits the panel ships.
 const MONITOR_GROUPS_TEST = [
@@ -1687,6 +1690,165 @@ console.log("\n== 22. AUTO ELETTRICA ==");
     { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
   el._pageIndex = 0;
   ok("stato ripristinato dopo la sezione 22", !el._isFloorplan());
+}
+
+console.log("\n== 23. AZIONE AL TOCCO, ROTAZIONE, SEZIONI-PAGINA ==");
+{
+  states["switch.caldaia"] = S("on", { friendly_name: "Caldaia" });
+  states["light.studio"] = S("on", { friendly_name: "Luce studio", supported_color_modes: ["onoff"] });
+  el._registry = { areas: [{ area_id: "studio", name: "Studio" }],
+    byArea: { studio: ["switch.caldaia", "light.studio"] },
+    entityArea: { "switch.caldaia": "Studio", "light.studio": "Studio" },
+    category: {}, entityDevice: { "switch.caldaia": "d1", "light.studio": "d1" },
+    deviceName: { d1: "Quadro" } };
+
+  // -- il bug: la riga ignorava l'azione scelta --
+  const rowToggle = el._deviceRow("switch.caldaia", states["switch.caldaia"], true, "rc-row", { row_action: "toggle" });
+  const rowInfo = el._deviceRow("switch.caldaia", states["switch.caldaia"], true, "rc-row", { row_action: "more-info" });
+  ok("di default la riga accende e spegne", rowToggle.includes('data-toggle-entity="switch.caldaia"'));
+  ok("scegliendo i dettagli la riga NON commuta più",
+     !rowInfo.includes("data-toggle-entity") && rowInfo.includes('data-more-info="switch.caldaia"'));
+  ok("l'icona resta sempre disponibile per l'altra azione",
+     rowToggle.includes('data-row-act="switch.caldaia"') && rowInfo.includes('data-row-act="switch.caldaia"'));
+  ok("senza impostazione il comportamento è quello storico",
+     el._deviceRow("switch.caldaia", states["switch.caldaia"], true, "rc-row", {}).includes("data-toggle-entity"));
+
+  // and end to end through the card
+  const roomCard = { id: "rc9", type: "room", entity_id: "", name: "", size: "md",
+    appearance: {}, states: {}, actions: {}, area: "studio", hidden: [], max_readings: 4,
+    show_others: true, row_action: "more-info" };
+  const rh = el._roomCardBody(roomCard);
+  ok("la card stanza rispetta i dettagli", !rh.includes("data-toggle-entity"), 
+     (rh.match(/data-toggle-entity="[^"]*"/g) || []).join());
+  roomCard.row_action = "toggle";
+  ok("e torna a commutare quando lo chiedi", el._roomCardBody(roomCard).includes("data-toggle-entity"));
+
+  const actCard = { id: "ac9", type: "active", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {}, domains: [], max: 12, exclude: [], row_action: "more-info" };
+  ok("anche attivi ora rispetta i dettagli",
+     !el._activeBody(actCard).includes("data-toggle-entity"));
+
+  // -- esclusione per entità --
+  actCard.row_action = "toggle";
+  const before = el._activeEntities(actCard).length;
+  actCard.exclude = ["switch.caldaia"];
+  ok("un'entità esclusa sparisce dagli attivi",
+     el._activeEntities(actCard).length === before - 1 &&
+     !el._activeEntities(actCard).some(r => r.id === "switch.caldaia"));
+  const ed = el._activeExcludeEditor(actCard);
+  ok("l'editor elenca i candidati", ed.includes("switch.caldaia") && ed.includes("light.studio"));
+  ok("l'editor raggruppa per dispositivo", ed.includes("Quadro") && ed.includes("data-active-dev"));
+  ok("l'entità esclusa è marcata", /room-ent hidden[^]*?switch\.caldaia|switch\.caldaia[^]*?room-ent hidden/.test(ed)
+     || ed.includes("room-ent hidden"));
+  ok("l'editor dice quanti sono visibili", ed.includes("visibili su"));
+  actCard.exclude = [];
+
+  // -- rotazione della stanza --
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "map", type: "floorplan", title: "Mappa", icon: "mdi:floor-plan",
+      view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true,
+              level_gap: 150, active_level: null },
+      rooms: [{ id: "r1", area_id: null, title: "Sala", icon: "mdi:sofa", color: "#00e5ff",
+                x: 0, y: 0, w: 200, h: 160, level: 0, points: null, spots: {}, hidden: [],
+                walls: [], entities: [], vehicles: [], rotation: 0 }] }]};
+  el._pageIndex = 0; el._editing = true; el._selected = { kind: "room", roomId: "r1" }; el._focus = null;
+  el.render();
+  ok("senza rotazione non compare nessun rotateZ sulla stanza",
+     !/data-room="r1"[^]*?rotateZ/.test(el.innerHTML.split("data-room=\"r1\"")[1].slice(0, 400)));
+  ok("compare la maniglia di rotazione", el.innerHTML.includes('data-rotate="r1"'));
+  el._room("r1").rotation = 30;
+  el._signature = ""; el.render();
+  ok("con la rotazione la stanza viene girata", el.innerHTML.includes("rotateZ(30deg)"));
+  ok("l'editor mostra il cursore di rotazione", el.innerHTML.includes('data-room-prop="rotation"'));
+
+  // a delta must be turned back into the room's own frame, or dragging the
+  // side of a rotated room moves it diagonally
+  const straight = unrotate({ dx: 10, dy: 0 }, 0);
+  ok("senza rotazione il delta non viene toccato", straight.dx === 10 && straight.dy === 0);
+  const turned = unrotate({ dx: 10, dy: 0 }, 90);
+  ok("a 90 gradi un movimento orizzontale diventa verticale",
+     Math.abs(turned.dx) < 1e-9 && Math.abs(turned.dy + 10) < 1e-9,
+     turned.dx.toFixed(3) + "," + turned.dy.toFixed(3));
+  const back = unrotate(unrotate({ dx: 7, dy: -3 }, 37), -37);
+  ok("ruotare e tornare indietro riporta al punto di partenza",
+     Math.abs(back.dx - 7) < 1e-9 && Math.abs(back.dy + 3) < 1e-9);
+
+  // -- sezione in una scheda propria --
+  el._editing = true;
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:home", layout: {}, sections: [
+      { id: "s-energia", title: "Energia", icon: "mdi:flash", accent: "#ffd166", collapsed: false, items: [] },
+      { id: "s-sicur", title: "Sicurezza", icon: "mdi:shield", accent: "#ff3d71", collapsed: false, items: [] }]},
+    { id: "map", type: "floorplan", title: "Mappa 3D", icon: "mdi:floor-plan",
+      view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true, show_labels: true,
+              level_gap: 150, active_level: null }, rooms: [] }]};
+  el._pageIndex = 0; el._selected = { kind: "section", sectionId: "s-energia" };
+  el._moveSectionToPage("s-energia", "__own");
+  ok("la sezione diventa una pagina a sé", el._dashboard.pages.length === 3);
+  ok("la nuova pagina prende nome e icona della sezione",
+     el._dashboard.pages[1].title === "Energia" && el._dashboard.pages[1].icon === "mdi:flash");
+  ok("la nuova scheda sta accanto a quella di origine, non in fondo",
+     el._dashboard.pages[1].sections[0].id === "s-energia" && el._dashboard.pages[2].type === "floorplan");
+  ok("la sezione non è più nella pagina di partenza",
+     !el._dashboard.pages[0].sections.some(x => x.id === "s-energia"));
+  ok("la pagina di partenza resta perché ha ancora una sezione",
+     el._dashboard.pages[0].sections.length === 1);
+  ok("ci si ritrova sulla pagina nuova", el._pageIndex === 1);
+
+  // and back again
+  el._moveSectionToPage("s-energia", "0");
+  ok("si può rimetterla dentro un'altra pagina",
+     el._dashboard.pages[0].sections.some(x => x.id === "s-energia"));
+  ok("la pagina rimasta vuota viene rimossa", el._dashboard.pages.length === 2,
+     el._dashboard.pages.map(p2 => p2.id).join());
+  ok("la mappa 3D non viene mai eliminata", el._dashboard.pages.some(p2 => p2.type === "floorplan"));
+
+  // moving the only section of the only page must not delete the last page
+  el._dashboard.pages = [{ id: "solo", type: "sections", title: "Solo", icon: "mdi:home", layout: {},
+    sections: [{ id: "s1", title: "Uno", icon: "mdi:x", accent: "#fff", collapsed: false, items: [] }] }];
+  el._pageIndex = 0;
+  el._moveSectionToPage("s1", "__own");
+  ok("non resta mai zero pagine", el._dashboard.pages.length >= 1);
+  ok("la sezione è comunque su una pagina",
+     el._dashboard.pages.some(p2 => (p2.sections || []).some(x => x.id === "s1")));
+
+  el._editing = false; el._selected = null;
+  delete states["switch.caldaia"]; delete states["light.studio"];
+  el._registry = null;
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 23", !el._isFloorplan());
+}
+
+console.log("\n== 24. VERSIONE IN ESECUZIONE ==");
+{
+  // A custom element can only be defined once. An old cached copy loading
+  // first wins the name and every later copy is ignored, so the panel keeps
+  // running old code while the integration reports the new version — exactly
+  // what "non vedo le modifiche applicate" looks like from the outside.
+  el._dashboard = { version: 6, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0; el._editing = false; el._selected = null;
+  el.panel = undefined; el._cardConfig = undefined;
+  el.render();
+  ok("la build in esecuzione è sempre scritta nell'intestazione",
+     el.innerHTML.includes("v" + CYBORG_BUILD_TEST), CYBORG_BUILD_TEST);
+  ok("senza versione dal server non si accusa nessuno", !el._staleBuild());
+
+  el.panel = { config: { version: CYBORG_BUILD_TEST } };
+  el.render();
+  ok("versioni allineate: nessun avviso", !el._staleBuild() && !el.innerHTML.includes("SVUOTA LA CACHE"));
+
+  el.panel = { config: { version: "9.9.9" } };
+  el._signature = ""; el.render();
+  ok("versioni diverse: l'avviso compare", el._staleBuild());
+  ok("l'avviso dice tutte e due le versioni",
+     el.innerHTML.includes("SVUOTA LA CACHE") && el.innerHTML.includes("9.9.9")
+     && el.innerHTML.includes(CYBORG_BUILD_TEST));
+  el.panel = undefined;
+  el._signature = ""; el.render();
+  ok("tolta la discrepanza l'avviso sparisce", !el.innerHTML.includes("SVUOTA LA CACHE"));
 }
 
 console.log("\n" + "=".repeat(46));

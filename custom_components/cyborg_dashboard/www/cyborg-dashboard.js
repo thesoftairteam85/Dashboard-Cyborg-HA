@@ -379,6 +379,22 @@ function polygonCentroid(points) {
   return [cx / (3 * a), cy / (3 * a)];
 }
 
+/**
+ * Turn a plan-space delta into a rotated room's own frame.
+ *
+ * Everything inside a room — vertices, device positions, resize handles — is
+ * expressed relative to the room, so once the room itself is turned the plan
+ * delta has to be turned back by the same angle or every drag inside it goes
+ * off at a tangent.
+ */
+function unrotate(delta, rotation) {
+  const deg = Number(rotation) || 0;
+  if (!deg) return delta;
+  const rad = (-deg * Math.PI) / 180;
+  return { dx: delta.dx * Math.cos(rad) - delta.dy * Math.sin(rad),
+           dy: delta.dx * Math.sin(rad) + delta.dy * Math.cos(rad) };
+}
+
 /** Even-odd point-in-polygon, so a dropped device cannot land outside its room. */
 function pointInPolygon(points, x, y) {
   let inside = false;
@@ -1056,6 +1072,9 @@ function cameraStream(entityId, st) {
   return token ? `/api/camera_proxy_stream/${entityId}?token=${token}` : null;
 }
 
+/** Composite cards made of device rows, where the tap action is per row. */
+const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
+
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
   "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev"]);
@@ -1311,6 +1330,22 @@ class CyborgDashboard extends HTMLElement {
     if (this._pageIndex >= pages.length) this._pageIndex = 0;
     return pages[this._pageIndex];
   }
+  /** Version the integration says it is, from the panel config. */
+  _serverVersion() {
+    const cfg = (this.panel && this.panel.config) || this._cardConfig || {};
+    return String(cfg.version || "");
+  }
+
+  /**
+   * True when the browser is running a different build from the one the
+   * integration just installed — the stale-cached-copy case. Reported in the
+   * header instead of leaving "le modifiche non si vedono" as a mystery.
+   */
+  _staleBuild() {
+    const server = this._serverVersion();
+    return !!server && !!CYBORG_BUILD && server !== CYBORG_BUILD;
+  }
+
   _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
   _rooms() { const p = this._page(); return (p && p.rooms) || []; }
   _room(id) { return this._rooms().find((r) => r.id === id) || null; }
@@ -1513,6 +1548,80 @@ class CyborgDashboard extends HTMLElement {
    * nothing else. Any dashboard saved before a page type existed could never
    * reach it — that is why an existing install had no 3D map.
    */
+  /**
+   * Move a section to another page, or give it a page of its own.
+   *
+   * A dashboard grows by subject — energia, sicurezza, stanze — and at some
+   * point a subject deserves the top level rather than a scroll position. The
+   * alternative is a single page that grows without end, which is exactly what
+   * a "sections" model is supposed to prevent.
+   *
+   * The page the section came from is removed when it is left empty, because
+   * an empty tab is a dead end the user then has to clean up by hand.
+   */
+  _moveSectionToPage(sectionId, target) {
+    const from = this._page();
+    const idx = (from.sections || []).findIndex((x) => x.id === sectionId);
+    if (idx < 0) return;
+    const [section] = from.sections.splice(idx, 1);
+
+    let destIndex;
+    if (target === "__own") {
+      const page = {
+        id: uid("page"), type: "sections",
+        title: section.title || "Sezione",
+        icon: section.icon || "mdi:view-dashboard-outline",
+        layout: { type: "grid", columns: 12, gap: 16 },
+        sections: [section],
+      };
+      // Inserted right after the page it came from, so the new tab appears
+      // next to its origin instead of at the far end of the bar.
+      destIndex = this._pageIndex + 1;
+      this._dashboard.pages.splice(destIndex, 0, page);
+    } else {
+      destIndex = parseInt(target, 10);
+      const dest = this._dashboard.pages[destIndex];
+      if (!dest || dest.type === "floorplan") { from.sections.splice(idx, 0, section); return; }
+      dest.sections = dest.sections || [];
+      dest.sections.push(section);
+    }
+
+    // Drop the page we emptied — but never the last remaining page, and never
+    // the 3D map, which holds rooms rather than sections.
+    const fromIndex = this._dashboard.pages.indexOf(from);
+    if (!from.sections.length && from.type === "sections" && this._dashboard.pages.length > 1) {
+      this._dashboard.pages.splice(fromIndex, 1);
+      if (destIndex > fromIndex) destIndex -= 1;
+    }
+    this._pageIndex = Math.max(0, Math.min(this._dashboard.pages.length - 1, destIndex));
+    this._selected = { kind: "section", sectionId: section.id };
+    this._fitKey = null;
+    this._touch();
+  }
+
+  /** The Illuminazione section, in one click, already pointed at every light. */
+  _addLightSection() {
+    if (!this._registry) this._loadRegistry();
+    const existing = this._sections().find((sec) =>
+      (sec.items || []).some((it) => it.type === "lights"));
+    if (existing) {
+      // Already there: select it rather than making a second one. Two identical
+      // sections is not a feature, it is a mess the user has to undo.
+      this._selected = { kind: "section", sectionId: existing.id };
+      this._error = "La sezione Illuminazione esiste già";
+      this._touch(true);
+      return;
+    }
+    const section = { id: uid("sec"), title: "Illuminazione", icon: "mdi:lightbulb-group",
+      accent: "#ffd166", collapsed: false,
+      items: [{ id: uid("card"), type: "lights", entity_id: "", name: "", size: "xl",
+        appearance: { icon: "mdi:lightbulb-group" }, states: {}, actions: {},
+        lights: [], group_by_area: true, row_action: "toggle" }] };
+    this._page().sections.push(section);
+    this._selected = { kind: "section", sectionId: section.id };
+    this._touch();
+  }
+
   _addPage(kind) {
     const pages = this._dashboard.pages;
     const base = { id: uid("page"), title: "Nuova pagina", icon: "mdi:view-dashboard-outline",
@@ -1847,9 +1956,13 @@ class CyborgDashboard extends HTMLElement {
       // "restart" buttons. Home Assistant hides those from its own auto
       // dashboards, and showing them is what turns one room into a wall of
       // meaningless symbols.
+      const deviceName = {};
+      for (const d of devices || []) deviceName[d.id] = d.name_by_user || d.name || "";
+      const entityDevice = {};
       const category = {};
       for (const e of entities || []) {
         if (e.disabled_by || e.hidden_by) continue;
+        if (e.device_id) entityDevice[e.entity_id] = e.device_id;
         if (e.entity_category) category[e.entity_id] = e.entity_category;
         const area = e.area_id || (e.device_id ? deviceArea[e.device_id] : null);
         if (!area) continue;
@@ -1864,9 +1977,11 @@ class CyborgDashboard extends HTMLElement {
       for (const [aid, ids] of Object.entries(byArea)) {
         for (const id of ids) entityArea[id] = areaName[aid] || aid;
       }
-      this._registry = { areas: areas || [], byArea, entityArea, category };
+      this._registry = { areas: areas || [], byArea, entityArea, category,
+        entityDevice, deviceName };
     } catch (err) {
-      this._registry = { areas: [], byArea: {}, entityArea: {}, category: {}, error: true };
+      this._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
+        entityDevice: {}, deviceName: {}, error: true };
     }
     this._registryLoading = false;
     this._touch();
@@ -2072,6 +2187,7 @@ class CyborgDashboard extends HTMLElement {
     const focused = focusId === room.id;
     const dim = !!focusId && !focused;
     const level = room.level || 0;
+    const rot = Number(room.rotation) || 0;
     const gap = view.level_gap || 150;
     const activeLevel = view.active_level;
     const ghost = activeLevel !== null && activeLevel !== undefined && activeLevel !== level;
@@ -2156,6 +2272,10 @@ class CyborgDashboard extends HTMLElement {
     const handles = editable ? RESIZE_HANDLES.map((hd) => `
       <button class="fp-handle" data-resize="${hd.k}" title="${hd.t}"
         style="left:${hd.x * 100}%;top:${hd.y * 100}%;cursor:${hd.c}"></button>`).join("") : "";
+    const rotHandle = editable ? `
+      <button class="fp-rotate" data-rotate="${esc(room.id)}" title="Ruota la stanza">
+        <ha-icon icon="mdi:rotate-3d-variant"></ha-icon>
+      </button>` : "";
     const vertices = editable && Array.isArray(room.points) ? pts.map((pt, i) => `
       <button class="fp-vertex" data-vertex="${i}" title="Vertice ${i + 1}"
         style="left:${(pt[0] * 100).toFixed(3)}%;top:${(pt[1] * 100).toFixed(3)}%"></button>`).join("")
@@ -2175,13 +2295,14 @@ class CyborgDashboard extends HTMLElement {
     return `<div class="${cls.join(" ")}"
         data-room="${esc(room.id)}" data-level="${level}"
         style="--rc:${esc(room.color)};left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px;
-          transform:translateZ(${(level * gap).toFixed(2)}px)">
+          transform:translateZ(${(level * gap).toFixed(2)}px)${rot ? ` rotateZ(${rot}deg)` : ""}">
         <div class="fp-floor" style="clip-path:polygon(${poly})"></div>
         <svg class="fp-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${pointsToSvg(pts)}"></polygon></svg>
         ${walls}
         ${spots}
         ${cars}
         ${handles}
+        ${rotHandle}
         ${vertices}
         ${tag}
       </div>`;
@@ -2299,7 +2420,7 @@ class CyborgDashboard extends HTMLElement {
    * and a named bag makes the next addition impossible to mis-order.
    */
   _renderFloorplanViewport({ view, rooms, bounds, focus, zoom, shift, persp, grounds, levelBar, focusBar }) {
-    return `<div class="fp-viewport${this._editing ? " editing" : ""}${focus ? " focusing" : ""}" data-fp-viewport
+    return `<div class="fp-viewport${this._editing ? " editing" : ""}${focus ? " focusing" : ""}" data-fp-viewport data-keep-scroll="map"
         style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${zoom};--persp:${persp}px">
         <div class="fp-stage">
           <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px;
@@ -2397,18 +2518,28 @@ class CyborgDashboard extends HTMLElement {
 
       if (pointers.size >= 2) {
         if (!start.d) { start.d = dist(); start.zoom = view.zoom; return; }
+        if (!start.dragging) { start.dragging = true; vp.classList.add("dragging"); }
         const k = dist() / start.d;
         view.zoom = Math.min(3, Math.max(0.3, Math.round(start.zoom * k * 100) / 100));
         vp.style.setProperty("--zoom", view.zoom);
         return;
       }
       const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
-      // 0.4 deg per pixel: a full turn in about three finger-widths, which is
-      // fast enough to be useful and slow enough to aim.
-      view.yaw = (((start.yaw + dx * 0.4) % 360) + 360) % 360;
-      view.pitch = Math.min(85, Math.max(0, start.pitch - dy * 0.3));
-      vp.style.setProperty("--yaw", view.yaw + "deg");
-      vp.style.setProperty("--pitch", view.pitch + "deg");
+      // The world carries a 0.28s ease on its transform so that the HUD
+      // buttons animate. During a drag that same easing makes the house lag a
+      // third of a second behind the pointer and keep turning after the finger
+      // stops — "gira come vuole lui". The transition is suppressed for the
+      // duration of the gesture and restored on release.
+      if (!start.dragging) {
+        start.dragging = true;
+        vp.classList.add("dragging");
+      }
+      // 0.55 deg per pixel horizontally: a full turn in roughly the width of a
+      // phone, which is what makes it feel like the house follows the finger.
+      view.yaw = (((start.yaw + dx * 0.55) % 360) + 360) % 360;
+      view.pitch = Math.min(85, Math.max(0, start.pitch - dy * 0.35));
+      vp.style.setProperty("--yaw", view.yaw.toFixed(2) + "deg");
+      vp.style.setProperty("--pitch", view.pitch.toFixed(2) + "deg");
     };
 
     const release = (ev) => {
@@ -2416,7 +2547,10 @@ class CyborgDashboard extends HTMLElement {
       pointers.delete(ev.pointerId);
       try { vp.releasePointerCapture(ev.pointerId); } catch (e) { /* already gone */ }
       if (pointers.size) { start = null; return; }
+      const moved = !!(start && start.dragging);
       start = null;
+      vp.classList.remove("dragging");
+      if (!moved) return;   // a tap on the background is not a camera move
       // Committed only on release: re-rendering during the gesture would
       // rebuild the element the finger is holding.
       this._touch();
@@ -2521,7 +2655,7 @@ class CyborgDashboard extends HTMLElement {
           <div class="wiz-hint">${areas.length
             ? `Cyborg ha trovato <strong>${areas.length} aree</strong> in Home Assistant. Togli la spunta a quelle che non vuoi sulla mappa, e aggiungi le stanze che in Home Assistant non esistono.`
             : "In Home Assistant non ci sono aree configurate. Scrivi qui i nomi delle stanze: potrai collegarle alle aree più avanti, oppure scegliere le entità a mano."}</div>
-          <div class="wiz-list">${w.rooms.map((r, i) => `
+          <div class="wiz-list" data-keep-scroll="wiz">${w.rooms.map((r, i) => `
             <button type="button" class="wiz-opt ${r.on ? "sel" : ""}" data-mw-room="${i}">
               <ha-icon icon="${esc(r.on ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
               <div><strong>${esc(r.title)}</strong><small>${esc(r.area_id ? "area di Home Assistant" : "stanza aggiunta a mano")}</small></div>
@@ -2562,14 +2696,14 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini" data-mw-level="1" ${(room.level || 0) >= 8 ? "disabled" : ""} title="Un piano più in alto"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
           </div>
           ${room.area_id ? `<label class="check"><input type="checkbox" data-mw-auto ${auto ? "checked" : ""}> Automatico dall'area (consigliato)</label>` : ""}
-          ${auto && room.area_id ? `<div class="wiz-list">${[...chosen].map((id) => {
+          ${auto && room.area_id ? `<div class="wiz-list" data-keep-scroll="wiz">${[...chosen].map((id) => {
             const st = this._hass.states[id];
             return `<div class="wiz-opt sel" style="pointer-events:none">
               <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
               <div><strong>${esc((st && st.attributes.friendly_name) || id)}</strong><small>${esc(id)}</small></div></div>`;
           }).join("") || '<div class="entity-result-empty">Nessuna entità utile trovata in quest\'area.</div>'}</div>`
           : `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra le entità..." autocomplete="off">
-             <div class="wiz-list">${rows.slice(0, 40).map((id) => {
+             <div class="wiz-list" data-keep-scroll="wiz">${rows.slice(0, 40).map((id) => {
                const st = this._hass.states[id];
                return `<button type="button" class="wiz-opt ${chosen.has(id) ? "sel" : ""}" data-mw-ent="${esc(id)}">
                  <ha-icon icon="${esc(chosen.has(id) ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
@@ -2585,7 +2719,7 @@ class CyborgDashboard extends HTMLElement {
         <div class="wiz-hint">Cyborg disporrà le ${rr.length} stanze su una griglia ordinata, un piano alla volta. Da lì le <strong>trascini</strong> sulla mappa per farle somigliare alla pianta vera, le <strong>ridimensioni</strong> con le maniglie bianche e ne cambi la <strong>forma</strong> dal pannello di destra.${
           new Set(rr.map((r) => r.level || 0)).size > 1
             ? ` L'edificio ha ${new Set(rr.map((r) => r.level || 0)).size} piani: il selettore a destra sulla mappa ne isola uno alla volta.` : ""}</div>
-        <div class="wiz-list">${rr.map((r) => `<div class="wiz-opt sel" style="pointer-events:none;--nc:${esc(r.color)}">
+        <div class="wiz-list" data-keep-scroll="wiz">${rr.map((r) => `<div class="wiz-opt sel" style="pointer-events:none;--nc:${esc(r.color)}">
             <ha-icon icon="${esc(r.icon)}"></ha-icon>
             <div><strong>${esc(r.title)}</strong><small>${esc(levelName(r.level || 0) + " · " + (r.entities === null
               ? this._roomEntities({ area_id: r.area_id, entities: null }).length + " entità automatiche"
@@ -2664,7 +2798,7 @@ class CyborgDashboard extends HTMLElement {
       : (SHAPE_PRESETS.find((sp) => sp.points && sp.points.length === shape.length
           && sp.points.every((pt, i) => Math.abs(pt[0] - shape[i][0]) < 0.01 && Math.abs(pt[1] - shape[i][1]) < 0.01)) || { k: "custom" }).k;
     const placed = Object.keys(room.spots || {}).length;
-    return `<aside class="editor">
+    return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("STANZA", room.title)}
       <div class="section">
         <label>NOME<input data-room-prop="title" value="${esc(room.title)}"></label>
@@ -2738,6 +2872,9 @@ class CyborgDashboard extends HTMLElement {
           <label>LARGHEZZA<input type="number" step="10" min="40" data-room-prop="w" value="${room.w}"></label>
           <label>PROFONDITÀ<input type="number" step="10" min="40" data-room-prop="h" value="${room.h}"></label>
         </div>
+        <label>ROTAZIONE · ${Math.round(Number(room.rotation) || 0)}°
+          <input type="range" min="0" max="355" step="5" data-room-prop="rotation" value="${Math.round(Number(room.rotation) || 0)}"></label>
+        <span class="hint">Sulla mappa la maniglia con la freccia circolare gira la stanza. Scatta di 5° per volta; tenendo premuto <strong>Shift</strong> gira libera.</span>
       </div>
 
       <div class="section">
@@ -2751,13 +2888,13 @@ class CyborgDashboard extends HTMLElement {
           : `Presi dall'area collegata, senza le entità di diagnostica e configurazione. Sulla mappa compaiono i ${Math.min(derived.length, MAX_BADGES_PER_ROOM)} più significativi; l'occhio qui sotto decide chi si vede entrando nella stanza.`}</span>
         <button class="wide" data-room-add-device="${esc(room.id)}"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI DISPOSITIVO</button>
         ${this._roomPicker ? `<label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off" data-autofocus></label>
-          <div class="entity-results" data-entity-results>${this._roomEntityResults(room)}</div>
+          <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._roomEntityResults(room)}</div>
           <button class="secondary wide" data-room-picker-close>CHIUDI RICERCA</button>` : ""}
         ${candidates.length ? `<div class="room-vis-head">
           <span>${all.length} visibili su ${candidates.length}</span>
           <button class="mini" data-room-vis-all><ha-icon icon="mdi:eye"></ha-icon> MOSTRA TUTTI</button>
         </div>` : ""}
-        <div class="room-entities">${candidates.length
+        <div class="room-entities" data-keep-scroll="room-entities">${candidates.length
           ? candidates.map((e) => {
             const shown = !hiddenSet.has(e);
             return `<div class="room-ent${shown ? "" : " hidden"}">
@@ -2820,7 +2957,7 @@ class CyborgDashboard extends HTMLElement {
     const page = this._page();
     const view = page.view || {};
     const areas = (this._registry && this._registry.areas) || [];
-    return `<aside class="editor">
+    return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("MAPPA 3D", page.title)}
       <div class="section">
         <label>TITOLO PAGINA<input data-page-prop="title" value="${esc(page.title || "")}"></label>
@@ -3250,6 +3387,101 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  /**
+   * A device row that obeys the card's chosen tap action.
+   *
+   * The rows used to be hard-wired to "toggle", so a card configured with
+   * *Apri i dettagli* still flipped the switch — you could never inspect a
+   * relay without operating it, which on a boiler or a gate is not a cosmetic
+   * problem. Now the row body does what the card says, and the icon always
+   * does the other thing, so both are one tap away whichever way it is set.
+   */
+  _deviceRow(id, st, on, cls, item) {
+    const toggleFirst = (item.row_action || "toggle") === "toggle";
+    return `<div class="${cls}${on ? " on" : ""}${toggleFirst ? "" : " info"}" role="button" tabindex="0"
+        ${toggleFirst ? `data-toggle-entity="${esc(id)}"` : `data-more-info="${esc(id)}"`}>
+      <button class="act-icon" data-row-act="${esc(id)}" title="${toggleFirst ? "Apri i dettagli" : "Accendi / spegni"}">
+        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+      </button>
+      <span>${esc(st.attributes.friendly_name || id)}</span>
+      <small>${esc(stateWords(st.state, st.attributes.device_class))}</small>
+    </div>`;
+  }
+
+  /**
+   * Per-entity include/exclude for "attivi ora".
+   *
+   * Domain filters were not enough: an IR illuminator, a camera's "silent
+   * mode" and a panel light are all `switch` entities that are genuinely on,
+   * and they crowd out the things that matter. Listing everything the card
+   * *could* show — including what is currently off, so it can be excluded
+   * before it next comes on — turns this into one pass instead of a game of
+   * whack-a-mole every time something switches.
+   *
+   * Grouped by device, with a bulk toggle, because that noise always arrives a
+   * whole device at a time.
+   */
+  _activeExcludeEditor(card) {
+    const exclude = new Set(card.exclude || []);
+    const include = Array.isArray(card.domains) && card.domains.length
+      ? card.domains : Object.keys(ACTIVE_DOMAINS);
+    const reg = this._registry || {};
+    const candidates = Object.keys(this._hass.states).filter((id) => {
+      const d = domainOf(id);
+      if (!ACTIVE_DOMAINS[d] || !include.includes(d)) return false;
+      const st = this._hass.states[id];
+      return st.state !== "unavailable" && st.state !== "unknown";
+    });
+    if (!candidates.length) return '<div class="entity-result-empty">Nessun dispositivo compatibile.</div>';
+
+    const groups = new Map();
+    for (const id of candidates) {
+      const dev = (reg.entityDevice || {})[id];
+      const key = dev || "__solo";
+      const label = dev ? ((reg.deviceName || {})[dev] || "Dispositivo") : "Senza dispositivo";
+      if (!groups.has(key)) groups.set(key, { label, ids: [] });
+      groups.get(key).ids.push(id);
+    }
+    const rows = Array.from(groups.values())
+      .sort((a, b) => (b.ids.length - a.ids.length) || a.label.localeCompare(b.label));
+    const shownCount = candidates.filter((id) => !exclude.has(id)).length;
+
+    return `<div class="room-vis-head">
+        <span>${shownCount} visibili su ${candidates.length}</span>
+        <button class="mini" data-active-vis-all><ha-icon icon="mdi:eye"></ha-icon> MOSTRA TUTTI</button>
+      </div>
+      <div class="room-entities" data-keep-scroll="active-exclude">
+        ${rows.map((g) => {
+          const allHidden = g.ids.every((id) => exclude.has(id));
+          return `${g.ids.length > 1 ? `<div class="dev-group-head">
+              <strong>${esc(g.label)}</strong>
+              <button class="mini" data-active-dev="${esc(g.ids.join("|"))}" title="${allHidden ? "Mostra tutto il dispositivo" : "Nascondi tutto il dispositivo"}">
+                <ha-icon icon="${allHidden ? "mdi:eye" : "mdi:eye-off"}"></ha-icon></button>
+            </div>` : ""}
+            ${g.ids.map((id) => {
+              const st = this._hass.states[id];
+              const shown = !exclude.has(id);
+              const on = ON_STATES.has(st.state);
+              return `<div class="room-ent${shown ? "" : " hidden"}">
+                <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+                <span>${esc(st.attributes.friendly_name || id)}</span>
+                ${on ? '<em class="room-ent-pos" title="Acceso adesso">●</em>' : ""}
+                <button class="mini" data-active-vis="${esc(id)}" title="${shown ? "Nascondi" : "Mostra"}">
+                  <ha-icon icon="${shown ? "mdi:eye" : "mdi:eye-off"}"></ha-icon></button>
+              </div>`;
+            }).join("")}`;
+        }).join("")}
+      </div>`;
+  }
+
+  /** Toggle through a service the entity's domain actually has. */
+  _toggleEntity(id) {
+    const d = domainOf(id);
+    const sd = ["light", "switch", "fan", "media_player", "input_boolean",
+                "cover", "siren", "humidifier"].includes(d) ? d : "homeassistant";
+    this._hass.callService(sd, "toggle", { entity_id: id });
+  }
+
   /** Area of an entity, from the registry, or "" when it has none. */
   _areaOf(entityId) {
     return (this._registry && this._registry.entityArea && this._registry.entityArea[entityId]) || "";
@@ -3334,14 +3566,18 @@ class CyborgDashboard extends HTMLElement {
         ${shown.map((r) => {
           const area = this._areaOf(r.id);
           const name = String(r.st.attributes.friendly_name || r.id).trim();
-          return `<button class="act-row${g.group.alert ? " alert" : ""}" data-toggle-entity="${esc(r.id)}">
-            <ha-icon icon="${esc(autoIcon(r.id, r.st))}"></ha-icon>
+          const act = (item.row_action || "toggle") === "toggle";
+          return `<div class="act-row${g.group.alert ? " alert" : ""}${act ? "" : " info"}"
+              ${act ? `data-toggle-entity="${esc(r.id)}"` : `data-more-info="${esc(r.id)}"`} role="button" tabindex="0">
+            <button class="act-icon" data-row-act="${esc(r.id)}" title="${act ? "Apri i dettagli" : "Accendi / spegni"}">
+              <ha-icon icon="${esc(autoIcon(r.id, r.st))}"></ha-icon>
+            </button>
             <div class="act-txt">
               <strong>${esc(name)}</strong>
               <small>${esc([area, g.group.detail(r.st)].filter(Boolean).join(" · "))}</small>
             </div>
             <span class="act-since">${esc(sinceWords(r.since, now))}</span>
-          </button>`;
+          </div>`;
         }).join("")}
         ${hidden > 0 ? `<div class="act-more">+${hidden} altr${hidden === 1 ? "o" : "i"}</div>` : ""}
       </section>`;
@@ -3680,11 +3916,7 @@ class CyborgDashboard extends HTMLElement {
     const toggleRow = (id) => {
       const st = this._hass.states[id];
       const on = ON_STATES.has(st.state);
-      return `<button class="rc-row${on ? " on" : ""}" data-toggle-entity="${esc(id)}">
-        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
-        <span>${esc(st.attributes.friendly_name || id)}</span>
-        <small>${esc(stateWords(st.state, st.attributes.device_class))}</small>
-      </button>`;
+      return this._deviceRow(id, st, on, "rc-row", item);
     };
     const coverRow = (id) => {
       const st = this._hass.states[id];
@@ -5046,7 +5278,7 @@ class CyborgDashboard extends HTMLElement {
         <strong>DETTAGLIO PER DISPOSITIVO</strong>
         <span class="hint">Ogni riga è un contatore di energia in kWh: quanto ha consumato quel dispositivo nel periodo, e quanto è costato. Un dispositivo marcato come <strong>produce</strong> viene valorizzato alla tariffa di immissione invece che a quella di prelievo.</span>
         <button class="secondary wide" data-eco-detect><ha-icon icon="mdi:import"></ha-icon> IMPORTA I DISPOSITIVI DALLA DASHBOARD ENERGIA</button>
-        <div class="eco-dev-list">${(card.devices || []).map((d, i) => {
+        <div class="eco-dev-list" data-keep-scroll="eco-devices">${(card.devices || []).map((d, i) => {
           const st = this._hass.states[d.entity];
           return `<div class="eco-dev-edit">
             <ha-icon icon="${esc(d.icon || (st ? autoIcon(d.entity, st) : "mdi:power-plug"))}"></ha-icon>
@@ -5150,6 +5382,11 @@ class CyborgDashboard extends HTMLElement {
         </div>
         <label>MASSIMO IN ELENCO<input type="number" min="3" max="30" data-prop="max" value="${card.max || 8}"></label>
         <span class="hint">Il limite è per gruppo: le voci vengono ripartite tra luci, prese, clima, aperture e media, così nessuna categoria sparisce del tutto.</span>
+      </div>
+      <div class="section">
+        <strong>QUALI DISPOSITIVI</strong>
+        <span class="hint">Scegli uno per uno cosa vedere. Un interruttore che in realtà è una funzione di una videocamera — luce infrarossa, registrazione, modalità silenziosa — è tecnicamente "acceso" ma non è un dispositivo di casa: toglilo e non torna più.</span>
+        ${this._activeExcludeEditor(card)}
       </div>`;
     }
     if (card.type === "notifications") {
@@ -5236,7 +5473,7 @@ class CyborgDashboard extends HTMLElement {
       ${card.area ? `<div class="section">
         <strong>COSA MOSTRARE</strong>
         <span class="hint">Le entità di diagnostica e configurazione sono già escluse. Qui togli quelle che non ti interessano.</span>
-        <div class="room-entities">${pool.map((id) => {
+        <div class="room-entities" data-keep-scroll="room-entities">${pool.map((id) => {
           const shown = !hidden.has(id);
           const st = this._hass.states[id];
           return `<div class="room-ent${shown ? "" : " hidden"}">
@@ -5262,7 +5499,7 @@ class CyborgDashboard extends HTMLElement {
         <strong>GRANDEZZE A CONFRONTO</strong>
         <span class="hint">Fino a otto linee sullo stesso grafico, con una scala verticale sola: è quella che rende leggibile "il bagno è più freddo del soggiorno". ${
           sameKind ? `Stai confrontando grandezze di tipo <strong>${esc(sameKind)}</strong>.` : ""}</span>
-        <div class="eco-dev-list">${chosen.map((row, i) => {
+        <div class="eco-dev-list" data-keep-scroll="eco-devices">${chosen.map((row, i) => {
           const st = this._hass.states[row.entity];
           const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
           const mixed = sameKind && dc(row.entity) !== sameKind;
@@ -5325,7 +5562,7 @@ class CyborgDashboard extends HTMLElement {
       return `<div class="section">
         <strong>ZONE</strong>
         <span class="hint">Ogni zona è un'elettrovalvola o un relè. L'avvio a tempo viene eseguito da Home Assistant: la valvola si chiude anche se chiudi il browser, blocchi il telefono o riavvii il sistema a metà ciclo.</span>
-        <div class="eco-dev-list">${(card.zones || []).map((z, i) => {
+        <div class="eco-dev-list" data-keep-scroll="eco-devices">${(card.zones || []).map((z, i) => {
           const st = this._hass.states[z.entity];
           return `<div class="eco-dev-edit">
             <ha-icon icon="${esc(z.icon || "mdi:sprinkler")}"></ha-icon>
@@ -5465,7 +5702,7 @@ class CyborgDashboard extends HTMLElement {
           <div class="wiz-q">${esc(step.q)}</div>
           <div class="wiz-hint">${esc(step.hint)}</div>
           <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra i sensori di potenza..." autocomplete="off">
-          <div class="wiz-list">${rows.length ? rows.slice(0, 40).map((r) => {
+          <div class="wiz-list" data-keep-scroll="wiz">${rows.length ? rows.slice(0, 40).map((r) => {
             const f = fmtPower(powerWatts(r.st));
             return `<button type="button" class="wiz-opt ${current === r.id ? "sel" : ""}" data-wiz-pick="${esc(r.id)}">
               <ha-icon icon="${esc(current === r.id ? "mdi:check-circle" : "mdi:flash")}"></ha-icon>
@@ -5487,7 +5724,7 @@ class CyborgDashboard extends HTMLElement {
           <div class="wiz-q">Quali carichi vuoi vedere nel dettaglio?</div>
           <div class="wiz-hint">Sono i rami che compaiono aprendo il nodo Casa. Selezionane quanti vuoi, fino a 8.</div>
           <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="filtra i carichi..." autocomplete="off">
-          <div class="wiz-list">${rows.slice(0, 40).map((r) => `
+          <div class="wiz-list" data-keep-scroll="wiz">${rows.slice(0, 40).map((r) => `
             <button type="button" class="wiz-opt ${chosen.has(r.id) ? "sel" : ""}" data-wiz-load="${esc(r.id)}">
               <ha-icon icon="${esc(chosen.has(r.id) ? "mdi:checkbox-marked" : "mdi:checkbox-blank-outline")}"></ha-icon>
               <div><strong>${esc(r.name)}</strong><small>${esc(r.id)}</small></div>
@@ -5661,7 +5898,7 @@ class CyborgDashboard extends HTMLElement {
             ${id && sl.key !== "home" ? `<label class="check"><input type="checkbox" data-flow-invert="${esc(sl.key)}" ${flow["invert_" + sl.key] ? "checked" : ""}> Inverti segno${
               sl.key === "grid" ? " (se l'immissione risulta come prelievo)" : sl.key === "battery" ? " (se carica e scarica sono scambiate)" : ""}</label>` : ""}
             ${active ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
-              <div class="entity-results" data-entity-results>${this._entityResults("power")}</div>` : ""}
+              <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults("power")}</div>` : ""}
           </div>`;
       }).join("")}
       ${flow.home ? "" : '<span class="hint">Senza il sensore "Casa" il consumo domestico viene calcolato: solare + prelievo + scarica batteria − immissione − carica batteria.</span>'}
@@ -5676,7 +5913,7 @@ class CyborgDashboard extends HTMLElement {
         </div>`).join("")}
       <button class="mini ${this._flowSlot === "__dev" ? "accentbtn" : ""}" data-flow-pick="__dev"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARICO</button>
       ${this._flowSlot === "__dev" ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
-        <div class="entity-results" data-entity-results>${this._entityResults("power")}</div>` : ""}
+        <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults("power")}</div>` : ""}
     </div>
     ${evSection}`;
   }
@@ -5689,7 +5926,7 @@ class CyborgDashboard extends HTMLElement {
     const currentIcon = app.icon || autoIcon(card.entity_id, st || { attributes: {} });
     const tap = (card.actions && card.actions.tap && card.actions.tap.action) || "more-info";
 
-    return `<aside class="editor">
+    return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("CARD", card.name || (COMPOSITE_META[card.type] && COMPOSITE_META[card.type][0])
         || (st && st.attributes.friendly_name) || card.entity_id || "Nuova card")}
 
@@ -5703,7 +5940,7 @@ class CyborgDashboard extends HTMLElement {
             <span class="err-state">${esc(state)}</span>
           </div>` : `<div class="warn">Nessuna entità collegata — la card resterà vuota.</div>`}
         <label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
-        <div class="entity-results" data-entity-results>${this._entityResults()}</div>
+        <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults()}</div>
       </div>`}
 
       <div class="section">
@@ -5745,6 +5982,14 @@ class CyborgDashboard extends HTMLElement {
         <label class="check"><input type="checkbox" data-state-prop="${esc(state)}.animate" ${(card.states[state] && card.states[state].animate) ? "checked" : ""}> Animazione pulsante</label>
       </div>
 
+      ${ROW_ACTION_TYPES.has(card.type) ? `<div class="section">
+        <strong>AZIONE AL TOCCO</strong>
+        <span class="hint">Cosa fa il tocco sulla riga di un dispositivo. <strong>L'icona fa sempre l'altra cosa</strong>, così comando e dettagli restano entrambi a un tocco.</span>
+        <select data-prop="row_action">
+          <option value="toggle" ${(card.row_action || "toggle") === "toggle" ? "selected" : ""}>Accendi / spegni · l'icona apre i dettagli</option>
+          <option value="more-info" ${card.row_action === "more-info" ? "selected" : ""}>Apri i dettagli · l'icona accende e spegne</option>
+        </select>
+      </div>` : `
       <div class="section">
         <strong>AZIONE AL TOCCO</strong>
         <span class="hint">${(() => {
@@ -5760,14 +6005,14 @@ class CyborgDashboard extends HTMLElement {
             `<option value="${esc(a.k)}" ${tap === a.k ? "selected" : ""}>${esc(a.l)}${
               a.s ? ` · ${esc(domainOf(card.entity_id))}.${esc(a.s)}` : ""}</option>`).join("")}
         </select>
-      </div>
+      </div>`}
 
       <button class="delete" data-card-remove data-sec="${esc(this._selected.sectionId)}" data-item="${esc(card.id)}">ELIMINA CARD</button>
     </aside>`;
   }
 
   _renderSectionEditor(section) {
-    return `<aside class="editor">
+    return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("SEZIONE", section.title)}
       <div class="section">
         <label>TITOLO<input data-sec-prop="title" value="${esc(section.title)}"></label>
@@ -5786,13 +6031,23 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint">${section.items.length} card in questa sezione.</span>
         <button class="secondary wide" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARD</button>
       </div>
+      <div class="section">
+        <strong>DOVE VIVE QUESTA SEZIONE</strong>
+        <span class="hint">Una sezione può stare dentro una pagina insieme alle altre, oppure diventare una <strong>scheda tutta sua</strong> accanto a Dashboard e Mappa 3D. Decidi tu, sezione per sezione.</span>
+        <select data-sec-page="${esc(section.id)}">
+          ${this._dashboard.pages.map((pg, i) => pg.type === "floorplan" ? "" :
+            `<option value="${i}" ${i === this._pageIndex ? "selected" : ""}>Dentro «${esc(pg.title || "Pagina " + (i + 1))}»</option>`).join("")}
+          <option value="__own">In una scheda tutta sua</option>
+        </select>
+        ${this._sections().length === 1 ? '<span class="hint">È l\'unica sezione di questa pagina: spostandola, la pagina vuota viene rimossa.</span>' : ""}
+      </div>
       <button class="delete" data-sec-remove data-sec="${esc(section.id)}">ELIMINA SEZIONE</button>
     </aside>`;
   }
 
   _renderPageEditor() {
     const p = this._page();
-    return `<aside class="editor">
+    return `<aside class="editor" data-keep-scroll="editor">
       ${this._editorHead("PAGINA", "Struttura")}
       <div class="section">
         <label>TITOLO<input data-page-prop="title" value="${esc(p.title || "")}" placeholder="Cyborg"></label>
@@ -5831,7 +6086,7 @@ class CyborgDashboard extends HTMLElement {
   _renderEditor() {
     if (this._isFloorplan()) {
       if (this._mapWizard) {
-        return `<aside class="editor">${this._editorHead("MAPPA 3D", "Configurazione guidata")}${this._mapWizardEditor()}</aside>`;
+        return `<aside class="editor" data-keep-scroll="editor">${this._editorHead("MAPPA 3D", "Configurazione guidata")}${this._mapWizardEditor()}</aside>`;
       }
       const room = this._selected && this._selected.kind === "room"
         ? this._room(this._selected.roomId) : null;
@@ -5855,10 +6110,15 @@ class CyborgDashboard extends HTMLElement {
     // page and of the sheet. Capture what is scrolled, restore it after.
     const scroller = this._scrollParent();
     const pageTop = scroller ? scroller.scrollTop : 0;
+    // Every scrollable container declares a key, and all of them are restored.
+    // The old version listed four selectors by hand, so scrolling half way
+    // down a room's device list and tapping an eye threw the list back to the
+    // top — which is what "quando clicco mi si abbassa la visuale" describes.
+    // A declared key cannot be forgotten when a new list is added: the list
+    // simply does not scroll independently until it declares one.
     const scrolls = {};
-    for (const sel of [".editor", ".wiz-list", ".entity-results", ".fp-viewport"]) {
-      const el = this.querySelector(sel);
-      if (el && el.scrollTop) scrolls[sel] = el.scrollTop;
+    for (const el of Array.from(this.querySelectorAll("[data-keep-scroll]"))) {
+      if (el.scrollTop) scrolls[el.getAttribute("data-keep-scroll")] = el.scrollTop;
     }
 
     // Preserve editor focus + caret across the innerHTML swap, otherwise
@@ -5884,6 +6144,9 @@ class CyborgDashboard extends HTMLElement {
     const subtitle = floorplan
       ? `${this._rooms().length} STANZE · ${this._editing ? "MODIFICA ATTIVA" : "MAPPA 3D"}`
       : `${sections.length} SEZIONI · ${total} CARD · ${this._editing ? "MODIFICA ATTIVA" : "SISTEMA ONLINE"}`;
+    // The running build, always visible: the fastest answer to "did my update
+    // actually arrive" is being able to read the number on screen.
+    const buildTag = CYBORG_BUILD ? ` · v${CYBORG_BUILD}` : "";
 
     const body = floorplan ? this._renderFloorplan() : sections.length
       ? sections.map((s, i) => this._renderSection(s, i, sections.length)).join("")
@@ -5904,16 +6167,19 @@ class CyborgDashboard extends HTMLElement {
             <ha-icon class="brand-icon" icon="${esc(p.icon || "mdi:hexagon-multiple-outline")}"></ha-icon>
             <div>
               <h1>${esc(p.title || "Cyborg")}</h1>
-              <div class="sub">${subtitle}</div>
+              <div class="sub">${subtitle}${buildTag}</div>
             </div>
           </div>
           <div class="tools">
             ${this._saved ? '<span class="status ok"><ha-icon icon="mdi:check"></ha-icon> SALVATO</span>' : ""}
             ${this._editing && this._dirty && !this._saved ? '<span class="status warn"><ha-icon icon="mdi:content-save-alert-outline"></ha-icon> MODIFICHE NON SALVATE</span>' : ""}
             ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
+            ${this._staleBuild() ? `<span class="status err" title="Il browser sta eseguendo una copia vecchia del pannello">
+              <ha-icon icon="mdi:reload-alert"></ha-icon> PANNELLO ${esc(CYBORG_BUILD)} · INTEGRAZIONE ${esc(this._serverVersion())} — SVUOTA LA CACHE</span>` : ""}
             ${this._editing ? `${floorplan
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
                  : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
+                    <button class="secondary" data-add-lights title="Tutte le luci della casa, per stanza"><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
                     <button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>`}
                <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
@@ -5933,9 +6199,9 @@ class CyborgDashboard extends HTMLElement {
     // restore scroll synchronously, before the browser paints, so there is no
     // visible jump
     if (scroller && pageTop) scroller.scrollTop = pageTop;
-    for (const sel of Object.keys(scrolls)) {
-      const el = this.querySelector(sel);
-      if (el) el.scrollTop = scrolls[sel];
+    for (const key of Object.keys(scrolls)) {
+      const el = this.querySelector(`[data-keep-scroll="${key}"]`);
+      if (el) el.scrollTop = scrolls[key];
     }
 
     this._bind();
@@ -5970,6 +6236,12 @@ class CyborgDashboard extends HTMLElement {
     };
     const save = q("[data-save]");
     if (save) save.onclick = () => this._save();
+    const secPage = q("[data-sec-page]");
+    if (secPage) secPage.onchange = () =>
+      this._moveSectionToPage(secPage.getAttribute("data-sec-page"), secPage.value);
+
+    const addLights = q("[data-add-lights]");
+    if (addLights) addLights.onclick = () => this._addLightSection();
     const addRooms = q("[data-add-rooms]");
     if (addRooms) addRooms.onclick = () => this._addRoomSection();
     const addSec = q("[data-add-section]");
@@ -6295,6 +6567,29 @@ class CyborgDashboard extends HTMLElement {
         { entity_id: el.getAttribute("data-ev-current"), value: Number(el.value) });
     });
 
+    all("[data-active-vis]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-active-vis");
+        const cur = Array.isArray(card.exclude) ? card.exclude.slice() : [];
+        card.exclude = cur.includes(id) ? cur.filter((x) => x !== id) : cur.concat([id]);
+        this._touch();
+      };
+    });
+    all("[data-active-dev]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const ids = el.getAttribute("data-active-dev").split("|");
+        const cur = new Set(Array.isArray(card.exclude) ? card.exclude : []);
+        const allHidden = ids.every((id) => cur.has(id));
+        for (const id of ids) { if (allHidden) cur.delete(id); else cur.add(id); }
+        card.exclude = Array.from(cur);
+        this._touch();
+      };
+    });
+    const activeVisAll = q("[data-active-vis-all]");
+    if (activeVisAll && card) activeVisAll.onclick = () => { card.exclude = []; this._touch(); };
+
     all("[data-roomcard-vis]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -6597,7 +6892,7 @@ class CyborgDashboard extends HTMLElement {
         const room = this._room(this._selected && this._selected.roomId);
         if (!room) return;
         const key = el.getAttribute("data-room-prop");
-        const numeric = ["x", "y", "w", "h", "level"].includes(key);
+        const numeric = ["x", "y", "w", "h", "level", "rotation"].includes(key);
         let value = numeric ? parseInt(el.value, 10) || 0 : el.value;
         if (key === "w" || key === "h") value = Math.max(40, value);
         if (key === "area_id" && !value) value = null;
@@ -6807,17 +7102,41 @@ class CyborgDashboard extends HTMLElement {
     });
 
     // --- overview cards
-    all("[data-toggle-entity]").forEach((el) => {
-      el.onclick = () => {
-        const id = el.getAttribute("data-toggle-entity");
-        const d = domainOf(id);
-        const sd = ["light", "switch", "fan", "media_player", "input_boolean", "cover", "siren", "humidifier"].includes(d) ? d : "homeassistant";
-        this._hass.callService(sd, "toggle", { entity_id: id });
+    all("[data-row-act]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const id = el.getAttribute("data-row-act");
+        const row = el.closest("[data-toggle-entity],[data-more-info]");
+        // The icon is deliberately the *other* action: whatever the row does,
+        // the icon does the opposite, so details and control are both one tap
+        // away without a menu.
+        if (row && row.hasAttribute("data-toggle-entity")) {
+          this.dispatchEvent(new CustomEvent("hass-more-info", {
+            detail: { entityId: id }, bubbles: true, composed: true }));
+        } else {
+          this._toggleEntity(id);
+        }
       };
     });
+    // A device row had to become a div so the icon inside it can be its own
+    // button — HTML forbids a button inside a button. A div with role="button"
+    // brings no keyboard activation of its own, so it is added here; without
+    // it the rows stop working for anyone driving the panel from a keyboard.
+    const activate = (el, run) => {
+      el.onclick = run;
+      if (el.getAttribute("role") !== "button") return;
+      el.onkeydown = (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        run();
+      };
+    };
+    all("[data-toggle-entity]").forEach((el) => {
+      activate(el, () => this._toggleEntity(el.getAttribute("data-toggle-entity")));
+    });
     all("[data-more-info]").forEach((el) => {
-      el.onclick = () => this.dispatchEvent(new CustomEvent("hass-more-info", {
-        detail: { entityId: el.getAttribute("data-more-info") }, bubbles: true, composed: true }));
+      activate(el, () => this.dispatchEvent(new CustomEvent("hass-more-info", {
+        detail: { entityId: el.getAttribute("data-more-info") }, bubbles: true, composed: true })));
     });
     all("[data-eco-period]").forEach((el) => {
       el.onclick = () => {
@@ -7255,6 +7574,56 @@ class CyborgDashboard extends HTMLElement {
 
     this._bindResize(un);
     this._bindVertexDrag(un);
+    this._bindRotate(un);
+  }
+
+  /**
+   * Turn a room in the floor plane.
+   *
+   * The angle is taken from the pointer's position relative to the room's
+   * centre *in plan space*, not on screen: the scene is rotated and tilted, so
+   * a screen-space angle would make the room turn faster on one side of the
+   * view than the other and backwards past 90 degrees of camera yaw. Both
+   * points go through the same inverse projection the drag uses, and the
+   * difference between them is the rotation.
+   */
+  _bindRotate(un) {
+    Array.from(this.querySelectorAll("[data-rotate]")).forEach((h) => {
+      h.onpointerdown = (ev) => {
+        const el = h.closest(".fp-room");
+        const room = el && this._room(el.getAttribute("data-rotate"));
+        if (!room) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.setPointerCapture(ev.pointerId);
+
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+        const start = un(ev.clientX - cx, ev.clientY - cy);
+        const a0 = Math.atan2(start.dy, start.dx);
+        const r0 = Number(room.rotation) || 0;
+        el.classList.add("resizing");
+
+        h.onpointermove = (mv) => {
+          const d = un(mv.clientX - cx, mv.clientY - cy);
+          if (Math.hypot(d.dx, d.dy) < 8) return;
+          let deg = r0 + ((Math.atan2(d.dy, d.dx) - a0) * 180) / Math.PI;
+          // 5 degree snap unless shift is held: a plan wants square corners
+          // far more often than it wants 37.4 degrees.
+          if (!mv.shiftKey) deg = Math.round(deg / 5) * 5;
+          room.rotation = ((deg % 360) + 360) % 360;
+          el.style.transform = el.style.transform.replace(/ rotateZ\([^)]*\)/, "")
+            + (room.rotation ? ` rotateZ(${room.rotation}deg)` : "");
+        };
+
+        h.onpointerup = () => {
+          h.onpointermove = null; h.onpointerup = null;
+          try { h.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+          el.classList.remove("resizing");
+          this._touch();
+        };
+      };
+    });
   }
 
   /**
@@ -7280,7 +7649,14 @@ class CyborgDashboard extends HTMLElement {
         el.classList.add("resizing");
 
         h.onpointermove = (mv) => {
-          const d = un(mv.clientX - s0.x, mv.clientY - s0.y);
+          const raw = un(mv.clientX - s0.x, mv.clientY - s0.y);
+          // A rotated room's "west" handle no longer points west on the plan,
+          // so the plan-space delta is turned back into the room's own frame
+          // before it is split into x/y. Without this, dragging the side of a
+          // turned room moves it diagonally.
+          const rad = (-(Number(room.rotation) || 0) * Math.PI) / 180;
+          const d = { dx: raw.dx * Math.cos(rad) - raw.dy * Math.sin(rad),
+                      dy: raw.dx * Math.sin(rad) + raw.dy * Math.cos(rad) };
           const snap = (v) => Math.round(v / 5) * 5;
           let x = s0.rx, y = s0.ry, w = s0.rw, hh = s0.rh;
           if (k.includes("w")) { const nx = snap(s0.rx + d.dx); w = Math.max(40, s0.rx + s0.rw - nx); x = s0.rx + s0.rw - w; }
@@ -7333,7 +7709,7 @@ class CyborgDashboard extends HTMLElement {
         el.classList.add("resizing");
 
         h.onpointermove = (mv) => {
-          const d = un(mv.clientX - s0.x, mv.clientY - s0.y);
+          const d = unrotate(un(mv.clientX - s0.x, mv.clientY - s0.y), room.rotation);
           const fx = Math.min(1, Math.max(0, p0[0] + d.dx / room.w));
           const fy = Math.min(1, Math.max(0, p0[1] + d.dy / room.h));
           room.points[i] = [Math.round(fx * 1000) / 1000, Math.round(fy * 1000) / 1000];
@@ -7379,7 +7755,7 @@ class CyborgDashboard extends HTMLElement {
           const sdx = mv.clientX - s0.x, sdy = mv.clientY - s0.y;
           if (!s0.moved && Math.hypot(sdx, sdy) < 5) return;
           s0.moved = true;
-          const d = un(sdx, sdy);
+          const d = unrotate(un(sdx, sdy), room.rotation);
           const fx = Math.min(1, Math.max(0, p0[0] + d.dx / room.w));
           const fy = Math.min(1, Math.max(0, p0[1] + d.dy / room.h));
           h.style.left = (fx * 100) + "%";
@@ -7628,11 +8004,15 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .act-off{padding:3px 5px;border-radius:7px;background:transparent;border:1px solid color-mix(in srgb,var(--gc) 30%,transparent);color:var(--gc);opacity:.6}
 .act-off:hover{opacity:1;background:color-mix(in srgb,var(--gc) 16%,transparent)}
 .act-off ha-icon{--mdc-icon-size:13px;display:block}
-.act-row{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border-radius:9px;
+.act-icon{display:grid;place-items:center;width:28px;height:28px;flex-shrink:0;padding:0;border-radius:8px;background:transparent;border:1px solid transparent;color:inherit}
+.act-icon:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.18)}
+.act-icon ha-icon{--mdc-icon-size:17px;display:block}
+.act-row.info,.rc-row.info{cursor:help}
+.act-row{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border-radius:9px;cursor:pointer;
   background:color-mix(in srgb,var(--gc,var(--accent)) 7%,transparent);border:1px solid transparent;
   color:var(--primary-text-color);text-align:left;letter-spacing:0}
 .act-row:hover{border-color:color-mix(in srgb,var(--gc,var(--accent)) 42%,transparent);background:color-mix(in srgb,var(--gc,var(--accent)) 14%,transparent)}
-.act-row>ha-icon{--mdc-icon-size:17px;color:var(--gc,var(--accent));flex-shrink:0}
+.act-row .act-icon{color:var(--gc,var(--accent))}
 .act-txt{flex:1;min-width:0}
 .act-txt strong{display:block;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .act-txt small{display:block;margin-top:1px;font-size:10px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -8051,6 +8431,13 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:var(--persp,1900px);perspective-origin:50% 42%}
 .fp-stage{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d}
 .fp-world{position:absolute;transform-style:preserve-3d;transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw));transition:transform .28s cubic-bezier(.4,0,.2,1)}
+/* While a finger or the mouse is turning the house the easing has to go, or
+   the scene lags a third of a second behind the pointer and overshoots when it
+   stops. The HUD buttons keep their animation. */
+.fp-viewport.dragging .fp-world{transition:none}
+.fp-viewport.dragging{cursor:grabbing}
+.fp-viewport{cursor:grab}
+.fp-viewport.editing{cursor:default}
 .fp-ground.deck{background:none;border:1px dashed rgba(255,255,255,.16);box-shadow:none}
 .fp-ground{position:absolute;border-radius:14px;background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),rgba(255,255,255,.02);box-shadow:0 0 70px rgba(0,0,0,.6)}
 .fp-room{position:absolute;transform-style:preserve-3d}
@@ -8102,6 +8489,13 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-handle{position:absolute;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;padding:0;border-radius:3px;
   background:#fff;border:1.5px solid color-mix(in srgb,var(--rc) 80%,#000);box-shadow:0 0 0 1px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.6);z-index:3}
 .fp-handle:hover{background:var(--rc);transform:scale(1.25)}
+.fp-rotate{position:absolute;left:50%;top:-34px;transform:translateX(-50%);display:grid;place-items:center;
+  width:26px;height:26px;padding:0;border-radius:50%;background:#fff;color:#0a1017;
+  border:1.5px solid color-mix(in srgb,var(--rc) 80%,#000);box-shadow:0 2px 10px rgba(0,0,0,.6);z-index:5;cursor:grab;touch-action:none}
+.fp-rotate:active{cursor:grabbing}
+.fp-rotate:hover{background:var(--rc);color:#fff;transform:translateX(-50%) scale(1.15)}
+.fp-rotate ha-icon{--mdc-icon-size:16px;display:block}
+@media(max-width:700px){.fp-rotate{width:32px;height:32px;top:-42px}.fp-rotate ha-icon{--mdc-icon-size:19px}}
 .fp-vertex{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;padding:0;border-radius:50%;
   background:var(--rc);border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.6);z-index:4;cursor:move}
 .fp-vertex.add{background:transparent;border-style:dashed;border-color:rgba(255,255,255,.7);width:12px;height:12px;margin:-6px 0 0 -6px;cursor:copy}
@@ -8171,6 +8565,10 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .room-ent.hidden span{text-decoration:line-through}
 .room-vis-head{display:flex;align-items:center;gap:8px;margin-top:8px}
 .room-vis-head span{flex:1;font:9.5px ui-monospace,monospace;letter-spacing:1.2px;opacity:.45}
+.room-entities{max-height:340px;overflow-y:auto;overscroll-behavior:contain}
+.dev-group-head{display:flex;align-items:center;gap:8px;padding:9px 4px 3px;margin-top:3px;border-top:1px solid rgba(255,255,255,.06)}
+.dev-group-head strong{flex:1;font:9px ui-monospace,monospace;letter-spacing:1.3px;text-transform:uppercase;opacity:.42;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cam-off small{display:block;margin-top:4px;font:9px ui-monospace,monospace;letter-spacing:.8px;opacity:.55}
 .fp-wall{position:absolute;background:linear-gradient(to top,color-mix(in srgb,var(--rc) 34%,#0a1017) 0%,color-mix(in srgb,var(--rc) 12%,#0a1017) 65%,color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0}
 .fp-wall.side{filter:brightness(.82)}
@@ -8288,8 +8686,9 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
 .rc-row.on{background:color-mix(in srgb,var(--accent) 11%,transparent);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
 .rc-row:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
-.rc-row ha-icon{--mdc-icon-size:17px;color:#93a3b5;flex-shrink:0}
-.rc-row.on ha-icon{color:var(--accent)}
+.rc-row .act-icon{color:#93a3b5}
+.rc-row{cursor:pointer}
+.rc-row.on .act-icon{color:var(--accent)}
 .rc-row span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rc-row small{font:9.5px ui-monospace,monospace;letter-spacing:.5px;opacity:.5;text-transform:uppercase;flex-shrink:0}
 .rc-cover{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.03)}
@@ -8421,6 +8820,43 @@ if (!customElements.get("cyborg-dashboard-card")) {
 
 // The card picker registry only exists in a browser; guard it so the module
 // can also be loaded by the test harness.
+/**
+ * Which build is actually running.
+ *
+ * The module is loaded from a URL carrying ?v=<version>, so it can tell the
+ * panel which build the browser really executed. That matters because a custom
+ * element can only be defined once: if an older copy of this file is still in
+ * the browser cache and gets loaded first — from a Lovelace resource without a
+ * version in its URL, say — it wins the name, and every later copy is silently
+ * ignored. The dashboard then keeps running old code while the integration
+ * reports the new version, which looks exactly like "the changes were not
+ * applied".
+ *
+ * Recording the build here lets the panel compare and say so out loud instead
+ * of leaving the user to guess.
+ */
+/**
+ * The build baked into this file, bumped with every release.
+ *
+ * A custom element can only be defined once per page. If an older copy of this
+ * file is still in the browser cache and loads first — from a Lovelace
+ * resource whose URL carries no version, say — it wins the element name and
+ * every later copy is silently ignored. The dashboard then keeps running old
+ * code while the integration reports the new version, which looks exactly like
+ * "the changes were not applied" and gives the user nothing to go on.
+ *
+ * The panel compares this constant with the version the integration reports
+ * and says so out loud when they disagree. A literal, not a URL parse:
+ * document.currentScript is null for modules and import.meta is a syntax error
+ * outside one, so neither survives both loading paths and the test harness.
+ */
+const CYBORG_BUILD = "0.21.0";
+
+if (typeof window !== "undefined") {
+  // First copy to load wins the element name; record which one that was.
+  if (!window.__CYBORG_BUILD__) window.__CYBORG_BUILD__ = CYBORG_BUILD;
+}
+
 if (typeof window !== "undefined") {
   window.customCards = window.customCards || [];
   if (!window.customCards.some((c) => c.type === "cyborg-dashboard-card")) {

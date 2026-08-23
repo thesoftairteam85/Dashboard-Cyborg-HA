@@ -252,6 +252,7 @@ window.__mount=(dash,opts)=>{
         if(opts&&opts.levels&&el._rooms().length>1){
           el._rooms().forEach((r,i)=>{r.level=opts.levels[i%opts.levels.length];});
         }
+        if(opts&&opts.rotate&&el._rooms().length){ el._rooms()[0].rotation=35; }
         if(opts&&opts.balcony&&el._rooms().length){
           // the reported real case: one wall, a French window, railings on the
           // other three sides

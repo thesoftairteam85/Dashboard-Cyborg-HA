@@ -4,6 +4,95 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.21.0] - 2026-08-23
+
+Sette segnalazioni, tre delle quali erano bug veri.
+
+### Correzioni
+- **«Apri i dettagli» non funzionava: l'interruttore cambiava stato.** Le righe
+  dei dispositivi nelle card Stanza, Attivi ora e Luci erano cablate su
+  "accendi/spegni" e ignoravano l'azione scelta. Non si poteva ispezionare un
+  relè senza azionarlo, che su una caldaia o un cancello non è un problema
+  estetico. Ora **la riga fa quello che dici tu**, e **l'icona fa sempre
+  l'altra cosa**: comando e dettagli restano entrambi a un tocco, senza menù.
+- **«Quando clicco mi si abbassa la visuale».** Il ripristino dello scorrimento
+  conosceva quattro contenitori scritti a mano: scorrere a metà l'elenco dei
+  dispositivi di una stanza e toccare un occhio riportava l'elenco in cima. Ora
+  ogni contenitore scorrevole dichiara una chiave e viene ripristinato — e un
+  elenco nuovo non può più essere dimenticato, perché finché non dichiara la
+  chiave non scorre in proprio.
+- **Il cursore della mappa 3D.** La scena porta un'animazione di 0,28 s sulla
+  trasformazione, che serve ai pulsanti della barra ma durante il
+  trascinamento faceva inseguire la casa con un terzo di secondo di ritardo e
+  continuare a girare dopo che il dito si era fermato — «gira come vuole lui».
+  Ora l'animazione viene sospesa per la durata del gesto, e la sensibilità è
+  passata da 0,4 a 0,55 gradi per pixel: un giro completo in circa la larghezza
+  di un telefono.
+
+### Mappa 3D: ruotare le stanze
+- **Maniglia di rotazione** su ogni stanza selezionata: la giri con il mouse
+  per metterla nella posizione vera. Scatta di 5°, con **Shift** gira libera.
+  C'è anche un cursore nel pannello.
+- L'angolo è calcolato **nello spazio della pianta**, non sullo schermo: la
+  scena è ruotata e inclinata, e un angolo schermo farebbe girare la stanza a
+  velocità diverse a seconda di dove ti trovi, e al contrario oltre i 90° di
+  camera.
+- Ridimensionamento, vertici e posizioni dei dispositivi ora tengono conto
+  della rotazione: senza, trascinare il lato di una stanza girata la spostava
+  in diagonale.
+
+### Sezioni: dove vivono
+- Ogni sezione può stare **dentro una pagina** insieme alle altre oppure
+  diventare una **scheda tutta sua** accanto a Dashboard e Mappa 3D. Si sceglie
+  dal pannello della sezione, sezione per sezione. Energia accanto alla mappa,
+  se è lì che la vuoi.
+- La nuova scheda nasce accanto a quella di origine, non in fondo, e prende
+  nome e icona della sezione. La pagina lasciata vuota viene rimossa — ma mai
+  l'ultima, e mai la Mappa 3D.
+
+### Attivi ora: scegli tu cosa vedere
+- Selezione **entità per entità**, non più solo per dominio. Un interruttore
+  che in realtà è una funzione di una videocamera — luce infrarossa,
+  registrazione, modalità silenziosa — è tecnicamente acceso ma non è un
+  dispositivo di casa.
+- L'elenco è **raggruppato per dispositivo** con un interruttore unico per
+  tutto il dispositivo, perché quel rumore arriva sempre un dispositivo alla
+  volta. Elenca anche ciò che ora è spento, così lo escludi prima che si
+  accenda.
+- È una lista di **esclusione**: un dispositivo installato domani compare da
+  solo.
+
+### Illuminazione
+- Pulsante **LUCI** nella barra in alto: crea la sezione Illuminazione già
+  puntata su tutte le luci di casa. Se esiste già, la seleziona invece di
+  farne una seconda.
+
+### «Le modifiche non le vedo applicate»
+Causa trovata, ed era reale. Una versione precedente registrava il pannello
+anche come **risorsa Lovelace con un URL senza versione**, come rete di
+sicurezza contro "Custom element doesn't exist". Si è rivelata l'opposto: un
+URL senza versione il browser lo tiene in cache a tempo indeterminato, viene
+caricato per primo e **si prende il nome dell'elemento** — un custom element si
+può definire una volta sola, quindi ogni copia successiva, compreso il modulo
+versionato del pannello, veniva ignorata in silenzio. Risultato: la dashboard
+continuava a eseguire codice vecchio mentre l'integrazione dichiarava la
+versione nuova.
+
+- La risorsa senza versione viene **rimossa**, e l'integrazione ora la ripulisce
+  da sola a ogni avvio se qualcuno la ricrea.
+- Il pannello **scrive sempre la build in esecuzione** accanto al sottotitolo
+  (`v0.21.0`): la risposta più veloce a "l'aggiornamento è arrivato?" è poterlo
+  leggere sullo schermo.
+- Se la build in esecuzione e la versione dell'integrazione non coincidono, il
+  pannello lo **dice in testa**, con entrambi i numeri, invece di lasciare il
+  problema a indovinare.
+
+### Verifica
+- 623 asserzioni sulla logica del pannello, schema completo, **91 asserzioni
+  geometriche misurate** in Chromium headless — fra cui che ruotare cambia
+  davvero la proiezione a schermo, che il pannello non torna in cima a ogni
+  clic e che durante il trascinamento la scena non ha inerzia.
+
 ## [0.20.0] - 2026-08-23
 
 L'auto elettrica entra nel sistema: dichiarata una volta, presente ovunque.
