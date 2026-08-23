@@ -700,6 +700,133 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== CENTRALE DI ALLARME ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, alarm: true });
+  await page.waitForTimeout(600);
+
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    window.__svc = [];
+    el._hass.callService = (d, s2, data) => { window.__svc.push({ d, s: s2, data }); };
+  });
+
+  const al = await page.evaluate(() => {
+    // Scope to ONE alarm card: the page also carries the card autocompose
+    // built, and a page-wide selector would count both (and would pick up
+    // .control-row from unrelated switch cards).
+    const head = document.querySelector(".al-head");
+    const cardEl = head ? head.closest("article, .item, .card") || head.parentElement : null;
+    const btns = Array.from((cardEl || document).querySelectorAll(".al-btn")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return { act: b.getAttribute("data-alarm-act"), disabled: b.disabled,
+        w: Math.round(r.width), h: Math.round(r.height), right: Math.round(r.right) };
+    });
+    const grid = (cardEl || document).querySelector(".al-grid");
+    const gb = grid ? grid.getBoundingClientRect() : null;
+    return { hasSwitch: !!(cardEl && cardEl.querySelector(".switch, .control-row")),
+      head: head ? head.textContent.replace(/\s+/g, " ").trim() : null,
+      btns, winW: window.innerWidth,
+      gridRight: gb ? Math.round(gb.right) : 0,
+      panic: !!(cardEl && cardEl.querySelector("[data-alarm-panic]")),
+      keypad: !!(cardEl && cardEl.querySelector("[data-alarm-code]")) };
+  });
+  ok("la centrale non disegna un interruttore", !al.hasSwitch);
+  ok("lo stato è scritto in chiaro", /Disarmato/i.test(al.head || ""), al.head);
+  ok("ci sono i pulsanti delle modalità reali: in casa, fuori, disarma",
+     al.btns.length === 3
+     && al.btns.filter((b) => /arm_home|arm_away|disarm/.test(b.act || "")).length === 3,
+     al.btns.map((b) => b.act).join(" "));
+  ok("il disarmo è disattivato quando è già disarmato",
+     al.btns.find((b) => /disarm/.test(b.act || "")).disabled);
+  ok("i pulsanti sono grandi abbastanza per un dito",
+     al.btns.every((b) => b.h >= 40 && b.w >= 120), al.btns.map((b) => b.w + "x" + b.h).join());
+  ok("niente deborda", al.btns.every((b) => b.right <= al.winW + 1) && al.gridRight <= al.winW + 1);
+  ok("l'antipanico c'è (la centrale dichiara TRIGGER)", al.panic);
+  ok("senza codice richiesto non compare il tastierino", !al.keypad);
+
+  // arming really calls the service, once
+  await page.evaluate(() => {
+    document.querySelector('[data-alarm-act$="alarm_arm_away"]').click();
+  });
+  await page.waitForTimeout(150);
+  let alOut = await page.evaluate(() => window.__svc.slice());
+  ok("armare chiama il servizio giusto una volta sola",
+     alOut.length === 1 && alOut[0].d === "alarm_control_panel" && alOut[0].s === "alarm_arm_away",
+     JSON.stringify(alOut));
+
+  // the panic button must NOT fire on a plain tap
+  await page.evaluate(() => { window.__svc = []; });
+  const pb = await page.evaluate(() => {
+    const b = document.querySelector("[data-alarm-panic]").getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  });
+  await page.mouse.click(pb.x, pb.y);
+  await page.waitForTimeout(200);
+  alOut = await page.evaluate(() => window.__svc.slice());
+  ok("un tocco non fa scattare la sirena", alOut.length === 0, JSON.stringify(alOut));
+
+  // held long enough, it does
+  await page.mouse.move(pb.x, pb.y);
+  await page.mouse.down();
+  await page.waitForTimeout(1500);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  alOut = await page.evaluate(() => window.__svc.slice());
+  ok("tenuto premuto invece sì",
+     alOut.length === 1 && alOut[0].s === "alarm_trigger", JSON.stringify(alOut));
+
+  // a live alarm has to be unmistakable, and disarm has to be the first thing
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, alarm: true, alarmState: "triggered" });
+  await page.waitForTimeout(600);
+  const fire = await page.evaluate(() => {
+    const head = document.querySelector(".al-head");
+    const first = document.querySelector(".al-btn");
+    return { fire: head ? head.classList.contains("fire") : false,
+      text: head ? head.textContent.replace(/\s+/g, " ").trim() : "",
+      firstAct: first ? first.getAttribute("data-alarm-act") : null,
+      animated: head ? getComputedStyle(head).animationName : "none" };
+  });
+  ok("con l'allarme in corso la scheda cambia faccia", fire.fire, JSON.stringify(fire));
+  ok("e lo dice a parole", /Allarme in corso/i.test(fire.text), fire.text);
+  ok("il primo pulsante è disarma", /alarm_disarm/.test(fire.firstAct || ""), fire.firstAct);
+  ok("l'allarme in corso è l'unica cosa che lampeggia",
+     fire.animated !== "none", fire.animated);
+
+  const phoneA = await browser.newPage({ viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneA.on("pageerror", (e) => errors.push("PHONE-ALARM: " + e.message));
+  await phoneA.goto("http://127.0.0.1:8899/harness.html");
+  await phoneA.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneA.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneA.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, alarm: true });
+  await phoneA.waitForTimeout(700);
+  const pa = await phoneA.evaluate(() => {
+    const head = document.querySelector(".al-head");
+    const cardEl = head ? head.closest("article, .item, .card") || head.parentElement : document;
+    const btns = Array.from(cardEl.querySelectorAll(".al-btn")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return { top: Math.round(r.top), h: Math.round(r.height), right: Math.round(r.right),
+        w: Math.round(r.width) };
+    });
+    return { btns, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: i pulsanti restano nello schermo",
+     pa.btns.length === 3 && pa.btns.every((b) => b.right <= pa.winW + 1),
+     JSON.stringify(pa.btns));
+  ok("telefono: non si schiacciano", pa.btns.every((b) => b.h >= 40));
+  ok("telefono: nessuno scorrimento orizzontale", pa.scrollW <= pa.winW + 1,
+     pa.scrollW + " vs " + pa.winW);
+  await phoneA.close();
+
   console.log("\n== GUARDARE SENZA TOCCARE ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

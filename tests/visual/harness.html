@@ -63,7 +63,7 @@ const states={
  "weather.casa_oscar":S("sunny",{friendly_name:"Casa Oscar",temperature:26.4,temperature_unit:"°C",wind_speed:4.1,wind_speed_unit:"km/h",wind_bearing:142,pressure:1014,pressure_unit:"hPa",supported_features:3}),
  "person.oscar":S("home",{friendly_name:"Oscar"}),
  "person.lilly":S("not_home",{friendly_name:"Lilly Bonny"}),
- "alarm_control_panel.allarme":S("disarmed",{friendly_name:"Allarme"}),
+ "alarm_control_panel.allarme":S("disarmed",{friendly_name:"Allarme",supported_features:11,code_format:null,code_arm_required:false,changed_by:null}),
  "update.cyborg":S("on",{friendly_name:"Cyborg Dashboard"}),
  "update.matter":S("on",{friendly_name:"Matter Server"}),
  "media_player.salotto":S("playing",{friendly_name:"Salotto"}),
@@ -271,6 +271,14 @@ window.__mount=(dash,opts)=>{
           // deliberately overlapping rooms: the reported case where some of
           // them could not be clicked at all
           el._rooms().forEach((r,i)=>{ r.x=i*40; r.y=i*30; r.w=220; r.h=180; });
+        }
+        if(opts&&opts.alarm){
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"alcard",type:"control",entity_id:"alarm_control_panel.allarme",
+            name:"",size:"md",appearance:{},states:{},actions:{}});
+          if(opts.alarmState){
+            el._hass.states["alarm_control_panel.allarme"].state=opts.alarmState;
+          }
         }
         if(opts&&opts.comfort){
           const sec=el._sections()[0]||{items:[]};

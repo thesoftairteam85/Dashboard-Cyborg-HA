@@ -4,6 +4,62 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.28.0] - 2026-08-23
+
+L'allarme non è un interruttore.
+
+### Il problema
+La centrale era disegnata come un cursore on/off. È una bugia con tre teste:
+
+1. **«Acceso» non è uno stato che un allarme ha.** Le centrali si armano in una
+   **modalità** — in casa, fuori casa, notte, vacanza, parziale — e un cursore
+   non può esprimere quale, quindi ne sceglieva una per te senza dirtelo.
+2. **Metà degli stati sono transizioni.** `arming` e `pending` sono i tempi di
+   uscita e di ingresso, `triggered` vuol dire che la sirena sta suonando. Un
+   interruttore a due posizioni non ha dove metterli: mostrava una delle sue
+   due posizioni — quella sbagliata — mentre la casa contava alla rovescia.
+3. **Molte centrali chiedono un codice.** Un cursore non ha modo di chiederlo,
+   quindi la chiamata falliva e basta.
+
+### Novità
+- **Card «Centrale allarme».** Stato a parole e a colori, e **un pulsante per
+  ogni modalità che la centrale dichiara davvero di avere**, letta da
+  `supported_features`. La tua espone in casa, fuori casa e sirena: vedi
+  esattamente quelle tre, né una in meno né una in più.
+- **Da armato, «Disarma» diventa il primo pulsante.** Con la sirena che suona,
+  il tasto che ti serve dev'essere sotto il pollice, non quarto in fila.
+- La **modalità in corso è mostrata e disattivata**, non riproposta: la card
+  risponde insieme a «cosa sta facendo» e «cosa posso fare».
+- **Conto alla rovescia e allarme in corso si vedono.** Sono le uniche due cose
+  della card che si muovono, così non si possono scambiare per uno stato fermo.
+- **Tastierino** quando la centrale dichiara `code_format` o
+  `code_arm_required`. Il codice vive solo in memoria, **non entra mai nel
+  documento salvato** e viene cancellato subito dopo l'uso: una dashboard è
+  sincronizzata, esportata e leggibile da chiunque la apra.
+- **Antipanico solo tenendo premuto 1,2 s**, e solo se la centrale dichiara
+  `TRIGGER`. Un comando che sveglia i vicini non deve essere raggiungibile da
+  un pollice che sfiora lo schermo in tasca.
+
+### Correzioni
+- **Una card `control`, `status` o `entità` puntata su una centrale disegna ora
+  la centrale**, non il cursore. La tua card esistente si corregge da sola,
+  senza toccare niente: un tipo di card che non può dire la verità sulla
+  propria entità non deve disegnare.
+- La composizione automatica crea una card allarme vera invece di una targhetta
+  di stato che diceva «disarmato» senza darti modo di farci niente.
+
+### Verifiche
+Bit delle funzionalità **verificati sull'istanza reale** leggendo i selettori
+che i servizi di `alarm_control_panel` dichiarano: `alarm_arm_home` vuole 1,
+`alarm_arm_away` 2, `alarm_arm_night` 4, `alarm_trigger` 8,
+`alarm_arm_custom_bypass` 16, `alarm_arm_vacation` 32.
+
+784 asserzioni frontend (25 nuove), suite schema, suite notifiche e **177
+misurate** in Chromium (18 nuove) — fra cui, con eventi pointer reali, che **un
+tocco sull'antipanico non faccia scattare la sirena** e che tenendolo premuto
+invece sì.
+
+
 ## [0.27.0] - 2026-08-23
 
 Guardare un dispositivo senza azionarlo. Schema alla versione 8.

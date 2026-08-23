@@ -2504,6 +2504,117 @@ console.log("\n== 30. GUARDARE SENZA TOCCARE ==");
   ok("stato ripristinato dopo la sezione 30", !el._isFloorplan());
 }
 
+console.log("\n== 31. CENTRALE DI ALLARME, NON UN INTERRUTTORE ==");
+{
+  // supported_features 11 = ARM_HOME(1) + ARM_AWAY(2) + TRIGGER(8): exactly
+  // what the real panel in this house declares.
+  states["alarm_control_panel.allarme"] = S("disarmed", {
+    friendly_name: "Allarme", supported_features: 11,
+    code_format: null, code_arm_required: false, changed_by: null });
+
+  const card = { id: "ac", type: "control", entity_id: "alarm_control_panel.allarme",
+    name: "", size: "md", appearance: {}, states: {}, actions: {} };
+  let body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+
+  // The reported defect: a card type that cannot express the entity was
+  // drawing a toggle anyway.
+  ok("una centrale non disegna mai un interruttore",
+     !body.includes('class="switch') && !body.includes("control-row"), body.slice(0, 80));
+  ok("dice lo stato a parole", body.includes("Disarmato"));
+
+  ok("c'è un pulsante per «in casa»", body.includes("alarm_arm_home"));
+  ok("c'è un pulsante per «fuori casa»", body.includes("alarm_arm_away"));
+  // the panel does NOT declare night or vacation: offering them would be a
+  // button that silently does nothing
+  ok("non offre modalità che la centrale non ha",
+     !body.includes("alarm_arm_night") && !body.includes("alarm_arm_vacation")
+     && !body.includes("alarm_arm_custom_bypass"), body.slice(0, 0) || "");
+  ok("il disarmo c'è ma è spento quando è già disarmato",
+     /data-alarm-act="alarm_control_panel\.allarme\|alarm_disarm"[^>]*disabled/.test(body));
+  ok("il pulsante antipanico c'è perché la centrale dichiara TRIGGER",
+     body.includes("data-alarm-panic"));
+
+  // -- a panel with more modes shows more --
+  states["alarm_control_panel.allarme"].attributes.supported_features = 1 + 2 + 4 + 32;
+  body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+  ok("una centrale con più modalità le mostra tutte",
+     body.includes("alarm_arm_night") && body.includes("alarm_arm_vacation"));
+  ok("senza TRIGGER non compare l'antipanico", !body.includes("data-alarm-panic"));
+  states["alarm_control_panel.allarme"].attributes.supported_features = 11;
+
+  // -- armed: disarm becomes the primary action and the active mode is shown --
+  states["alarm_control_panel.allarme"] = S("armed_away", {
+    friendly_name: "Allarme", supported_features: 11,
+    code_format: null, code_arm_required: false, changed_by: "Oscar" });
+  body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+  ok("da armato il disarmo diventa l'azione principale",
+     body.includes('class="al-btn off primary"'));
+  ok("la modalità in corso è mostrata, non offerta",
+     /alarm_arm_away"[^>]*disabled/.test(body) && body.includes("al-btn current"));
+  ok("dice chi l'ha cambiato", body.includes("Oscar"));
+
+  // -- transitional states have nowhere to go on a toggle; here they do --
+  states["alarm_control_panel.allarme"] = S("arming", {
+    friendly_name: "Allarme", supported_features: 11, code_format: null });
+  body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+  ok("il conto alla rovescia ha un suo stato visibile",
+     body.includes("al-head moving") && body.includes("In attivazione"), body.slice(0, 0) || "");
+
+  states["alarm_control_panel.allarme"] = S("triggered", {
+    friendly_name: "Allarme", supported_features: 11, code_format: null });
+  body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+  ok("l'allarme in corso si vede subito",
+     body.includes("al-head fire") && body.includes("Allarme in corso"));
+  ok("e da lì si disarma in un tocco", body.includes("al-btn off primary"));
+
+  // -- the code --
+  const calls = [];
+  const realSvc = el._hass.callService;
+  el._hass.callService = (d, sv, data) => calls.push({ d, sv, data });
+
+  states["alarm_control_panel.allarme"] = S("disarmed", {
+    friendly_name: "Allarme", supported_features: 11,
+    code_format: "number", code_arm_required: true });
+  body = el._cardBody(card, states["alarm_control_panel.allarme"]);
+  ok("se la centrale vuole un codice compare il tastierino",
+     body.includes("data-alarm-code"));
+  ok("e per un PIN chiede una tastiera numerica", body.includes('inputmode="numeric"'));
+
+  el._alarmCode = {};
+  el._alarmAct("alarm_control_panel.allarme", "alarm_arm_away");
+  ok("senza codice non chiama il servizio", calls.length === 0);
+  ok("e lo dice invece di fallire in silenzio", /codice/i.test(el._error || ""), el._error);
+
+  el._alarmCode = { "alarm_control_panel.allarme": "1234" };
+  el._alarmAct("alarm_control_panel.allarme", "alarm_arm_away");
+  ok("col codice chiama il servizio giusto",
+     calls.length === 1 && calls[0].d === "alarm_control_panel"
+     && calls[0].sv === "alarm_arm_away", JSON.stringify(calls));
+  ok("e passa il codice", calls[0].data.code === "1234");
+  ok("il codice non resta in memoria dopo l'uso",
+     !(el._alarmCode || {})["alarm_control_panel.allarme"]);
+
+  // A code must never end up in the saved document.
+  el._alarmCode = { "alarm_control_panel.allarme": "9999" };
+  ok("il codice non finisce mai nel documento salvato",
+     !JSON.stringify(el._dashboard).includes("9999"));
+
+  // no code demanded: the call must go through untouched
+  calls.length = 0;
+  states["alarm_control_panel.allarme"] = S("disarmed", {
+    friendly_name: "Allarme", supported_features: 11, code_format: null, code_arm_required: false });
+  el._alarmCode = {};
+  el._alarmAct("alarm_control_panel.allarme", "alarm_arm_home");
+  ok("senza codice richiesto il comando parte comunque",
+     calls.length === 1 && calls[0].sv === "alarm_arm_home" && !("code" in calls[0].data),
+     JSON.stringify(calls));
+
+  el._hass.callService = realSvc;
+  el._alarmCode = {}; el._error = "";
+  delete states["alarm_control_panel.allarme"];
+  ok("stato ripristinato dopo la sezione 31", !states["alarm_control_panel.allarme"]);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

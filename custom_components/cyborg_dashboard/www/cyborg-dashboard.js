@@ -819,6 +819,7 @@ const CARD_TYPES = [
   { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
   { k: "irrigation", l: "Irrigazione", solo: true, d: "Zone di irrigazione: avvio a tempo garantito da Home Assistant, umidità del terreno, programmi." },
+  { k: "alarm", l: "Centrale allarme", d: "Stato reale della centrale e un pulsante per ogni modalità che la centrale dichiara di avere." },
 ];
 
 function cardTypeInfo(key) {
@@ -1194,6 +1195,49 @@ const BINARY_WORDS = {
   connectivity: ["Connesso", "Disconnesso"], battery: ["Scarica", "Carica"],
   lock: ["Sbloccata", "Bloccata"], tamper: ["Manomesso", "Integro"],
 };
+
+/* ==========================================================================
+ * CENTRALE DI ALLARME
+ *
+ * An alarm panel rendered as an on/off switch is a lie with three heads.
+ *
+ * 1. "On" is not a state an alarm has. Home Assistant panels arm to a MODE —
+ *    armed_home, armed_away, armed_night, armed_vacation, armed_custom_bypass
+ *    — and a switch cannot express which one, so it silently picks for you.
+ * 2. Half the states are transitions. `arming` and `pending` are the exit and
+ *    entry delays; `triggered` means the siren is going. A two-position toggle
+ *    has nowhere to put any of them, so it shows the wrong one of its two
+ *    positions while the house is counting down.
+ * 3. Panels can demand a code. `code_format` / `code_arm_required` say so, and
+ *    a switch has no way to ask for it, so the call just fails.
+ *
+ * Feature bits verified against the running instance (core 2026.8.3) by
+ * reading the target selectors that alarm_control_panel's own services
+ * declare: alarm_arm_home wants supported_features 1, alarm_arm_away 2,
+ * alarm_arm_night 4, alarm_trigger 8, alarm_arm_custom_bypass 16,
+ * alarm_arm_vacation 32. Only the modes a panel really has get a button.
+ * ======================================================================== */
+
+const ALARM_MODES = [
+  { bit: 1,  state: "armed_home",          service: "alarm_arm_home",          l: "In casa",   icon: "mdi:shield-home",         hint: "Perimetro attivo, dentro ti muovi" },
+  { bit: 2,  state: "armed_away",          service: "alarm_arm_away",          l: "Fuori casa", icon: "mdi:shield-lock",        hint: "Tutto attivo" },
+  { bit: 4,  state: "armed_night",         service: "alarm_arm_night",         l: "Notte",     icon: "mdi:shield-moon",         hint: "Zone notturne" },
+  { bit: 32, state: "armed_vacation",      service: "alarm_arm_vacation",      l: "Vacanza",   icon: "mdi:shield-airplane",     hint: "Assenza prolungata" },
+  { bit: 16, state: "armed_custom_bypass", service: "alarm_arm_custom_bypass", l: "Parziale",  icon: "mdi:shield-half-full",    hint: "Con esclusioni" },
+];
+const ALARM_TRIGGER_BIT = 8;
+
+/** disarmato / armato / in transizione / allarme. Drives colour and layout. */
+function alarmPhase(state) {
+  if (state === "triggered") return "fire";
+  if (state === "arming" || state === "pending" || state === "disarming") return "moving";
+  if (String(state).startsWith("armed")) return "armed";
+  if (state === "disarmed") return "off";
+  return "unknown";
+}
+
+const ALARM_PHASE_COLOR = { off: "#06d6a0", armed: "#4cc9f0", moving: "#ffd166",
+                            fire: "#ff3d71", unknown: "#8ea3b8" };
 
 const STATE_WORDS = {
   on: "Acceso", off: "Spento", open: "Aperto", closed: "Chiuso",
@@ -3966,6 +4010,118 @@ class CyborgDashboard extends HTMLElement {
       .catch(() => this._refetchNotifications());
   }
 
+  // ------------------------------------------------------------ allarme ---
+
+  /**
+   * The alarm panel, drawn from what the panel itself declares.
+   *
+   * Buttons come from `supported_features`, so a panel that only knows "in
+   * casa" and "fuori casa" shows exactly two — no dead controls, and no
+   * missing mode on a panel that has more. When the panel asks for a code
+   * (`code_format`, or `code_arm_required`) the keypad appears; without it the
+   * arm call would simply be refused with nothing on screen to explain why.
+   */
+  _alarmBody(item, st) {
+    if (!st) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:shield-off-outline"></ha-icon>
+        <span>Centrale non disponibile.</span></div>`;
+    }
+    const state = st.state;
+    const attrs = st.attributes || {};
+    const feats = Number(attrs.supported_features) || 0;
+    const phase = alarmPhase(state);
+    const color = ALARM_PHASE_COLOR[phase];
+    const modes = ALARM_MODES.filter((m) => (feats & m.bit) === m.bit);
+    const armed = phase === "armed" || phase === "fire";
+    const moving = phase === "moving";
+    const id = item.entity_id;
+
+    const needsCode = !!attrs.code_format
+      || (attrs.code_arm_required === true && !armed);
+    const codeVal = (this._alarmCode || {})[id] || "";
+    // A numeric keypad for a numeric code: `code_format` is "number" or
+    // "text", and asking for a text keyboard on a 4-digit PIN is a small
+    // insult on a phone.
+    const numeric = attrs.code_format === "number";
+
+    const changed = attrs.changed_by
+      ? `<span class="al-by">ultima modifica · ${esc(attrs.changed_by)}</span>` : "";
+
+    const head = `<div class="al-head ${esc(phase)}" style="--al:${esc(color)}">
+        <ha-icon icon="${esc(phase === "fire" ? "mdi:alarm-light"
+          : armed ? "mdi:shield-lock" : moving ? "mdi:timer-sand" : "mdi:shield-off-outline")}"></ha-icon>
+        <div class="al-txt">
+          <strong>${esc(stateWords(state, null))}</strong>
+          <small>${esc(phase === "fire" ? "Allarme in corso"
+            : moving ? "Conto alla rovescia in corso"
+            : armed ? "Sorveglianza attiva" : "Nessuna sorveglianza")}</small>
+        </div>
+      </div>`;
+
+    if (!modes.length) {
+      return `${head}<div class="al-note">Questa centrale non dichiara nessuna modalità di attivazione.</div>`;
+    }
+
+    const keypad = needsCode ? `<label class="al-code">CODICE
+        <input type="${numeric ? "tel" : "password"}" inputmode="${numeric ? "numeric" : "text"}"
+          autocomplete="off" data-alarm-code="${esc(id)}" value="${esc(codeVal)}"
+          placeholder="${esc(numeric ? "••••" : "codice")}">
+      </label>` : "";
+
+    // Disarm first when armed: in a hurry, with the siren going, the button
+    // you need must be the one under your thumb, not the fourth in a row.
+    const disarm = `<button class="al-btn off ${armed || moving ? "primary" : ""}"
+        data-alarm-act="${esc(id)}|alarm_disarm" ${phase === "off" ? "disabled" : ""}>
+        <ha-icon icon="mdi:shield-off-outline"></ha-icon>
+        <span><strong>Disarma</strong><small>Sorveglianza spenta</small></span>
+      </button>`;
+
+    const armButtons = modes.map((m) => `<button class="al-btn ${state === m.state ? "current" : ""}"
+        data-alarm-act="${esc(id)}|${esc(m.service)}" ${state === m.state ? "disabled" : ""}>
+        <ha-icon icon="${esc(m.icon)}"></ha-icon>
+        <span><strong>${esc(m.l)}</strong><small>${esc(state === m.state ? "attiva adesso" : m.hint)}</small></span>
+      </button>`).join("");
+
+    // The panic button fires a siren, so it is deliberately NOT a plain tap:
+    // it needs a hold. A control that wakes the neighbours must not be
+    // reachable by a thumb brushing the screen in a pocket.
+    const panic = (feats & ALARM_TRIGGER_BIT) === ALARM_TRIGGER_BIT
+      ? `<button class="al-panic" data-alarm-panic="${esc(id)}" title="Tieni premuto per far scattare l'allarme">
+          <ha-icon icon="mdi:alarm-light-outline"></ha-icon> TIENI PREMUTO PER L'ALLARME
+        </button>` : "";
+
+    return `${head}${keypad}
+      <div class="al-grid">${armed || moving ? disarm + armButtons : armButtons + disarm}</div>
+      ${panic}${changed}`;
+  }
+
+  /**
+   * Run an alarm service, carrying the code when the panel wants one.
+   *
+   * The code is held on the component and never written into the saved
+   * document: a dashboard is synchronised, exported and read by anyone with
+   * the panel open, and an alarm code has no business in it.
+   */
+  _alarmAct(entityId, service) {
+    const st = this._hass.states[entityId];
+    if (!st) return;
+    const attrs = st.attributes || {};
+    const code = ((this._alarmCode || {})[entityId] || "").trim();
+    if (attrs.code_format && !code) {
+      this._error = "Serve il codice della centrale";
+      this._touch(true);
+      return;
+    }
+    const data = { entity_id: entityId };
+    if (code) data.code = code;
+    this._hass.callService("alarm_control_panel", service, data);
+    // Clear it immediately: a code left in a field on a wall tablet is the
+    // same as a code written on the wall.
+    if (this._alarmCode) delete this._alarmCode[entityId];
+    this._error = "";
+    this._touch(true);
+  }
+
   // ---------------------------------------------------------- comfort ---
 
   /**
@@ -5562,6 +5718,16 @@ class CyborgDashboard extends HTMLElement {
     const unit = attrs.unit_of_measurement || "";
     const isOn = ON_STATES.has(state);
 
+    // An alarm panel is never a switch, whatever card type it was dropped into.
+    // Rendering the toggle anyway produced the control in the screenshot:
+    // "Disarmato" next to an off switch, where "on" means nothing and half the
+    // panel's real states cannot be shown at all. The card type is corrected
+    // rather than obeyed — a card that cannot tell the truth about its entity
+    // should not draw.
+    if (domainOf(item.entity_id) === "alarm_control_panel"
+        && (type === "control" || type === "status" || type === "entity" || type === "alarm")) {
+      return this._alarmBody(item, st);
+    }
     if (type === "control") {
       return `<div class="control-row">
           <span class="control-state">${esc(stateWords(state, attrs.device_class))}</span>
@@ -6332,7 +6498,9 @@ class CyborgDashboard extends HTMLElement {
     if (hasCams) top.push(mk("camera", { size: "lg", appearance: { icon: "mdi:cctv" }, refresh: 10 }));
     const alarm = first((id) => id.startsWith("alarm_control_panel."));
     if (alarm) {
-      top.push(mk("status", { entity_id: alarm, size: "sm",
+      // A real alarm card, not a status badge: a badge says "disarmato" and
+      // gives you no way to do anything about it.
+      top.push(mk("alarm", { entity_id: alarm, size: "md",
         appearance: { icon: "mdi:shield-home" },
         actions: { tap: { action: "more-info" } } }));
     }
@@ -7278,6 +7446,46 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-alarm-code]").forEach((el) => {
+      el.oninput = () => {
+        // Kept on the component, never in the document: see _alarmAct.
+        this._alarmCode = this._alarmCode || {};
+        this._alarmCode[el.getAttribute("data-alarm-code")] = el.value;
+      };
+      el.onclick = (ev) => ev.stopPropagation();
+    });
+    all("[data-alarm-act]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, service] = el.getAttribute("data-alarm-act").split("|");
+        this._alarmAct(id, service);
+      };
+    });
+    all("[data-alarm-panic]").forEach((el) => {
+      const id = el.getAttribute("data-alarm-panic");
+      let timer = null, fired = false;
+      const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      // 1.2 s, not the 500 ms used elsewhere: this one starts a siren, and the
+      // hold is the confirmation dialog. Long enough that it cannot happen by
+      // accident, short enough to be usable in the moment you actually need it.
+      el.onpointerdown = (ev) => {
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        fired = false;
+        el.classList.add("holding");
+        cancel();
+        timer = setTimeout(() => {
+          timer = null; fired = true;
+          el.classList.remove("holding");
+          this._alarmAct(id, "alarm_trigger");
+        }, 1200);
+      };
+      const stop = () => { cancel(); el.classList.remove("holding"); };
+      el.onpointerup = stop;
+      el.onpointerleave = stop;
+      el.onpointercancel = () => { stop(); fired = false; };
+      el.onclick = (ev) => { ev.stopPropagation(); fired = false; };
+      el.oncontextmenu = (ev) => ev.preventDefault();
+    });
     all("[data-notif-filter]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
@@ -9091,6 +9299,45 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 @keyframes cyPulse{0%,100%{opacity:1}50%{opacity:.6}}
 .act-more{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.4;padding-left:4px}
 
+/* Centrale di allarme */
+.al-head{display:flex;align-items:center;gap:11px;margin-top:12px;padding:11px 12px;border-radius:13px;
+  background:color-mix(in srgb,var(--al) 11%,transparent);border:1px solid color-mix(in srgb,var(--al) 34%,transparent)}
+.al-head>ha-icon{--mdc-icon-size:26px;color:var(--al);flex-shrink:0}
+.al-txt{min-width:0}
+.al-txt strong{display:block;font-size:15px;font-weight:700;letter-spacing:.3px;color:var(--al)}
+.al-txt small{display:block;margin-top:2px;font:9.5px ui-monospace,monospace;letter-spacing:.9px;text-transform:uppercase;opacity:.5}
+/* A countdown and a live alarm must be impossible to mistake for a steady
+   state, so they are the only two things on the card that move. */
+.al-head.moving{animation:al-breathe 1.6s ease-in-out infinite}
+.al-head.fire{animation:al-flash .9s steps(1,end) infinite}
+@keyframes al-breathe{0%,100%{opacity:1}50%{opacity:.55}}
+@keyframes al-flash{0%,100%{background:color-mix(in srgb,var(--al) 11%,transparent)}
+  50%{background:color-mix(in srgb,var(--al) 34%,transparent)}}
+.al-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
+.al-btn{display:flex;align-items:center;gap:9px;padding:11px 12px;border-radius:12px;text-align:left;
+  border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color)}
+.al-btn ha-icon{--mdc-icon-size:20px;flex-shrink:0;opacity:.75}
+.al-btn strong{display:block;font-size:12px;font-weight:650}
+.al-btn small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.6px;text-transform:uppercase;opacity:.45}
+.al-btn:hover:not(:disabled){border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.al-btn.primary{border-color:color-mix(in srgb,#06d6a0 55%,transparent);background:color-mix(in srgb,#06d6a0 12%,transparent)}
+.al-btn.primary ha-icon{color:#06d6a0;opacity:1}
+/* The mode already in force is shown, not offered: disabled and marked, so the
+   card answers "what is it doing" and "what can I do" at the same time. */
+.al-btn.current{border-color:color-mix(in srgb,#4cc9f0 55%,transparent);background:color-mix(in srgb,#4cc9f0 12%,transparent);opacity:1}
+.al-btn.current ha-icon{color:#4cc9f0;opacity:1}
+.al-btn:disabled{cursor:default}
+.al-btn.off:disabled{opacity:.35}
+.al-code{display:block;margin-top:10px}
+.al-code input{width:100%;letter-spacing:5px;font:16px ui-monospace,monospace;text-align:center}
+.al-panic{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;margin-top:9px;padding:9px;
+  border-radius:11px;font:9.5px ui-monospace,monospace;letter-spacing:1.1px;
+  border:1px dashed rgba(255,61,113,.45);background:transparent;color:#ff8091}
+.al-panic ha-icon{--mdc-icon-size:15px}
+.al-panic.holding{background:rgba(255,61,113,.22);border-style:solid;color:#fff}
+.al-note{margin-top:10px;font-size:11px;opacity:.55}
+.al-by{display:block;margin-top:8px;font:9px ui-monospace,monospace;letter-spacing:.7px;opacity:.35;text-transform:uppercase}
+
 .notif{margin-top:12px;display:flex;flex-direction:column;gap:6px}
 .notif-row{display:flex;gap:9px;padding:9px 10px;border-radius:10px;
   background:color-mix(in srgb,var(--nc,#ffd166) 9%,transparent);border:1px solid color-mix(in srgb,var(--nc,#ffd166) 24%,transparent)}
@@ -10031,7 +10278,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.27.0";
+const CYBORG_BUILD = "0.28.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
