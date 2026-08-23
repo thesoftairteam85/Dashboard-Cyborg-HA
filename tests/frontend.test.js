@@ -868,6 +868,78 @@ ok("valuta in formato italiano", ecoHtml.includes(",") && !ecoHtml.includes("21.
 
 el._editing = false; el._selected = null; el._dirty = false;
 
+console.log("\n== 15. AZIONI AL TOCCO E TIPI DI CARD ==");
+states["cover.tapp"] = S("open", { friendly_name: "Tapparella" });
+states["lock.porta"] = S("locked", { friendly_name: "Serratura" });
+states["scene.notte"] = S("unknown", { friendly_name: "Notte" });
+states["sensor.temp_x"] = S("21.5", { friendly_name: "Temp", device_class: "temperature" });
+
+const keys = (id) => actionsFor(id).map(a => a.k);
+ok("sensore: solo dettagli e nessuna", keys("sensor.temp_x").join() === "more-info,none", keys("sensor.temp_x").join());
+ok("meteo non comandabile", keys("weather.casa_oscar").join() === "more-info,none");
+ok("luce: accendi/spegni disponibili", keys("light.soggiorno").includes("toggle") && keys("light.soggiorno").includes("turn_on"));
+ok("tapparella: apri/chiudi/ferma, NON accendi", keys("cover.tapp").includes("open") && keys("cover.tapp").includes("stop")
+   && !keys("cover.tapp").includes("turn_on"), keys("cover.tapp").join());
+ok("serratura: blocca/sblocca, NIENTE toggle", keys("lock.porta").join() === "more-info,unlock,lock,none", keys("lock.porta").join());
+ok("scena: si attiva", keys("scene.notte").includes("activate"));
+ok("i servizi dichiarati esistono davvero", (() => {
+  const svc = (id, k) => actionsFor(id).find(a => a.k === k).s;
+  return svc("cover.tapp", "open") === "open_cover" && svc("cover.tapp", "close") === "close_cover"
+      && svc("lock.porta", "lock") === "lock" && svc("scene.notte", "activate") === "turn_on"
+      && svc("light.soggiorno", "toggle") === "toggle";
+})());
+
+// execution
+const tapSec2 = { id: "tp", title: "T", icon: "mdi:x", accent: null, collapsed: false, items: [] };
+el._dashboard.pages = [{ id: "p", type: "sections", title: "P", icon: "mdi:x", sections: [tapSec2] }];
+el._pageIndex = 0;
+const runTap = (entity, action) => {
+  tapSec2.items = [{ id: "t1", type: "entity", entity_id: entity, appearance: {}, states: {},
+    actions: { tap: { action } } }];
+  wsCalls.length = 0;
+  el._tap("tp", "t1");
+  return wsCalls.map(c => c.service).join();
+};
+ok("luce + toggle -> light.toggle", runTap("light.soggiorno", "toggle") === "light.toggle");
+ok("tapparella + apri -> cover.open_cover", runTap("cover.tapp", "open") === "cover.open_cover");
+ok("tapparella + ferma -> cover.stop_cover", runTap("cover.tapp", "stop") === "cover.stop_cover");
+ok("serratura + blocca -> lock.lock", runTap("lock.porta", "lock") === "lock.lock");
+ok("scena + attiva -> scene.turn_on", runTap("scene.notte", "activate") === "scene.turn_on");
+ok("azione obsoleta su tapparella non chiama servizi inesistenti", runTap("cover.tapp", "turn_on") === "",
+   "prima chiamava cover.turn_on, che non esiste");
+ok("sensore + accendi non chiama servizi", runTap("sensor.temp_x", "turn_on") === "");
+ok("nessuna azione non chiama servizi", runTap("light.soggiorno", "none") === "");
+
+// editor
+el._editing = true;
+tapSec2.items = [{ id: "t1", type: "entity", entity_id: "cover.tapp", appearance: {}, states: {},
+  actions: { tap: { action: "open" } } }];
+el._selected = { kind: "card", sectionId: "tp", itemId: "t1" };
+el.render();
+ok("editor: la tapparella non offre Accendi", !el.innerHTML.includes('value="turn_on"'));
+ok("editor: mostra il servizio reale accanto all'azione", el.innerHTML.includes("cover.open_cover"));
+tapSec2.items[0].entity_id = "sensor.temp_x";
+el.render();
+ok("editor: spiega che un sensore non si comanda", el.innerHTML.includes("non si comanda"));
+
+// card types
+ok("tipi divisi in due gruppi", el.innerHTML.includes("Card autonome"));
+ok("il tipo selezionato viene spiegato", el.innerHTML.includes("type-hint"));
+tapSec2.items[0].type = "economy";
+el.render();
+ok("avvisa che una card autonoma ignora l'entita", el.innerHTML.includes("non usa l'entit"));
+tapSec2.items[0].type = "entity";
+// const declarations do not escape a direct eval; the helpers do
+const ALL_TYPES = ["entity","sensor","control","status","climate","gauge","chart",
+  "energyflow","weather","active","notifications","people","monitor","camera","economy"];
+ok("ogni tipo ha una descrizione", ALL_TYPES.every(k => (cardTypeInfo(k).d || "").length > 12),
+   ALL_TYPES.filter(k => (cardTypeInfo(k).d || "").length <= 12).join());
+ok("i tipi autonomi sono marcati", ALL_TYPES.filter(k => cardTypeInfo(k).solo).sort().join() ===
+   "active,camera,economy,energyflow,monitor,notifications,people",
+   ALL_TYPES.filter(k => cardTypeInfo(k).solo).sort().join());
+ok("un tipo sconosciuto non rompe l'editor", cardTypeInfo("inesistente").k === "entity");
+el._editing = false; el._selected = null;
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

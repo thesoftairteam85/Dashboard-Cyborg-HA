@@ -4,6 +4,44 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.15.0] - 2026-08-23
+
+Le azioni al tocco ora fanno davvero quello che promettono, e l'editor spiega
+ogni voce.
+
+### Correzione
+- **Alcune azioni non funzionavano affatto.** L'editor offriva
+  Accendi / Spegni per qualsiasi entità, ma verificato sull'istanza reale:
+  il dominio `cover` non ha `turn_on` né `turn_off` (ha `open_cover`,
+  `close_cover`, `stop_cover`, `toggle`) e `lock` ha solo `lock`, `unlock`,
+  `open` — nessun `toggle`. Toccando una tapparella o una serratura veniva
+  chiamato un servizio inesistente e non succedeva nulla, senza alcun errore
+  visibile. Su un sensore veniva chiamato `homeassistant.turn_on`, altrettanto
+  inutile.
+- Ora ogni dominio dichiara le azioni che supporta davvero, con il **nome del
+  servizio reale mostrato accanto all'opzione** (`cover.open_cover`), e
+  l'editor elenca solo quelle. Un'entità non comandabile lo dice: "un sensore
+  non si comanda, si può solo aprirne i dettagli".
+- Una card salvata con un'azione non più applicabile (una tapparella con
+  "Accendi") **apre i dettagli** invece di chiamare un servizio inesistente.
+- Tapparelle e valvole dicono Apri / Chiudi / Ferma, serrature Blocca /
+  Sblocca, scene Attiva, script Esegui, pulsanti Premi: le parole del dominio,
+  non quelle di una lampadina.
+
+### Chiarezza
+- **I tipi di card sono divisi in due gruppi**: quelli che mostrano l'entità
+  scelta e le **card autonome** che costruiscono il proprio contenuto e
+  l'entità non la usano. Sceglierne una su una card con un'entità collegata
+  ora avvisa esplicitamente, invece di ignorarla in silenzio.
+- Ogni tipo ha una **descrizione in una riga** sotto la tendina, che cambia con
+  la selezione.
+
+### Verifica
+- `tests/frontend.test.js`: 350 asserzioni (24 nuove), fra cui che ogni
+  servizio dichiarato sia quello vero, che una tapparella non offra Accendi,
+  che un'azione obsoleta non chiami più `cover.turn_on`, e che un sensore non
+  provochi alcuna chiamata di servizio.
+
 ## [0.14.0] - 2026-08-22
 
 Gestione delle pagine, dashboard impostabile come predefinita, analisi

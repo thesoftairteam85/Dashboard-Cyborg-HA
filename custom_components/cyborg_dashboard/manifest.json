@@ -1,7 +1,7 @@
 {
   "domain": "cyborg_dashboard",
   "name": "Cyborg Dashboard",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "documentation": "https://github.com/thesoftairteam85/Dashboard-Cyborg-HA",
   "issue_tracker": "https://github.com/thesoftairteam85/Dashboard-Cyborg-HA/issues",
   "requirements": [],

@@ -428,23 +428,35 @@ function fmtPower(w) {
   return { v: a >= 100 ? String(Math.round(w)) : w.toFixed(1), u: "W" };
 }
 
+/**
+ * Card types.
+ *
+ * `solo: true` means the card builds its own content and ignores the entity
+ * picked above it — choosing one of those on a light card silently dropped the
+ * light, with nothing in the interface saying so. They are now in a separate
+ * group and the editor explains what the selected type does.
+ */
 const CARD_TYPES = [
-  ["entity", "Entità — icona, nome e stato"],
-  ["sensor", "Sensore — valore grande con unità"],
-  ["control", "Controllo — interruttore on/off"],
-  ["status", "Stato — badge colorato"],
-  ["climate", "Clima — temperatura e modalità"],
-  ["gauge", "Gauge — indicatore percentuale"],
-  ["chart", "Grafico — andamento 24h"],
-  ["energyflow", "Flusso energetico — schema animato"],
-  ["weather", "Meteo — condizioni e previsioni"],
-  ["active", "Attivi ora — cosa è acceso"],
-  ["notifications", "Notifiche — avvisi e aggiornamenti"],
-  ["people", "Presenze — chi è in casa"],
-  ["monitor", "Monitoraggio — diagnostica d'impianto"],
-  ["camera", "Videocamere — anteprime e live"],
-  ["economy", "Analisi economica — costi, ricavi e risparmio"],
+  { k: "entity", l: "Entità", d: "Icona, nome e stato leggibile. Il tipo generico." },
+  { k: "sensor", l: "Sensore", d: "Il valore in grande con la sua unità di misura." },
+  { k: "control", l: "Controllo", d: "Interruttore on/off. Per luci, prese, ventilatori." },
+  { k: "status", l: "Stato", d: "Badge colorato: verde se tutto a posto, acceso se richiede attenzione." },
+  { k: "climate", l: "Clima", d: "Temperatura attuale, temperatura impostata e modalità." },
+  { k: "gauge", l: "Gauge", d: "Barra percentuale. Per batterie, umidità, livelli." },
+  { k: "chart", l: "Grafico", d: "Andamento delle ultime 24 ore dallo storico." },
+  { k: "energyflow", l: "Flusso energetico", solo: true, d: "Schema animato Solare / Rete / Batteria / Casa. Si configura da solo." },
+  { k: "weather", l: "Meteo", d: "Condizioni e previsioni. Vuole un'entità meteo." },
+  { k: "active", l: "Attivi ora", solo: true, d: "Elenco di tutto ciò che è acceso in casa, con spegnimento al tocco." },
+  { k: "notifications", l: "Notifiche", solo: true, d: "Avvisi di Home Assistant e aggiornamenti disponibili." },
+  { k: "people", l: "Presenze", solo: true, d: "Chi è in casa e chi è fuori." },
+  { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
+  { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
+  { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
 ];
+
+function cardTypeInfo(key) {
+  return CARD_TYPES.find((t) => t.k === key) || CARD_TYPES[0];
+}
 
 /* ==========================================================================
  * CAMERAS
@@ -548,6 +560,65 @@ function stateWords(state, deviceClass) {
   const word = STATE_WORDS[state];
   if (word) return word;
   return String(state).replace(/_/g, " ");
+}
+
+/* ==========================================================================
+ * AZIONI AL TOCCO
+ *
+ * Offering "Accendi" on every entity was wrong in two ways: a sensor cannot be
+ * turned on at all, and a cover or a lock has no turn_on service — verified
+ * against the running instance, cover exposes open_cover/close_cover/stop_cover
+ * /toggle and lock exposes lock/unlock/open. Calling light-style services on
+ * them failed silently, which is exactly why the options looked like they
+ * "didn't work". The editor now offers only what the chosen entity can
+ * actually do, and each option carries the real service name.
+ * ======================================================================== */
+
+const A_TOGGLE = { k: "toggle", l: "Accendi / Spegni", s: "toggle" };
+const A_ON = { k: "turn_on", l: "Accendi", s: "turn_on" };
+const A_OFF = { k: "turn_off", l: "Spegni", s: "turn_off" };
+
+const DOMAIN_ACTIONS = {
+  light: [A_TOGGLE, A_ON, A_OFF],
+  switch: [A_TOGGLE, A_ON, A_OFF],
+  fan: [A_TOGGLE, A_ON, A_OFF],
+  input_boolean: [A_TOGGLE, A_ON, A_OFF],
+  siren: [A_TOGGLE, A_ON, A_OFF],
+  humidifier: [A_TOGGLE, A_ON, A_OFF],
+  climate: [A_TOGGLE, A_ON, A_OFF],
+  water_heater: [A_ON, A_OFF],
+  media_player: [
+    { k: "play_pause", l: "Play / Pausa", s: "media_play_pause" },
+    A_TOGGLE, A_ON, A_OFF],
+  cover: [
+    { k: "open", l: "Apri", s: "open_cover" },
+    { k: "close", l: "Chiudi", s: "close_cover" },
+    { k: "stop", l: "Ferma", s: "stop_cover" },
+    { k: "toggle", l: "Apri / Chiudi", s: "toggle" }],
+  lock: [
+    { k: "unlock", l: "Sblocca", s: "unlock" },
+    { k: "lock", l: "Blocca", s: "lock" }],
+  script: [{ k: "run", l: "Esegui lo script", s: "turn_on" }],
+  scene: [{ k: "activate", l: "Attiva la scena", s: "turn_on" }],
+  automation: [
+    { k: "trigger", l: "Esegui adesso", s: "trigger" },
+    A_TOGGLE, A_ON, A_OFF],
+  button: [{ k: "press", l: "Premi", s: "press" }],
+  input_button: [{ k: "press", l: "Premi", s: "press" }],
+  vacuum: [
+    { k: "start", l: "Avvia pulizia", s: "start" },
+    { k: "return", l: "Torna alla base", s: "return_to_base" }],
+  valve: [
+    { k: "open", l: "Apri", s: "open_valve" },
+    { k: "close", l: "Chiudi", s: "close_valve" }],
+};
+
+/** Actions a given entity really supports, always including more-info. */
+function actionsFor(entityId) {
+  const list = (DOMAIN_ACTIONS[domainOf(entityId)] || []).slice();
+  return [{ k: "more-info", l: "Apri i dettagli", s: null }]
+    .concat(list)
+    .concat([{ k: "none", l: "Nessuna azione", s: null }]);
 }
 
 const ON_STATES = new Set(["on", "open", "unlocked", "home", "playing", "cleaning", "heat", "cool", "heat_cool", "dry", "fan_only", "auto"]);
@@ -2964,8 +3035,19 @@ class CyborgDashboard extends HTMLElement {
 
       <div class="section">
         <strong>PRESENTAZIONE</strong>
-        <label>TIPO<select data-prop="type">${CARD_TYPES.map(([v, l]) =>
-          `<option value="${v}" ${card.type === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <label>TIPO<select data-prop="type">
+          <optgroup label="Mostrano l'entità scelta">
+            ${CARD_TYPES.filter((t) => !t.solo).map((t) =>
+              `<option value="${esc(t.k)}" ${card.type === t.k ? "selected" : ""}>${esc(t.l)}</option>`).join("")}
+          </optgroup>
+          <optgroup label="Card autonome — non usano l'entità">
+            ${CARD_TYPES.filter((t) => t.solo).map((t) =>
+              `<option value="${esc(t.k)}" ${card.type === t.k ? "selected" : ""}>${esc(t.l)}</option>`).join("")}
+          </optgroup>
+        </select></label>
+        <span class="hint type-hint">${esc(cardTypeInfo(card.type).d)}${
+          cardTypeInfo(card.type).solo && card.entity_id
+            ? " <strong>Questa card non usa l'entità collegata sopra.</strong>" : ""}</span>
         <label>DIMENSIONE<select data-prop="size">${Object.keys(SIZE_LABEL).map((v) =>
           `<option value="${v}" ${(card.size || "md") === v ? "selected" : ""}>${esc(SIZE_LABEL[v])}</option>`).join("")}</select></label>
         <label>NOME<input data-prop="name" value="${esc(card.name || "")}" placeholder="${esc((st && st.attributes.friendly_name) || "Nome automatico")}"></label>
@@ -2992,9 +3074,18 @@ class CyborgDashboard extends HTMLElement {
 
       <div class="section">
         <strong>AZIONE AL TOCCO</strong>
+        <span class="hint">${(() => {
+          const avail = actionsFor(card.entity_id);
+          const controllable = avail.length > 2;
+          if (!card.entity_id) return "Collega prima un'entità.";
+          return controllable
+            ? `Cosa succede toccando la card. Sono elencate solo le azioni che <strong>${esc(domainOf(card.entity_id))}</strong> supporta davvero.`
+            : `Un'entità <strong>${esc(domainOf(card.entity_id))}</strong> non si comanda: si può solo aprirne i dettagli.`;
+        })()}</span>
         <select data-prop="actions.tap.action">
-          ${[["more-info", "Apri dettagli"], ["toggle", "Accendi/Spegni"], ["turn_on", "Accendi"], ["turn_off", "Spegni"], ["none", "Nessuna"]]
-            .map(([v, l]) => `<option value="${v}" ${tap === v ? "selected" : ""}>${esc(l)}</option>`).join("")}
+          ${actionsFor(card.entity_id).map((a) =>
+            `<option value="${esc(a.k)}" ${tap === a.k ? "selected" : ""}>${esc(a.l)}${
+              a.s ? ` · ${esc(domainOf(card.entity_id))}.${esc(a.s)}` : ""}</option>`).join("")}
         </select>
       </div>
 
@@ -3897,9 +3988,17 @@ class CyborgDashboard extends HTMLElement {
       return;
     }
     const domain = domainOf(card.entity_id);
-    const serviceDomain = ["switch", "light", "fan", "input_boolean", "siren", "automation", "script", "climate", "cover", "lock", "media_player"].includes(domain)
-      ? domain : "homeassistant";
-    this._hass.callService(serviceDomain, action, { entity_id: card.entity_id });
+    const entry = actionsFor(card.entity_id).find((a) => a.k === action);
+    if (!entry || !entry.s) {
+      // an action saved before this table existed may not apply to this domain
+      // (a cover with "turn_on"); opening the details beats calling a service
+      // that does not exist and failing silently
+      this.dispatchEvent(new CustomEvent("hass-more-info", {
+        detail: { entityId: card.entity_id }, bubbles: true, composed: true,
+      }));
+      return;
+    }
+    this._hass.callService(domain, entry.s, { entity_id: card.entity_id });
   }
 
   // ----------------------------------------------------------------- css ---
@@ -4009,6 +4108,10 @@ button.mini.grow{flex:1;justify-content:center}
 .editor label.check{display:flex;align-items:center;gap:9px;text-transform:none;letter-spacing:0;font-size:12px;font-family:inherit;opacity:.85}
 .editor label.check input{width:auto;margin:0}
 .hint{display:block;margin-top:7px;font-size:11px;line-height:1.5;opacity:.45}
+.hint strong{opacity:1;color:var(--accent);font-weight:700}
+.type-hint{margin-top:6px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--accent) 7%,transparent);opacity:.75}
+.editor optgroup{font:700 10px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;color:var(--accent);background:#02050a}
+.editor optgroup option{font:inherit;font-size:13px;letter-spacing:0;text-transform:none;color:var(--primary-text-color)}
 .warn{margin-top:8px;padding:9px 11px;border-radius:9px;font-size:11.5px;background:rgba(255,209,102,.12);color:#ffd166;border:1px solid rgba(255,209,102,.3)}
 button.wide{width:100%;justify-content:center;margin-top:10px}
 button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4);color:#ff8091}
