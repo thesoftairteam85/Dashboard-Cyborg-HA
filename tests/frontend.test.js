@@ -2615,6 +2615,176 @@ console.log("\n== 31. CENTRALE DI ALLARME, NON UN INTERRUTTORE ==");
   ok("stato ripristinato dopo la sezione 31", !states["alarm_control_panel.allarme"]);
 }
 
+console.log("\n== 32. NIENTE COMANDI CHE NON COMANDANO ==");
+{
+  // The real entities from the report: a camera that only declares STREAM
+  // (supported_features 2, no ON_OFF) and an alarm panel, both of which had
+  // landed in the room card's "Altro" bucket as switch rows.
+  states["camera.salotto"] = S("idle", { friendly_name: "Videocamera salotto",
+    supported_features: 2, access_token: "tok", entity_picture: "/api/camera_proxy/camera.salotto?token=tok" });
+  states["camera.ingresso"] = S("idle", { friendly_name: "Videocamera ingresso",
+    supported_features: 3, access_token: "tok2", entity_picture: "/api/camera_proxy/camera.ingresso?token=tok2" });
+  states["alarm_control_panel.casa"] = S("armed_home", { friendly_name: "Allarme",
+    supported_features: 11 });
+  states["switch.presa_tv"] = S("on", { friendly_name: "Presa TV" });
+  states["sensor.lux_salotto"] = S("42", { friendly_name: "Luce ambiente", device_class: "illuminance" });
+
+  ok("una centrale non si può commutare",
+     canToggle("alarm_control_panel.casa", states["alarm_control_panel.casa"]) === false);
+  ok("una videocamera senza ON_OFF nemmeno",
+     canToggle("camera.salotto", states["camera.salotto"]) === false);
+  ok("una che invece lo dichiara sì",
+     canToggle("camera.ingresso", states["camera.ingresso"]) === true);
+  ok("un sensore non si comanda", canToggle("sensor.lux_salotto", states["sensor.lux_salotto"]) === false);
+  ok("una presa sì", canToggle("switch.presa_tv", states["switch.presa_tv"]) === true);
+
+  // the row must not offer a switch it cannot operate
+  const item = { id: "rc", type: "room", area: "Salotto", row_action: "toggle" };
+  const camRow = el._deviceRow("camera.salotto", states["camera.salotto"], false, "rc-row", item);
+  ok("la riga di una videocamera non finge di essere un interruttore",
+     !camRow.includes("data-toggle-entity") && !camRow.includes("data-row-act"), camRow.slice(0, 90));
+  ok("e apre i dettagli", camRow.includes('data-more-info="camera.salotto"'));
+  ok("«inattivo» non è una diagnosi: dice che è in linea",
+     camRow.includes("In linea") && !/INATTIVO/i.test(camRow), camRow.slice(0, 0) || "");
+
+  const alRow = el._deviceRow("alarm_control_panel.casa", states["alarm_control_panel.casa"], true, "rc-row", item);
+  ok("nemmeno la centrale",
+     !alRow.includes("data-toggle-entity") && alRow.includes('data-more-info="alarm_control_panel.casa"'));
+
+  const swRow = el._deviceRow("switch.presa_tv", states["switch.presa_tv"], true, "rc-row", item);
+  ok("una presa invece resta comandabile", swRow.includes('data-toggle-entity="switch.presa_tv"'));
+
+  ok("una videocamera che dichiara ON_OFF resta comandabile",
+     el._deviceRow("camera.ingresso", states["camera.ingresso"], false, "rc-row", item)
+       .includes('data-toggle-entity="camera.ingresso"'));
+
+  // entityWords
+  ok("una videocamera che registra lo dice",
+     entityWords("camera.salotto", S("recording", {})) === "Sta registrando");
+  ok("una videocamera irraggiungibile lo dice",
+     entityWords("camera.salotto", S("unavailable", {})) === "Non raggiungibile");
+
+  // -- the room card must not put them in "Altro" any more --
+  el._registry = { areas: [{ area_id: "salotto", name: "Salotto" }],
+    byArea: { salotto: ["camera.salotto", "alarm_control_panel.casa", "switch.presa_tv", "sensor.lux_salotto"] },
+    entityArea: {}, category: {}, entityDevice: {}, deviceName: {} };
+  const roomCard = { id: "rc2", type: "room", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, area: "salotto", row_action: "toggle",
+    max_readings: 4, hidden: [], show_others: true };
+  const rb = el._roomBody ? el._roomBody(roomCard) : el._cardBody(roomCard, null);
+  ok("la videocamera ha il suo blocco con l'anteprima",
+     rb.includes("VIDEOCAMERE") || /Videocamere/i.test(rb), rb.slice(0, 0) || "");
+  ok("e l'anteprima è un'immagine vera, non una riga di testo",
+     rb.includes('data-cam-open="camera.salotto"') && rb.includes("cam-img"));
+  ok("la centrale ha il suo blocco sicurezza",
+     /Sicurezza/i.test(rb) && rb.includes("rc-row alarm"));
+  ok("«Altro» non le contiene più",
+     !/Altro[\s\S]{0,400}data-toggle-entity="camera\.salotto"/.test(rb));
+
+  // the map must not switch them either
+  const called = [], info = [];
+  const realSvc = el._hass.callService;
+  const realDispatch = el.dispatchEvent;
+  el._hass.callService = (d, sv, data) => called.push(d + "." + sv);
+  el.dispatchEvent = (ev) => {
+    if (ev && ev.type === "hass-more-info") info.push(ev.detail.entityId);
+    return true;
+  };
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "map", type: "floorplan", title: "Mappa", icon: "mdi:x",
+      view: { yaw: 32, pitch: 56, zoom: 1, wall_height: 62, show_walls: true,
+              show_labels: true, level_gap: 150, active_level: null, tap_action: "toggle" },
+      rooms: [] }]};
+  el._pageIndex = 0;
+  el._badgeTap("camera.salotto");
+  ok("sulla mappa una videocamera apre la vista, non prova a spegnersi",
+     !called.length && info[0] === "camera.salotto", called.join() + "|" + info.join());
+  el._badgeTap("alarm_control_panel.casa");
+  ok("e la centrale apre i suoi comandi", called.length === 0, called.join());
+
+  el._hass.callService = realSvc;
+  el.dispatchEvent = realDispatch;
+  for (const id of ["camera.salotto","camera.ingresso","alarm_control_panel.casa",
+                    "switch.presa_tv","sensor.lux_salotto"]) delete states[id];
+  el._registry = null;
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 32", !el._isFloorplan());
+}
+
+console.log("\n== 33. IL CONFRONTO NON È SOLO TEMPERATURE ==");
+{
+  // An installer comparing four motor temperatures, three phase voltages or a
+  // board's currents must not have to fight a card that assumes "casa".
+  states["sensor.motore1_t"] = S("68.0", { friendly_name: "Motore 1 temperatura", device_class: "temperature" });
+  states["sensor.motore2_t"] = S("71.5", { friendly_name: "Motore 2 temperatura", device_class: "temperature" });
+  states["sensor.l1_v"] = S("238", { friendly_name: "L1 tensione", device_class: "voltage" });
+  states["sensor.l2_v"] = S("237", { friendly_name: "L2 tensione", device_class: "voltage" });
+  states["sensor.l3_v"] = S("239", { friendly_name: "L3 tensione", device_class: "voltage" });
+  states["sensor.quadro_a"] = S("12.4", { friendly_name: "Quadro corrente", device_class: "current" });
+  el._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
+    entityDevice: {}, deviceName: {} };
+
+  const tc = { id: "tr2", type: "trend", entity_id: "", name: "", size: "xl", appearance: {},
+    states: {}, actions: {}, source: "class", device_class: "voltage", max_series: 8,
+    series: [], hours: 24, y_min: null, y_max: null };
+
+  const volts = el._trendSeries(tc);
+  ok("seguendo «tensione» arrivano le tensioni",
+     ["sensor.l1_v", "sensor.l2_v", "sensor.l3_v"].every(id => volts.some(v => v.entity === id))
+     && volts.every(v => states[v.entity].attributes.device_class === "voltage"),
+     volts.map(v => v.entity).join());
+  tc.device_class = "current";
+  const amps = el._trendSeries(tc);
+  ok("cambiando tipo arrivano le correnti",
+     amps.some(v => v.entity === "sensor.quadro_a")
+     && amps.every(v => states[v.entity].attributes.device_class === "current")
+     && !amps.some(v => /_v$/.test(v.entity)),
+     amps.map(v => v.entity).join());
+
+  // the editor must speak Italian and must not be temperature-flavoured
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x",
+      sections: [{ id: "s1", title: "Monitoraggio", icon: "mdi:x", accent: null,
+        collapsed: false, items: [tc] }] }]};
+  el._pageIndex = 0; el._editing = true;
+  el._selected = { kind: "card", sectionId: "s1", itemId: "tr2" };
+  el._signature = ""; el.render();
+  let h = el.innerHTML;
+  ok("il tipo è scritto in italiano, non in inglese",
+     h.includes("Tensione") && h.includes("Corrente"), "");
+  ok("il suggerimento non parla solo di stanze",
+     /motori|fasi|quadro/i.test(h));
+
+  // the manual mode's bulk fill offers every type, not just temperature
+  tc.source = "manual"; tc.series = [];
+  el._signature = ""; el.render();
+  h = el.innerHTML;
+  ok("il riempimento in blocco è una scelta, non un pulsante temperatura",
+     h.includes("data-trend-fill") && !/AGGIUNGI TUTTE LE TEMPERATURE/i.test(h), "");
+  ok("fra le opzioni ci sono i tipi reali dell'impianto",
+     h.includes('value="voltage"') && h.includes('value="current"'));
+  ok("e resta la scorciatoia delle stanze, che dà nomi migliori",
+     h.includes('value="__rooms"'));
+
+  tc.series = [];
+
+  const emptyBody = el._trendBody(tc);
+  ok("a vuoto la card non promette un grafico di temperature",
+     !/soggiorno|bagno|soppalco/i.test(emptyBody), emptyBody.slice(0, 0) || "");
+  ok("e spiega le tre strade",
+     /stanze/i.test(emptyBody) && /tipo/i.test(emptyBody) && /mano/i.test(emptyBody));
+
+  for (const id of ["sensor.motore1_t","sensor.motore2_t","sensor.l1_v","sensor.l2_v",
+                    "sensor.l3_v","sensor.quadro_a"]) delete states[id];
+  el._registry = null; el._editing = false; el._selected = null;
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 33", el._registry === null);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

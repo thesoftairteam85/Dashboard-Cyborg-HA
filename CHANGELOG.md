@@ -4,6 +4,55 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.29.0] - 2026-08-23
+
+Niente comandi che non comandano, e il confronto smette di essere
+una card sulle temperature.
+
+### Correzioni
+- **«Videocamera salotto» in Altro non faceva niente, giustamente.** Era una
+  riga-interruttore, e quella videocamera non si può accendere: dichiara
+  `supported_features 2` — solo streaming, senza `ON_OFF` — quindi
+  `camera.turn_on` andava a vuoto. **Verificato sull'istanza reale.** Stessa
+  cosa per la centrale di allarme, che di servizio `toggle` non ne ha proprio
+  uno. Ora una riga che non può comandare **non mostra il comando**: apre i
+  dettagli e basta, e l'icona-pulsante sparisce del tutto. Un'icona che sembra
+  un comando e non fa niente è peggio di nessuna icona — insegna che la
+  dashboard è rotta.
+- **«INATTIVO» non era una diagnosi.** Una videocamera che funziona riporta lo
+  stato `idle`, tradotto alla lettera in «inattivo»: verissimo e completamente
+  fuorviante, perché la telecamera sta benissimo, semplicemente non sta
+  trasmettendo a nessuno in quell'istante. Ora dice **in linea**, *sta
+  registrando*, *in diretta* o *non raggiungibile*.
+- **Anche sulla mappa 3D** un tocco su una videocamera non prova più a
+  spegnerla.
+
+### Novità
+- **Le videocamere hanno il loro blocco nella card Stanza, con l'anteprima.**
+  Una videocamera in una stanza è un'immagine, non una riga di testo: si vede
+  l'ultimo fotogramma e al tocco si apre la diretta.
+- **La centrale ha il suo blocco «Sicurezza»** nella card Stanza, con lo stato
+  a colori e il tocco che apre i comandi veri.
+- **Il confronto andamenti non è più una card sulle temperature.** Il
+  riempimento in blocco era un pulsante fisso «aggiungi tutte le temperature
+  delle stanze»: ora è **una scelta del tipo di grandezza** — tensioni,
+  correnti, potenze, temperature, qualunque `device_class` esista davvero
+  nell'impianto, **coi nomi in italiano** e il conteggio delle entità. La
+  scorciatoia delle stanze resta, perché per le temperature ambiente dà nomi
+  migliori («Bagno» invece di «Sensore T&U Bagno Temperatura»).
+- Il testo a vuoto della card non fa più esempi domestici: spiega le tre
+  strade. Un installatore che confronta le temperature di quattro motori o le
+  tensioni di tre fasi non deve combattere con una card che presuppone «casa».
+
+### Verifiche
+814 asserzioni frontend (44 nuove), suite schema, suite notifiche e **183
+misurate** in Chromium (6 nuove). Fra le nuove: che una videocamera senza
+`ON_OFF` non produca nessun comando mentre una che lo dichiara resti
+comandabile, che «Altro» non contenga più videocamere e centrali, e che
+scegliendo un tipo diverso dalla temperatura il grafico si riempia davvero di
+quel tipo.
+
+
 ## [0.28.0] - 2026-08-23
 
 L'allarme non è un interruttore.

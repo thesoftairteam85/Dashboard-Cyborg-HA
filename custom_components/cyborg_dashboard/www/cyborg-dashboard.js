@@ -472,6 +472,11 @@ const DEVICE_CLASS_LABELS = {
   reactive_power: "Potenza reattiva", water: "Acqua", volume: "Volume",
 };
 
+/** Italian name of a device_class, or the raw key when we have no word for it. */
+function dcLabel(key) {
+  return DEVICE_CLASS_LABELS[key] || String(key).replace(/_/g, " ");
+}
+
 const DOMAIN_LABELS = {
   light: "Luce", switch: "Interruttore", climate: "Clima", cover: "Tapparella",
   fan: "Ventilazione", lock: "Serratura", media_player: "Media",
@@ -1262,6 +1267,29 @@ const STATE_WORDS = {
  * Device-class wording wins over the generic vocabulary: a door sensor reading
  * "on" means Aperta, not Acceso.
  */
+/**
+ * State wording that knows what kind of thing it is describing.
+ *
+ * A camera sitting there working reports the state `idle`, which `stateWords`
+ * renders as "Inattivo" — the literal truth and completely misleading: the
+ * camera is fine, it just is not streaming to anybody at this instant. On a
+ * dashboard "inattivo" reads as "broken". Same for an alarm panel, whose real
+ * information is the arming mode, not on/off.
+ */
+function entityWords(entityId, st) {
+  const d = domainOf(entityId);
+  const state = st ? st.state : "unavailable";
+  if (state === "unavailable") return "Non raggiungibile";
+  if (state === "unknown") return "Sconosciuto";
+  if (d === "camera") {
+    if (state === "recording") return "Sta registrando";
+    if (state === "streaming") return "In diretta";
+    if (state === "idle") return "In linea";
+    return stateWords(state, st && st.attributes.device_class);
+  }
+  return stateWords(state, st && st.attributes && st.attributes.device_class);
+}
+
 function stateWords(state, deviceClass) {
   const pair = BINARY_WORDS[deviceClass];
   if (pair && (state === "on" || state === "off")) return state === "on" ? pair[0] : pair[1];
@@ -1327,6 +1355,41 @@ function actionsFor(entityId) {
   return [{ k: "more-info", l: "Apri i dettagli", s: null }]
     .concat(list)
     .concat([{ k: "none", l: "Nessuna azione", s: null }]);
+}
+
+/**
+ * Can this entity actually be switched?
+ *
+ * "Altro" is a catch-all bucket, and everything landing in it was given a
+ * toggle row. A camera and an alarm panel both ended up there, and neither
+ * does anything when tapped:
+ *
+ *  - `alarm_control_panel` has NO toggle service at all. `homeassistant.toggle`
+ *    on one is a no-op that reports nothing. It needs its own card.
+ *  - `camera.turn_on` exists as a service but only works on cameras that
+ *    declare CameraEntityFeature.ON_OFF (bit 1). The one in this house reports
+ *    supported_features 2 — stream only — so the call goes nowhere. Verified
+ *    on the running instance.
+ *  - sensors, binary sensors, trackers and weather have nothing to switch by
+ *    definition.
+ *
+ * A control that cannot do what it advertises must not advertise it, so this
+ * decides whether a row gets a switch at all or just opens the details.
+ */
+const NEVER_TOGGLE = new Set(["sensor", "binary_sensor", "device_tracker", "person",
+  "weather", "sun", "zone", "update", "image", "select", "number", "text", "datetime",
+  "input_datetime", "input_number", "input_select", "input_text", "event", "conversation",
+  "stt", "tts", "todo", "calendar", "alarm_control_panel"]);
+const CAMERA_ON_OFF = 1;
+
+function canToggle(entityId, st) {
+  const d = domainOf(entityId);
+  if (NEVER_TOGGLE.has(d)) return false;
+  if (d === "camera") {
+    return ((Number(st && st.attributes && st.attributes.supported_features) || 0) & CAMERA_ON_OFF)
+      === CAMERA_ON_OFF;
+  }
+  return true;
 }
 
 const ON_STATES = new Set(["on", "open", "unlocked", "home", "playing", "cleaning", "heat", "cool", "heat_cool", "dry", "fan_only", "auto"]);
@@ -3657,6 +3720,18 @@ class CyborgDashboard extends HTMLElement {
    * does the other thing, so both are one tap away whichever way it is set.
    */
   _deviceRow(id, st, on, cls, item) {
+    // Something that cannot be switched gets no switch. The row opens the
+    // details and the companion icon-button disappears entirely, because an
+    // icon that looks like a command and does nothing is worse than no icon:
+    // it teaches the user that the dashboard is broken.
+    if (!canToggle(id, st)) {
+      return `<div class="${cls}${on ? " on" : ""} info plain" role="button" tabindex="0"
+          data-more-info="${esc(id)}">
+        <ha-icon class="act-icon-flat" icon="${esc(autoIcon(id, st))}"></ha-icon>
+        <span>${esc(st.attributes.friendly_name || id)}</span>
+        <small>${esc(entityWords(id, st))}</small>
+      </div>`;
+    }
     const toggleFirst = (item.row_action || "toggle") === "toggle";
     return `<div class="${cls}${on ? " on" : ""}${toggleFirst ? "" : " info"}" role="button" tabindex="0"
         ${toggleFirst ? `data-toggle-entity="${esc(id)}"` : `data-more-info="${esc(id)}"`}>
@@ -4484,7 +4559,11 @@ class CyborgDashboard extends HTMLElement {
 
     // Readings go in the header strip, controls go in the body: a temperature
     // is something you look at, a light is something you press.
-    const readings = [], lights = [], covers = [], climates = [], switches = [], others = [];
+    // Cameras and alarm panels get their own buckets. They used to fall into
+    // "Altro", which renders switch rows — and neither can be switched, so the
+    // user got two lines that did nothing when tapped.
+    const readings = [], lights = [], covers = [], climates = [], switches = [],
+          cams = [], alarms = [], rest = [];
     for (const id of ids) {
       const d = domainOf(id);
       const st = this._hass.states[id];
@@ -4492,10 +4571,12 @@ class CyborgDashboard extends HTMLElement {
       else if (d === "cover") covers.push(id);
       else if (d === "climate" || d === "fan" || d === "humidifier") climates.push(id);
       else if (d === "switch" || d === "input_boolean") switches.push(id);
+      else if (d === "camera") cams.push(id);
+      else if (d === "alarm_control_panel") alarms.push(id);
       else if (d === "sensor" || d === "binary_sensor") {
         if (d === "sensor" && Number.isFinite(parseFloat(st.state))) readings.push(id);
-        else others.push(id);
-      } else others.push(id);
+        else rest.push(id);
+      } else rest.push(id);
     }
     const onLights = lights.filter((id) => this._hass.states[id].state === "on").length;
 
@@ -4533,6 +4614,46 @@ class CyborgDashboard extends HTMLElement {
         <button class="mini" data-cover-cmd="${esc(id)}|close_cover" title="Chiudi"><ha-icon icon="mdi:chevron-down"></ha-icon></button>
       </div>`;
     };
+    /**
+     * A camera in a room is a picture, not a line of text.
+     *
+     * "Videocamera salotto — INATTIVO" told the user nothing and did nothing
+     * when tapped. What anybody wants from a camera listed under a room is to
+     * see it, so the row shows the last frame and opens the live view. It also
+     * puts the camera where the eye expects it — with the other things you
+     * LOOK at — instead of in the catch-all bucket with the switches.
+     */
+    const cameraRow = (id) => {
+      const st = this._hass.states[id];
+      const url = cameraStill(id, st);
+      const off = st.state === "unavailable" || !url;
+      const tick = this._camTick || 0;
+      this._scheduleCameraRefresh(item);
+      return `<button class="rc-cam" data-cam-open="${esc(id)}" ${off ? "disabled" : ""}>
+        ${off ? `<div class="cam-off"><ha-icon icon="mdi:cctv-off"></ha-icon></div>`
+              : `<img class="cam-img" data-cam="${esc(id)}"
+                   src="${esc(url)}${url.includes("?") ? "&" : "?"}_t=${tick}" alt=""
+                   decoding="async">`}
+        <span class="cam-bar">
+          <ha-icon icon="mdi:cctv"></ha-icon>
+          <em>${esc(st.attributes.friendly_name || id)}</em>
+          <i class="cam-dot ${off ? "off" : ""}"></i>
+        </span>
+      </button>`;
+    };
+    const alarmRow = (id) => {
+      // The panel's own card in one line: state, colour, and a tap that opens
+      // the real controls. Never a switch — it has no toggle service at all.
+      const st = this._hass.states[id];
+      const phase = alarmPhase(st.state);
+      return `<button class="rc-row alarm ${esc(phase)}" style="--al:${esc(ALARM_PHASE_COLOR[phase])}"
+          data-more-info="${esc(id)}">
+        <ha-icon icon="${esc(phase === "fire" ? "mdi:alarm-light"
+          : phase === "armed" ? "mdi:shield-lock" : "mdi:shield-off-outline")}"></ha-icon>
+        <span>${esc(st.attributes.friendly_name || id)}</span>
+        <small>${esc(stateWords(st.state, null))}</small>
+      </button>`;
+    };
     const climateRow = (id) => {
       const st = this._hass.states[id];
       const cur = st.attributes.current_temperature;
@@ -4557,8 +4678,10 @@ class CyborgDashboard extends HTMLElement {
       </section>` : ""}
       ${block("Clima", "mdi:thermostat", climates, climateRow)}
       ${block("Aperture", "mdi:window-shutter", covers, coverRow)}
+      ${block("Videocamere", "mdi:cctv", cams, cameraRow)}
       ${block("Prese e interruttori", "mdi:power-plug", switches, toggleRow)}
-      ${item.show_others === false ? "" : block("Altro", "mdi:shape-outline", others.slice(0, 8), toggleRow)}
+      ${block("Sicurezza", "mdi:shield-home", alarms, alarmRow)}
+      ${item.show_others === false ? "" : block("Altro", "mdi:shape-outline", rest.slice(0, 8), toggleRow)}
     </div>`;
   }
 
@@ -4701,8 +4824,13 @@ class CyborgDashboard extends HTMLElement {
   _trendBody(item) {
     const series = this._trendSeries(item);
     if (!series.length) {
+      // Deliberately NOT a temperature example. This card compares any
+      // quantity — the temperatures of four motors, the voltages of three
+      // phases, the currents on a distribution board — and an example that
+      // only ever says "soggiorno, bagno, soppalco" makes it read like a
+      // domestic-climate widget, which is the wrong idea to give an installer.
       return `<div class="ov-empty"><ha-icon icon="mdi:chart-multiple"></ha-icon>
-        <span>Scegli le grandezze da confrontare nell'editor: per esempio la temperatura esterna e quelle di soggiorno, bagno e soppalco sullo stesso grafico.</span></div>`;
+        <span>Nessuna grandezza scelta. Nell'editor puoi <strong>seguire le stanze</strong>, prendere <strong>tutte le grandezze di un tipo</strong> (temperature, tensioni, correnti, potenze…) oppure comporre l'elenco a mano.</span></div>`;
     }
     const data = this._loadTrend(item);
     if (!data) {
@@ -6299,8 +6427,8 @@ class CyborgDashboard extends HTMLElement {
           ${source === "comfort"
             ? `<span class="hint">Segue le stesse stanze della card Temperature — sonda esterna compresa — e ne disegna la temperatura. È la modalità giusta per «confronta tutte le stanze»: cambia le stanze lì e il grafico segue.</span>`
             : `<label>TIPO DI GRANDEZZA<select data-prop="device_class">
-                 ${classKeys.map((k) => `<option value="${esc(k)}" ${(card.device_class || "temperature") === k ? "selected" : ""}>${esc(k)} · ${classes[k]} entità</option>`).join("")}
-               </select><span class="hint">Ogni entità numerica di questo tipo diventa una linea, ordinata per stanza. Una sola unità di misura per grafico: mescolare °C e W su un asse solo non confronta niente.</span></label>`}
+                 ${classKeys.map((k) => `<option value="${esc(k)}" ${(card.device_class || "temperature") === k ? "selected" : ""}>${esc(dcLabel(k))} · ${classes[k]} entità</option>`).join("")}
+               </select><span class="hint">Ogni entità numerica di questo tipo diventa una linea, ordinata per stanza — temperature di quattro motori, tensioni di tre fasi, correnti di un quadro. Una sola unità di misura per grafico: mescolare °C e W su un asse solo non confronta niente.</span></label>`}
           <label>MASSIMO DI LINEE<input type="number" min="1" max="${MAX_TREND_SERIES}" step="1" data-prop="max_series" value="${cap}"></label>
           <span class="hint">${resolved.length} linee adesso${resolved.length >= cap ? " · limite raggiunto, le altre restano fuori" : ""}. Oltre le otto un piano cartesiano smette di confrontare e comincia a nascondere: il tetto è di ${MAX_TREND_SERIES}.</span>
           <div class="eco-dev-list">${resolved.map((row) => `<div class="eco-dev-edit">
@@ -6340,7 +6468,15 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini danger" data-trend-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>`;
         }).join("") || '<div class="entity-result-empty">Nessuna grandezza scelta.</div>'}</div>
-        ${chosen.length >= MAX_TREND_SERIES ? `<span class="hint">Raggiunto il tetto di ${MAX_TREND_SERIES} linee.</span>` : `<button class="secondary wide" data-trend-fill><ha-icon icon="mdi:playlist-plus"></ha-icon> AGGIUNGI TUTTE LE TEMPERATURE DELLE STANZE</button>
+        ${chosen.length >= MAX_TREND_SERIES ? `<span class="hint">Raggiunto il tetto di ${MAX_TREND_SERIES} linee.</span>` : `
+        <label>AGGIUNGI IN BLOCCO
+          <select data-trend-fill>
+            <option value="">— tutte le grandezze di un tipo —</option>
+            <option value="__rooms">Temperature delle stanze (coi nomi delle stanze)</option>
+            ${classKeys.map((k) => `<option value="${esc(k)}">${esc(dcLabel(k))} · ${classes[k]} entità</option>`).join("")}
+          </select>
+          <span class="hint">Riempie l'elenco in un colpo solo. Resta comunque un elenco tuo: non si aggiorna da solo — per quello servono le altre due modalità.</span>
+        </label>
         <label>AGGIUNGI UNA GRANDEZZA<select data-trend-add>
           <option value="">— scegli un'entità numerica —</option>
           ${numeric.filter((id) => !chosen.some((r) => r.entity === id))
@@ -7801,16 +7937,33 @@ class CyborgDashboard extends HTMLElement {
       };
     });
     const trendFill = q("[data-trend-fill]");
-    if (trendFill && card) trendFill.onclick = () => {
+    if (trendFill && card) trendFill.onchange = () => {
+      const pick = trendFill.value;
+      if (!pick) return;
       card.series = Array.isArray(card.series) ? card.series : [];
       const have = new Set(card.series.map((r) => r.entity));
-      for (const room of this._comfortRooms({})) {
-        if (card.series.length >= MAX_TREND_SERIES) break;
-        if (have.has(room.temperature)) continue;
-        card.series.push({ entity: room.temperature, name: room.name,
+      const push = (entity, name) => {
+        if (card.series.length >= MAX_TREND_SERIES || have.has(entity)) return;
+        card.series.push({ entity, name: name || "",
           color: SERIES_COLORS[card.series.length % SERIES_COLORS.length] });
-        have.add(room.temperature);
+        have.add(entity);
+      };
+      if (pick === "__rooms") {
+        // The only class that gets special treatment, and for a real reason:
+        // room temperatures are worth labelling with the ROOM name rather than
+        // "Sensore T&U Bagno Temperatura". Everything else is filled generically.
+        for (const room of this._comfortRooms({})) push(room.temperature, room.name);
+      } else {
+        const area = (this._registry && this._registry.entityArea) || {};
+        const cat = (this._registry && this._registry.category) || {};
+        const ids = Object.keys(this._hass.states).filter((id) => {
+          const st = this._hass.states[id];
+          return st && !cat[id] && st.attributes.device_class === pick
+            && Number.isFinite(parseFloat(st.state));
+        }).sort((a, b) => (area[a] || "").localeCompare(area[b] || "") || a.localeCompare(b));
+        for (const id of ids) push(id, area[id] ? "" : "");
       }
+      trendFill.value = "";
       this._trend = {};
       this._touch();
     };
@@ -9057,7 +9210,12 @@ class CyborgDashboard extends HTMLElement {
     const domain = domainOf(entityId);
     const wantToggle = ((this._page().view || {}).tap_action || "toggle") === "toggle";
     const doToggle = other ? !wantToggle : wantToggle;
-    if (doToggle && (kind === "toggle" || (kind === "binary" && domain === "lock"))) {
+    // canToggle as well as the badge kind: the kind table says what a domain
+    // usually is, canToggle says what THIS entity can actually do. A camera
+    // that does not declare ON_OFF must open its details even if some future
+    // entry in the table calls cameras toggleable.
+    if (doToggle && canToggle(entityId, st)
+        && (kind === "toggle" || (kind === "binary" && domain === "lock"))) {
       const serviceDomain = ["switch", "light", "fan", "media_player", "lock", "cover", "input_boolean"].includes(domain)
         ? domain : "homeassistant";
       this._hass.callService(serviceDomain, domain === "lock" ? (ON_STATES.has(st.state) ? "lock" : "unlock") : "toggle",
@@ -10110,6 +10268,24 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .rc-row.on .act-icon{color:var(--accent)}
 .rc-row span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rc-row small{font:9.5px ui-monospace,monospace;letter-spacing:.5px;opacity:.5;text-transform:uppercase;flex-shrink:0}
+/* A row with nothing to switch: the icon is flat, not a button, so nothing on
+   it looks pressable except the row itself (which opens the details). */
+.rc-row.plain .act-icon-flat,.act-row.plain .act-icon-flat{--mdc-icon-size:17px;color:#93a3b5;flex-shrink:0;margin:0 4px}
+.rc-row.alarm{--accent:var(--al)}
+.rc-row.alarm>ha-icon{--mdc-icon-size:17px;color:var(--al);flex-shrink:0}
+.rc-row.alarm small{color:var(--al);opacity:.85}
+.rc-row.alarm.armed,.rc-row.alarm.fire{background:color-mix(in srgb,var(--al) 12%,transparent);border-color:color-mix(in srgb,var(--al) 30%,transparent)}
+/* A camera in a room is shown, not described. */
+.rc-cam{position:relative;display:block;width:100%;padding:0;overflow:hidden;border-radius:11px;
+  border:1px solid rgba(255,255,255,.08);background:#05080d;aspect-ratio:16/9}
+.rc-cam .cam-img{width:100%;height:100%;object-fit:cover;display:block}
+.rc-cam .cam-off{display:grid;place-items:center;width:100%;height:100%;opacity:.3}
+.rc-cam .cam-off ha-icon{--mdc-icon-size:30px}
+.rc-cam .cam-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;
+  padding:6px 8px;background:linear-gradient(180deg,transparent,rgba(3,6,10,.85))}
+.rc-cam .cam-bar ha-icon{--mdc-icon-size:13px;color:#ff3d71}
+.rc-cam .cam-bar em{flex:1;min-width:0;font-style:normal;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-cam:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
 .rc-cover{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.03)}
 .rc-cover>ha-icon{--mdc-icon-size:17px;color:#8ecae6;flex-shrink:0}
 .rc-cover span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -10278,7 +10454,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.28.0";
+const CYBORG_BUILD = "0.29.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

@@ -700,6 +700,50 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== CONFRONTO DI QUALSIASI GRANDEZZA ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trendFill: true });
+  await page.waitForTimeout(700);
+
+  const tf = await page.evaluate(() => {
+    const sel = document.querySelector("[data-trend-fill]");
+    const opts = sel ? Array.from(sel.options).map((o) => o.value) : [];
+    const labels = sel ? Array.from(sel.options).map((o) => o.textContent.trim()) : [];
+    return { opts, labels, has: !!sel };
+  });
+  ok("il riempimento in blocco esiste ed è una scelta", tf.has && tf.opts.length > 2,
+     tf.opts.join());
+  ok("offre più tipi, non solo la temperatura",
+     tf.opts.filter((o) => o && o !== "__rooms").length >= 2, tf.opts.join());
+  ok("i tipi sono scritti in italiano",
+     tf.labels.some((l) => /Tensione|Potenza|Temperatura|Corrente/.test(l)), tf.labels.join(" | "));
+
+  // pick a non-temperature class and check the chart really fills with it
+  const filled = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sel = document.querySelector("[data-trend-fill]");
+    const target = Array.from(sel.options)
+      .filter((o) => o.value && o.value !== "__rooms" && o.value !== "temperature")
+      .filter((o) => (parseInt((o.textContent.match(/(\d+)\s*entit/) || [])[1], 10) || 0) >= 2)
+      .map((o) => o.value)[0];
+    if (!target) return { skipped: true };
+    sel.value = target;
+    sel.onchange();
+    await new Promise((r) => setTimeout(r, 200));
+    const card = el._sections().flatMap((s2) => s2.items).find((i) => i.id === "tfcard");
+    return { target, series: (card.series || []).map((r) => r.entity),
+      classes: (card.series || []).map((r) => el._hass.states[r.entity].attributes.device_class),
+      reset: sel.value };
+  });
+  ok("scegliendo un tipo l'elenco si riempie davvero",
+     !filled.skipped && filled.series.length >= 2, JSON.stringify(filled));
+  ok("e si riempie con quel tipo, non con le temperature",
+     filled.classes.every((c) => c === filled.target), JSON.stringify(filled.classes));
+  ok("il selettore torna a vuoto dopo l'uso", filled.reset === "", filled.reset);
+
   console.log("\n== CENTRALE DI ALLARME ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

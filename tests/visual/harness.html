@@ -272,6 +272,13 @@ window.__mount=(dash,opts)=>{
           // them could not be clicked at all
           el._rooms().forEach((r,i)=>{ r.x=i*40; r.y=i*30; r.w=220; r.h=180; });
         }
+        if(opts&&opts.trendFill){
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"tfcard",type:"trend",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},source:"manual",device_class:"voltage",
+            max_series:8,series:[],hours:24,y_min:null,y_max:null});
+          el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"tfcard"};
+        }
         if(opts&&opts.alarm){
           const sec=el._sections()[0]||{items:[]};
           sec.items.unshift({id:"alcard",type:"control",entity_id:"alarm_control_panel.allarme",
