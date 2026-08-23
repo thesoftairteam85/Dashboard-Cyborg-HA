@@ -290,3 +290,65 @@ assert mig_eco["period"] == "year" and mig_eco["devices"] == []
 assert schema.normalize_item(mig_eco, 0) == mig_eco
 
 print("schema: tutti i test passati")
+
+# ---- monitor thresholds + trend series -------------------------------------
+
+mon = schema.normalize_item({"type": "monitor", "limits": {
+    "voltage": {"warnLow": 210, "warnHigh": "250"},
+    "temperature": {"warnHigh": "caldo", "alarmHigh": 95},
+    "inventato": {"warnHigh": 1},
+    "current": {"nonEsiste": 5},
+    "battery": "tutta",
+}}, 0)
+assert mon["limits"]["voltage"] == {"warnLow": 210.0, "warnHigh": 250.0}
+assert mon["limits"]["temperature"] == {"alarmHigh": 95.0}, mon["limits"]["temperature"]
+assert "inventato" not in mon["limits"], "un gruppo sconosciuto non deve entrare"
+assert "current" not in mon["limits"], "una chiave sconosciuta non lascia un gruppo vuoto"
+assert "battery" not in mon["limits"]
+assert schema.normalize_item({"type": "monitor"}, 0)["limits"] == {}
+assert schema.normalize_item({"type": "monitor", "limits": "boh"}, 0)["limits"] == {}
+assert schema.normalize_item(mon, 0) == mon
+
+tr = schema.normalize_item({"type": "trend", "hours": 168, "series": [
+    {"entity": "sensor.est", "name": "Esterna", "color": "#00e5ff"},
+    {"entity": "sensor.bagno"},
+    {"nome": "senza entita"},
+    "spazzatura",
+]}, 0)
+assert [r["entity"] for r in tr["series"]] == ["sensor.est", "sensor.bagno"]
+assert tr["series"][1]["name"] == "" and tr["series"][1]["color"] == ""
+assert tr["hours"] == 168
+assert schema.normalize_item({"type": "trend", "hours": 9999}, 0)["hours"] == 720
+assert schema.normalize_item({"type": "trend", "hours": "sempre"}, 0)["hours"] == 24
+assert schema.normalize_item({"type": "trend"}, 0)["series"] == []
+# eight lines is the readable maximum
+assert len(schema.normalize_item({"type": "trend", "series": [
+    {"entity": f"sensor.s{i}"} for i in range(30)]}, 0)["series"]) == 8
+assert schema.normalize_item({"type": "trend", "y_min": "auto"}, 0)["y_min"] is None
+assert schema.normalize_item({"type": "trend", "y_min": "12.5"}, 0)["y_min"] == 12.5
+assert schema.normalize_item(tr, 0) == tr
+
+# irrigation + lights
+irr = schema.normalize_item({"type": "irrigation", "zones": [
+    {"entity": "valve.prato", "minutes": 900},
+    {"entity": "switch.orto", "moisture": "sensor.terreno"},
+    {"entity": "non-un-entity"},
+], "presets": [5, "dieci", 20], "rain_sensor": ""}, 0)
+assert [z["entity"] for z in irr["zones"]] == ["valve.prato", "switch.orto"]
+assert irr["zones"][0]["minutes"] == 720, "una durata assurda viene limitata"
+assert irr["zones"][1]["moisture"] == "sensor.terreno"
+assert irr["zones"][0]["moisture"] is None
+assert irr["presets"] == [5, 20]
+assert irr["rain_sensor"] is None
+assert schema.normalize_item(irr, 0) == irr
+
+lig = schema.normalize_item({"type": "lights", "lights": ["light.a", 7, ""]}, 0)
+assert lig["lights"] == ["light.a"] and lig["group_by_area"] is True
+assert schema.normalize_item({"type": "lights", "group_by_area": False}, 0)["group_by_area"] is False
+
+# room visibility list
+rv = schema.normalize_room({"hidden": ["sensor.x", "rotto", 5]}, 0)
+assert rv["hidden"] == ["sensor.x"]
+assert schema.normalize_room({}, 0)["hidden"] == []
+
+print("schema: soglie, andamenti, irrigazione e visibilita' ok")

@@ -36,6 +36,7 @@ const DEFAULT_DASH = {
     ["07-map-lshape", { pageIndex: 1, autoRooms: true, editing: true, selectRoom: true, lshape: true }],
     ["08-map-focus",  { pageIndex: 1, autoRooms: true, focusRoom: true }],
     ["09-map-focus-edit", { pageIndex: 1, autoRooms: true, editing: true, focusRoom: true }],
+    ["12-map-walls",  { pageIndex: 1, autoRooms: true, balcony: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["22-economy",    { pageIndex: 0, autoCompose: true, economy: true }],
     ["23-economy-ed", { pageIndex: 0, autoCompose: true, economy: true, editing: true, selectEconomy: true }],
@@ -248,6 +249,42 @@ const DEFAULT_DASH = {
   ok("le altre stanze si defilano",
      zoomed.rooms.filter((r) => r !== fr).every((r) => r.opacity < 0.2),
      zoomed.rooms.map((r) => r.opacity).join());
+
+  // ---- sides of a room ----------------------------------------------------
+  console.log("\n== LATI DELLA STANZA ==");
+  const balc = await scene({ pageIndex: 1, autoRooms: true, balcony: true });
+  const wallInfo = await page.evaluate(() => {
+    const rooms = Array.from(document.querySelectorAll(".fp-room"));
+    const last = rooms[rooms.length - 1];
+    const walls = Array.from(last.querySelectorAll(".fp-wall")).map((w) => {
+      const cs = getComputedStyle(w);
+      return { cls: w.className, h: Math.round(parseFloat(cs.height)), op: Number(cs.opacity).toFixed(2) };
+    });
+    const plain = Array.from(rooms[0].querySelectorAll(".fp-wall")).map((w) => Math.round(parseFloat(getComputedStyle(w).height)));
+    return { walls, plain };
+  });
+  // one wall + one glazed + two railings = three drawn sides plus the railing
+  // pair; nothing is drawn for an "open" side
+  ok("il balcone non ha quattro muri uguali",
+     new Set(wallInfo.walls.map((w) => w.cls)).size >= 3,
+     wallInfo.walls.map((w) => w.cls).join(" | "));
+  ok("la ringhiera è più bassa del muro",
+     wallInfo.walls.filter((w) => w.cls.includes("railing")).every((r) =>
+       r.h < Math.max(...wallInfo.plain)), JSON.stringify(wallInfo.walls));
+  ok("la porta finestra è trasparente",
+     wallInfo.walls.filter((w) => w.cls.includes("glass")).every((g) => Number(g.op) < 0.6),
+     wallInfo.walls.map((w) => w.op).join());
+  ok("il muro pieno resta opaco",
+     wallInfo.walls.filter((w) => w.cls === "fp-wall").every((g) => Number(g.op) > 0.9));
+  ok("le altre stanze restano a quattro muri pieni", wallInfo.plain.length === 4);
+
+  const openRoom = await page.evaluate(() => {
+    const r = window.__EL__._rooms()[0];
+    r.walls = ["open", "open", "wall", "wall"];
+    window.__EL__._signature = ""; window.__EL__.render();
+    return document.querySelector('[data-room="' + r.id + '"]').querySelectorAll(".fp-wall").length;
+  });
+  ok("un lato aperto non disegna niente", openRoom === 2, String(openRoom));
 
   // ---- phone: the map has to fit and stay usable at 390px ----------------
   console.log("\n== TELEFONO ==");

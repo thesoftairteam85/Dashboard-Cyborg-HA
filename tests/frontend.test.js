@@ -58,6 +58,18 @@ function ok(name, cond, extra) { if (cond) { pass++; console.log("  ok  " + name
 
 const el = new Cls();
 el._hass = hass;
+// const declarations do not escape a direct eval, so the group table is
+// reconstructed here from the same default limits the panel ships.
+const MONITOR_GROUPS_TEST = [
+  { key: "voltage", label: "Tensioni", icon: "mdi:sine-wave", unit: "V",
+    limits: { warnLow: 207, warnHigh: 253, alarmLow: 195, alarmHigh: 265 }, std: "EN 50160: 230 V ±10%" },
+  { key: "current", label: "Correnti", icon: "mdi:current-ac", unit: "A",
+    limits: { warnHigh: null, alarmHigh: null }, std: "nessuna soglia predefinita" },
+  { key: "temperature", label: "Temperature", icon: "mdi:thermometer", unit: "°C",
+    limits: { warnHigh: 70, alarmHigh: 85 }, std: "soglia 70 / 85 °C" },
+  { key: "power_factor", label: "Fattore di potenza", icon: "mdi:angle-acute", unit: "",
+    limits: { warnLow: 0.9, alarmLow: 0.8 }, std: "sotto 0,90" },
+];
 el._dashboard = { version: 3, revision: 0, theme: { accent: "#00e5ff" },
   pages: [{ id: "home", title: "Cyborg", icon: "mdi:hexagon-multiple-outline", sections: [] }] };
 
@@ -1413,6 +1425,71 @@ console.log("\n== 19. GERARCHIA DEI CARICHI E VISIBILITA' NELLE STANZE ==");
   delete states["light.sala_1"]; delete states["sensor.sala_temp"];
   delete states["sensor.sala_rssi"]; delete states["button.sala_restart"]; delete states["sensor.sala_giu"];
   el._registry = null;
+}
+
+console.log("\n== 20. SOGLIE CONFIGURABILI ==");
+{
+  const vGroup = MONITOR_GROUPS_TEST.find(g => g.key === "voltage");
+  const tGroup = MONITOR_GROUPS_TEST.find(g => g.key === "temperature");
+  const cGroup = MONITOR_GROUPS_TEST.find(g => g.key === "current");
+  ok("senza personalizzazioni valgono le norme",
+     JSON.stringify(monitorLimits(vGroup, {})) === JSON.stringify({warnLow:207,warnHigh:253,alarmLow:195,alarmHigh:265}),
+     JSON.stringify(monitorLimits(vGroup, {})));
+  ok("una soglia personalizzata sostituisce la norma",
+     monitorLimits(vGroup, { limits: { voltage: { warnLow: 210 } } }).warnLow === 210);
+  ok("le altre soglie dello stesso gruppo restano di norma",
+     monitorLimits(vGroup, { limits: { voltage: { warnLow: 210 } } }).warnHigh === 253);
+  ok("un campo svuotato torna alla norma",
+     monitorLimits(vGroup, { limits: { voltage: { warnLow: "" } } }).warnLow === 207);
+  ok("un valore non numerico non diventa una soglia",
+     monitorLimits(tGroup, { limits: { temperature: { warnHigh: "caldo" } } }).warnHigh === 70);
+  ok("un gruppo senza soglie predefinite resta senza",
+     monitorLimits(cGroup, {}).warnHigh === null);
+
+  const L = monitorLimits(vGroup, {});
+  ok("in tolleranza", limitVerdict(230, L) === "ok");
+  ok("sotto la soglia di avviso", limitVerdict(205, L) === "warn");
+  ok("sopra la soglia di avviso", limitVerdict(255, L) === "warn");
+  ok("sotto la soglia di allarme", limitVerdict(190, L) === "alarm");
+  ok("sopra la soglia di allarme", limitVerdict(270, L) === "alarm");
+  ok("l'allarme vince sull'avviso", limitVerdict(190, L) !== "warn");
+  ok("un valore non numerico non genera allarmi", limitVerdict(NaN, L) === "ok");
+  ok("senza soglie non si allarma mai",
+     limitVerdict(9999, monitorLimits(cGroup, {})) === "ok");
+
+  // real readings from the phone screenshot: 234-240 V, all inside tolerance
+  ok("le tensioni reali dell'impianto sono in tolleranza",
+     [239, 240, 236, 238, 234].every(v => limitVerdict(v, L) === "ok"));
+
+  ok("l'intestazione dichiara le soglie in vigore",
+     limitHint(vGroup, L) === "avviso < 207 o > 253 V", limitHint(vGroup, L));
+  ok("un gruppo senza soglie lo dice",
+     limitHint(cGroup, monitorLimits(cGroup, {})) === "nessuna soglia");
+  ok("con soglia solo alta l'intestazione non inventa quella bassa",
+     limitHint(tGroup, monitorLimits(tGroup, {})) === "avviso > 70 °C",
+     limitHint(tGroup, monitorLimits(tGroup, {})));
+
+  // the card must judge against the custom limit, not the standard
+  states["sensor.arm_temp"] = S("78", { friendly_name: "Armadio server", device_class: "temperature", unit_of_measurement: "°C" });
+  const base = { id: "m2", type: "monitor", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {}, groups: ["temperature"], max_per_group: 8,
+    entities: { temperature: ["sensor.arm_temp"] } };
+  const strict = el._monitorRows(tGroup, base);
+  ok("78 gradi supera la soglia di norma", strict[0].warn === true);
+  const relaxed = el._monitorRows(tGroup, { ...base, limits: { temperature: { warnHigh: 85, alarmHigh: 95 } } });
+  ok("alzando la soglia la stessa lettura torna normale",
+     relaxed[0].warn === false && relaxed[0].alarm === false);
+  const tight = el._monitorRows(tGroup, { ...base, limits: { temperature: { alarmHigh: 60 } } });
+  ok("abbassando la soglia di allarme la lettura diventa allarme", tight[0].alarm === true);
+  delete states["sensor.arm_temp"];
+
+  // power factor is judged on magnitude, not sign
+  states["sensor.pf_neg"] = S("-0.95", { friendly_name: "Cosphi export", device_class: "power_factor", unit_of_measurement: "" });
+  const pfGroup = MONITOR_GROUPS_TEST.find(g => g.key === "power_factor");
+  const pf = el._monitorRows(pfGroup, { entities: { power_factor: ["sensor.pf_neg"] }, max_per_group: 8 });
+  ok("un fattore di potenza negativo non è un guasto", pf[0].warn === false && pf[0].alarm === false,
+     JSON.stringify({ warn: pf[0].warn, alarm: pf[0].alarm }));
+  delete states["sensor.pf_neg"];
 }
 
 console.log("\n" + "=".repeat(46));

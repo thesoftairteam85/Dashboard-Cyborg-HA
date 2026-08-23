@@ -330,6 +330,37 @@ function roomEdges(room) {
   return edges;
 }
 
+/**
+ * What stands on each side of a room.
+ *
+ * A balcony does not have four walls: it has one wall with a French window and
+ * a railing on the other three sides, and drawing four solid slabs around it
+ * makes the map lie about the house. Each edge therefore carries a type, and
+ * the renderer gives each type its own height, opacity and detailing —
+ * a railing is waist-high and see-through, glazing is full height and
+ * transparent, an opening is nothing at all.
+ *
+ * `h` is a fraction of the room's wall height, so raising the storey height
+ * keeps the proportions.
+ */
+const WALL_TYPES = [
+  { k: "wall", l: "Muro", icon: "mdi:wall", h: 1, opacity: 1, glass: false },
+  { k: "glass", l: "Porta finestra", icon: "mdi:door-sliding-glass", h: 1, opacity: 0.3, glass: true },
+  { k: "window", l: "Finestra", icon: "mdi:window-closed-variant", h: 1, opacity: 0.55, glass: true, band: true },
+  { k: "door", l: "Porta", icon: "mdi:door", h: 1, opacity: 0.85, door: true },
+  { k: "garage", l: "Basculante", icon: "mdi:garage", h: 1, opacity: 0.7, ribs: true },
+  { k: "railing", l: "Ringhiera", icon: "mdi:fence", h: 0.52, opacity: 0.34, posts: true },
+  { k: "stairs", l: "Scala", icon: "mdi:stairs", h: 0.9, opacity: 0.5, steps: true },
+  { k: "open", l: "Aperto", icon: "mdi:border-none-variant", h: 0, opacity: 0, none: true },
+];
+function wallType(key) { return WALL_TYPES.find((w) => w.k === key) || WALL_TYPES[0]; }
+
+/** Type of edge i, defaulting to a plain wall. */
+function wallAt(room, index) {
+  const list = room && room.walls;
+  return wallType(Array.isArray(list) ? list[index] : undefined);
+}
+
 /** Area-weighted centre of a footprint, used to place the room label. */
 function polygonCentroid(points) {
   let a = 0, cx = 0, cy = 0;
@@ -610,20 +641,79 @@ function notifChannel(key) { return NOTIF_CHANNELS[key] || NOTIF_CHANNELS.notify
  * actually trips the meter.
  * ======================================================================== */
 
+/**
+ * Diagnostic groups and their default limits.
+ *
+ * The defaults are standards, not opinions — EN 50160 for voltage and
+ * frequency, 0.90 for the power factor because below it the distributor
+ * penalises — and that is exactly why they must remain *defaults*. A server
+ * cabinet that idles at 78 °C is not a fault, an inverter derating above 60 °C
+ * is, and a 24 V control circuit has nothing to do with 230 V tolerances. Each
+ * limit is therefore overridable per card, and the card says which numbers it
+ * is judging against so a reading is never called "out of tolerance" against
+ * an invisible rule.
+ */
 const MONITOR_GROUPS = [
-  { key: "voltage",      label: "Tensioni",   icon: "mdi:sine-wave",        unit: "V",
-    warn: (v) => v < 207 || v > 253, hint: "EN 50160: 230 V ±10%" },
-  { key: "current",      label: "Correnti",   icon: "mdi:current-ac",       unit: "A",
-    warn: () => false },
-  { key: "temperature",  label: "Temperature", icon: "mdi:thermometer",     unit: "°C",
-    warn: (v) => v > 70, alarm: (v) => v > 85, hint: "soglia 70 °C" },
-  { key: "frequency",    label: "Frequenza",  icon: "mdi:sine-wave",        unit: "Hz",
-    warn: (v) => v < 49.5 || v > 50.5, hint: "EN 50160: 50 Hz ±1%" },
+  { key: "voltage", label: "Tensioni", icon: "mdi:sine-wave", unit: "V",
+    limits: { warnLow: 207, warnHigh: 253, alarmLow: 195, alarmHigh: 265 },
+    std: "EN 50160: 230 V ±10%" },
+  { key: "current", label: "Correnti", icon: "mdi:current-ac", unit: "A",
+    limits: { warnHigh: null, alarmHigh: null },
+    std: "nessuna soglia predefinita: dipende dalla portata dei cavi" },
+  { key: "temperature", label: "Temperature", icon: "mdi:thermometer", unit: "°C",
+    limits: { warnHigh: 70, alarmHigh: 85 },
+    std: "soglia di massima predefinita 70 / 85 °C" },
+  { key: "frequency", label: "Frequenza", icon: "mdi:sine-wave", unit: "Hz",
+    limits: { warnLow: 49.5, warnHigh: 50.5, alarmLow: 47, alarmHigh: 52 },
+    std: "EN 50160: 50 Hz ±1%" },
   { key: "power_factor", label: "Fattore di potenza", icon: "mdi:angle-acute", unit: "",
-    warn: (v) => Math.abs(v) < 0.9, hint: "sotto 0,90 è penalizzabile" },
-  { key: "battery",      label: "Batterie",   icon: "mdi:battery",          unit: "%",
-    warn: (v) => v < 20, alarm: (v) => v < 10 },
+    limits: { warnLow: 0.9, alarmLow: 0.8 },
+    std: "sotto 0,90 è penalizzabile" },
+  { key: "battery", label: "Batterie", icon: "mdi:battery", unit: "%",
+    limits: { warnLow: 20, alarmLow: 10 },
+    std: "avviso al 20%, allarme al 10%" },
 ];
+
+const LIMIT_KEYS = ["warnLow", "warnHigh", "alarmLow", "alarmHigh"];
+const LIMIT_LABELS = { warnLow: "AVVISO SOTTO", warnHigh: "AVVISO SOPRA",
+                       alarmLow: "ALLARME SOTTO", alarmHigh: "ALLARME SOPRA" };
+
+/** The limits actually in force for a group: the user's, else the standard. */
+function monitorLimits(group, item) {
+  const over = (item && item.limits && item.limits[group.key]) || {};
+  const out = {};
+  for (const k of LIMIT_KEYS) {
+    const fallback = Number.isFinite(group.limits[k]) ? group.limits[k] : null;
+    const v = over[k];
+    if (v === undefined || v === null || v === "") { out[k] = fallback; continue; }
+    const n = Number(v);
+    // Unparseable stored value falls back to the standard rather than to "no
+    // limit": a corrupt document must not quietly disarm a safety threshold.
+    out[k] = Number.isFinite(n) ? n : fallback;
+  }
+  return out;
+}
+
+/** "ok" | "warn" | "alarm" for one reading against its limits. */
+function limitVerdict(value, limits) {
+  if (!Number.isFinite(value)) return "ok";
+  // The power factor is judged on magnitude: -0.95 is as good as +0.95, and a
+  // sign flip means exporting, not a fault.
+  if (limits.alarmLow !== null && value < limits.alarmLow) return "alarm";
+  if (limits.alarmHigh !== null && value > limits.alarmHigh) return "alarm";
+  if (limits.warnLow !== null && value < limits.warnLow) return "warn";
+  if (limits.warnHigh !== null && value > limits.warnHigh) return "warn";
+  return "ok";
+}
+
+/** One line saying which numbers a group is being judged against. */
+function limitHint(group, limits) {
+  const bits = [];
+  if (limits.warnLow !== null) bits.push("< " + limits.warnLow);
+  if (limits.warnHigh !== null) bits.push("> " + limits.warnHigh);
+  if (!bits.length) return "nessuna soglia";
+  return "avviso " + bits.join(" o ") + (group.unit ? " " + group.unit : "");
+}
 
 /** Contractual draw limits commonly found on Italian domestic meters. */
 const GRID_LIMIT_PRESETS = [3000, 3300, 4500, 6000, 10000, 15000];
@@ -707,6 +797,7 @@ const CARD_TYPES = [
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
+  { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
   { k: "irrigation", l: "Irrigazione", solo: true, d: "Zone di irrigazione: avvio a tempo garantito da Home Assistant, umidità del terreno, programmi." },
 ];
@@ -795,6 +886,15 @@ function kelvinToHex(kelvin) {
   return "#" + c(r) + c(g) + c(b);
 }
 
+/** Line colours for a multi-series chart: distinct in hue, equal in weight. */
+const SERIES_COLORS = ["#00e5ff", "#ffd166", "#06d6a0", "#c77dff", "#ff8fab",
+                       "#8ecae6", "#ff924c", "#a0e7a0"];
+
+const TREND_RANGES = [
+  { h: 6, l: "6 ore" }, { h: 24, l: "24 ore" },
+  { h: 72, l: "3 giorni" }, { h: 168, l: "7 giorni" },
+];
+
 /** Ready-made colours, so setting a scene does not require a colour picker. */
 const LIGHT_SWATCHES = [
   { hex: "#ffffff", l: "Bianco" }, { hex: "#ffd6a5", l: "Bianco caldo" },
@@ -854,9 +954,10 @@ function cameraStream(entityId, st) {
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation"]);
+  "monitor", "camera", "economy", "lights", "irrigation", "trend"]);
 
 const COMPOSITE_META = {
+  trend:         ["Confronto andamenti", "Storico a confronto", "mdi:chart-multiple", "lg"],
   lights:        ["Luci", "Illuminazione della casa", "mdi:lightbulb-group", "lg"],
   irrigation:    ["Irrigazione", "Zone e programmi", "mdi:sprinkler-variant", "lg"],
   energyflow:    ["Flusso energetico", "Potenza in tempo reale", "mdi:transit-connection-variant", "lg"],
@@ -1148,7 +1249,7 @@ class CyborgDashboard extends HTMLElement {
         // Geometry belongs in the signature: resizing a room or moving it to
         // another storey changes nothing about entity state, and without this
         // the map would only repaint on the next unrelated state update.
-        parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length}`);
+        parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length},${(room.walls || []).join("")}`);
         const ids = room.id === focusId ? this._roomAllEntities(room) : this._roomEntities(room);
         for (const id of ids) {
           const st = this._hass.states[id];
@@ -1174,6 +1275,12 @@ class CyborgDashboard extends HTMLElement {
             + ":" + (this._sentNotifs || []).length
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
+        }
+        if (it.type === "trend") {
+          parts.push("tr:" + (it.hours || 24) + ":" + this._trendSeries(it).map((r) => {
+            const ts = this._hass.states[r.entity];
+            return r.entity + "=" + (ts ? ts.state : "?") + ":" + (r.color || "");
+          }).join(","));
         }
         if (it.type === "lights") {
           parts.push("li:" + JSON.stringify(this._lightOpen || {}));
@@ -1815,9 +1922,22 @@ class CyborgDashboard extends HTMLElement {
       ? `<div class="fp-spots">${allEnts.map((e, i) => this._spotMarkup(room, e, i, allEnts.length)).join("")}</div>`
       : "";
 
-    const walls = view.show_walls && !ghost ? roomEdges(room).map((e) => `
-      <div class="fp-wall" style="width:${e.len.toFixed(2)}px;height:${wallH}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
-        transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);filter:brightness(${e.shade.toFixed(3)})"></div>`).join("") : "";
+    const walls = view.show_walls && !ghost ? roomEdges(room).map((e, i) => {
+      const wt = wallAt(room, i);
+      if (wt.none || wallH <= 0) return "";
+      const h = Math.max(2, wallH * wt.h);
+      const cls = ["fp-wall"];
+      if (wt.glass) cls.push("glass");
+      if (wt.posts) cls.push("railing");
+      if (wt.steps) cls.push("stairs");
+      if (wt.ribs) cls.push("garage");
+      if (wt.door) cls.push("door");
+      if (wt.band) cls.push("window");
+      return `<div class="${cls.join(" ")}" data-wall="${i}"
+        style="width:${e.len.toFixed(2)}px;height:${h.toFixed(2)}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
+        transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);
+        opacity:${wt.opacity};filter:brightness(${e.shade.toFixed(3)})"></div>`;
+    }).join("") : "";
 
     const [cx, cy] = polygonCentroid(pts);
     const label = view.show_labels && !ghost
@@ -2392,6 +2512,24 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini danger" data-vertex-remove="${i}" ${shape.length <= 3 ? "disabled" : ""}><ha-icon icon="mdi:close"></ha-icon></button></div>`).join("")}
         </div>
         <span class="hint">${shape.length} vertici. Sulla mappa, i pallini pieni si trascinano e quelli vuoti a metà lato aggiungono un vertice.</span>` : ""}
+      </div>
+
+      <div class="section">
+        <strong>LATI DELLA STANZA</strong>
+        <span class="hint">Un balcone non ha quattro muri: ne ha uno con una porta finestra e una ringhiera sugli altri tre lati. Ogni lato può essere quello che è davvero.</span>
+        <div class="wall-list">${roomEdges(room).map((e, i) => {
+          const wt = wallAt(room, i);
+          const bearing = ((Math.round(e.angle) % 360) + 360) % 360;
+          const side = bearing < 45 || bearing >= 315 ? "nord" : bearing < 135 ? "est" : bearing < 225 ? "sud" : "ovest";
+          return `<div class="wall-row">
+            <ha-icon icon="${esc(wt.icon)}"></ha-icon>
+            <div class="wall-txt"><strong>Lato ${i + 1}</strong><small>${esc(side)} · ${Math.round(e.len)} unità</small></div>
+            <select data-wall-type="${i}">
+              ${WALL_TYPES.map((w) => `<option value="${esc(w.k)}" ${w.k === wt.k ? "selected" : ""}>${esc(w.l)}</option>`).join("")}
+            </select>
+          </div>`;
+        }).join("")}</div>
+        <button class="secondary wide" data-walls-reset><ha-icon icon="mdi:wall"></ha-icon> TUTTI MURI</button>
       </div>
 
       <div class="section">
@@ -3076,6 +3214,161 @@ class CyborgDashboard extends HTMLElement {
       });
   }
 
+  // --------------------------------------------------- confronto andamenti ---
+
+  /**
+   * Several histories on one set of axes.
+   *
+   * The single-entity chart card answers "what did this do"; this one answers
+   * the question that actually gets asked — "is the bathroom colder than the
+   * living room, and how do both track the outside". That comparison only
+   * means anything on a shared vertical scale, so every series is drawn
+   * against one min/max computed across all of them: normalising each line to
+   * its own range would make a 2-degree wobble and a 20-degree swing look
+   * identical.
+   */
+  _trendSeries(item) {
+    const rows = Array.isArray(item.series) ? item.series : [];
+    return rows.filter((r) => r && r.entity && this._hass.states[r.entity]);
+  }
+
+  _loadTrend(item) {
+    const series = this._trendSeries(item);
+    const ids = series.map((r) => r.entity);
+    const hours = Math.max(1, Math.min(720, item.hours || 24));
+    const key = item.id + "|" + hours + "|" + ids.join(",");
+    this._trend = this._trend || {};
+    const cached = this._trend[key];
+    // 5 minutes: long enough not to hammer the recorder while scrolling,
+    // short enough that the chart is never visibly behind the card's own
+    // live value.
+    if (cached && Date.now() - cached.ts < 300000) return cached;
+    if (this._trendPending === key) return cached || null;
+    if (!ids.length) return null;
+
+    this._trendPending = key;
+    const end = new Date();
+    const start = new Date(end.getTime() - hours * 3600000);
+    this._hass.callWS({
+      type: "history/history_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      entity_ids: ids,
+      minimal_response: true,
+      no_attributes: true,
+      significant_changes_only: false,
+    }).then((res) => {
+      const out = {};
+      for (const id of ids) {
+        const raw = (res && res[id]) || [];
+        out[id] = raw.map((pt) => {
+          const value = parseFloat(pt.s !== undefined ? pt.s : pt.state);
+          // lu is the last-updated timestamp in seconds; the first sample of a
+          // window carries the full state object instead
+          const t = pt.lu !== undefined ? pt.lu * 1000
+            : (pt.last_updated ? Date.parse(pt.last_updated) : NaN);
+          return Number.isFinite(value) && Number.isFinite(t) ? [t, value] : null;
+        }).filter(Boolean);
+      }
+      this._trend[key] = { ts: Date.now(), start: start.getTime(), end: end.getTime(), data: out };
+      this._trendPending = null;
+      this._touch(true);
+    }).catch((err) => {
+      this._trend[key] = { ts: Date.now(), error: true,
+        message: (err && err.message) || "storico non disponibile" };
+      this._trendPending = null;
+      this._touch(true);
+    });
+    return null;
+  }
+
+  _trendBody(item) {
+    const series = this._trendSeries(item);
+    if (!series.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:chart-multiple"></ha-icon>
+        <span>Scegli le grandezze da confrontare nell'editor: per esempio la temperatura esterna e quelle di soggiorno, bagno e soppalco sullo stesso grafico.</span></div>`;
+    }
+    const data = this._loadTrend(item);
+    if (!data) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon>
+        <span>Lettura dello storico…</span></div>`;
+    }
+    if (data.error) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
+        <span>${esc(data.message)}. Serve il recorder attivo sulle entità scelte.</span></div>`;
+    }
+
+    const W = 600, H = 220, PAD_L = 38, PAD_R = 10, PAD_T = 12, PAD_B = 22;
+    let lo = Infinity, hi = -Infinity;
+    for (const row of series) {
+      for (const [, v] of (data.data[row.entity] || [])) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    }
+    if (!Number.isFinite(lo)) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:chart-line"></ha-icon>
+        <span>Nessun dato registrato nel periodo scelto.</span></div>`;
+    }
+    if (Number.isFinite(Number(item.y_min))) lo = Number(item.y_min);
+    if (Number.isFinite(Number(item.y_max))) hi = Number(item.y_max);
+    if (hi - lo < 0.5) { const mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5; }
+    const pad = (hi - lo) * 0.08;
+    lo -= pad; hi += pad;
+
+    const x = (t) => PAD_L + ((t - data.start) / Math.max(1, data.end - data.start)) * (W - PAD_L - PAD_R);
+    const y = (v) => PAD_T + (1 - (v - lo) / (hi - lo)) * (H - PAD_T - PAD_B);
+
+    const ticks = 4;
+    const grid = Array.from({ length: ticks + 1 }, (_, i) => {
+      const v = lo + ((hi - lo) * i) / ticks;
+      const yy = y(v);
+      return `<line class="tr-grid" x1="${PAD_L}" y1="${yy.toFixed(1)}" x2="${W - PAD_R}" y2="${yy.toFixed(1)}"/>
+        <text class="tr-ylab" x="${PAD_L - 6}" y="${(yy + 3).toFixed(1)}">${esc(Math.abs(hi - lo) > 12 ? Math.round(v) : v.toFixed(1))}</text>`;
+    }).join("");
+
+    const hours = Math.max(1, Math.min(720, item.hours || 24));
+    const xLabels = Array.from({ length: 5 }, (_, i) => {
+      const t = data.start + ((data.end - data.start) * i) / 4;
+      const d = new Date(t);
+      const label = hours > 72
+        ? `${d.getDate()}/${d.getMonth() + 1}`
+        : String(d.getHours()).padStart(2, "0") + ":00";
+      return `<text class="tr-xlab" x="${x(t).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${esc(label)}</text>`;
+    }).join("");
+
+    const paths = series.map((row, i) => {
+      const pts = data.data[row.entity] || [];
+      if (pts.length < 2) return "";
+      const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
+      const d = pts.map((pt, j) => (j ? "L" : "M") + x(pt[0]).toFixed(1) + "," + y(pt[1]).toFixed(1)).join(" ");
+      return `<path class="tr-line" d="${d}" style="stroke:${esc(color)}"/>`;
+    }).join("");
+
+    const legend = series.map((row, i) => {
+      const st = this._hass.states[row.entity];
+      const pts = data.data[row.entity] || [];
+      const values = pts.map((pt) => pt[1]);
+      const now = parseFloat(st.state);
+      const unit = st.attributes.unit_of_measurement || "";
+      const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
+      return `<button class="tr-leg" data-more-info="${esc(row.entity)}" style="--sc:${esc(color)}">
+        <i></i>
+        <span class="tr-leg-name">${esc(row.name || st.attributes.friendly_name || row.entity)}</span>
+        <span class="tr-leg-now">${esc(Number.isFinite(now) ? (Math.abs(now) >= 100 ? Math.round(now) : now.toFixed(1)) + unit : st.state)}</span>
+        <span class="tr-leg-range">${values.length
+          ? esc(Math.min(...values).toFixed(1) + " / " + Math.max(...values).toFixed(1))
+          : "—"}</span>
+      </button>`;
+    }).join("");
+
+    return `<div class="tr">
+      <div class="tr-tabs">${TREND_RANGES.map((r) =>
+        `<button class="eco-tab ${r.h === hours ? "on" : ""}" data-trend-hours="${r.h}">${esc(r.l)}</button>`).join("")}</div>
+      <svg class="tr-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        ${grid}${xLabels}${paths}
+      </svg>
+      <div class="tr-legend">${legend}</div>
+    </div>`;
+  }
+
   // ------------------------------------------------------------- luci ---
 
   /** Which lights the card shows: an explicit list, or every light there is. */
@@ -3398,6 +3691,7 @@ class CyborgDashboard extends HTMLElement {
 
   /** Readings for one diagnostic group, auto-discovered by device_class. */
   _monitorRows(group, item) {
+    const limits = monitorLimits(group, item);
     const manual = item.entities && item.entities[group.key];
     const ids = Array.isArray(manual) && manual.length
       ? manual
@@ -3410,8 +3704,11 @@ class CyborgDashboard extends HTMLElement {
       if (!st) continue;
       const n = parseFloat(st.state);
       if (!Number.isFinite(n)) continue;
-      const alarm = group.alarm ? group.alarm(n) : false;
-      const warn = !alarm && group.warn ? group.warn(n) : false;
+      // The power factor is judged on magnitude: -0.95 is as good as +0.95,
+      // the sign only says whether the load is inductive or capacitive.
+      const verdict = limitVerdict(group.key === "power_factor" ? Math.abs(n) : n, limits);
+      const alarm = verdict === "alarm";
+      const warn = verdict === "warn";
       rows.push({ id, st, n, warn, alarm,
         name: st.attributes.friendly_name || id,
         unit: st.attributes.unit_of_measurement || group.unit });
@@ -3491,7 +3788,14 @@ class CyborgDashboard extends HTMLElement {
         ${groups.length ? groups.map(({ g, rows }) => `
           <div class="mon-group">
             <div class="mon-head"><ha-icon icon="${esc(g.icon)}"></ha-icon><strong>${esc(g.label)}</strong>
-              ${g.hint ? `<em>${esc(g.hint)}</em>` : ""}<span>${rows.length}</span></div>
+              <em>${(() => {
+                const custom = !!(item.limits && item.limits[g.key] && Object.keys(item.limits[g.key]).length);
+                // The numbers in force always, and the standard they came from
+                // when untouched: an installer needs to know he is being judged
+                // against EN 50160 and not against somebody's preference.
+                return esc(limitHint(g, monitorLimits(g, item)) + " · " + (custom ? "soglia personalizzata" : g.std));
+              })()}</em>
+              <span>${rows.length}</span></div>
             <div class="mon-rows">${rows.map((r) => `
               <button class="mon-row ${r.alarm ? "alarm" : r.warn ? "warn" : ""}" data-more-info="${esc(r.id)}">
                 <span class="mon-name">${esc(r.name)}</span>
@@ -3954,6 +4258,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "monitor") return this._monitorBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
+    if (type === "trend") return this._trendBody(item);
     if (type === "lights") return this._lightsBody(item);
     if (type === "irrigation") return this._irrigationBody(item);
     const attrs = (st && st.attributes) || {};
@@ -4280,6 +4585,25 @@ class CyborgDashboard extends HTMLElement {
              <ha-icon icon="${esc(g.icon)}"></ha-icon>${esc(g.label)}</button>`).join("")}
         </div>
         <label>MASSIMO PER GRUPPO<input type="number" min="3" max="30" data-prop="max_per_group" value="${card.max_per_group || 8}"></label>
+      </div>
+      <div class="section">
+        <strong>SOGLIE</strong>
+        <span class="hint">I valori predefiniti sono norme — EN 50160 per tensione e frequenza, 0,90 per il fattore di potenza — ma un armadio server che sta a 78 °C non è un guasto e un inverter che declassa sopra i 60 °C lo è. Lascia vuoto per usare la norma.</span>
+        ${MONITOR_GROUPS.filter((g) => !Array.isArray(card.groups) || !card.groups.length || card.groups.includes(g.key))
+          .map((g) => {
+            const cur = (card.limits && card.limits[g.key]) || {};
+            const def = g.limits;
+            return `<div class="lim-group">
+              <div class="lim-head"><ha-icon icon="${esc(g.icon)}"></ha-icon><strong>${esc(g.label)}</strong>
+                <em>${esc(g.std)}</em></div>
+              <div class="lim-grid">${LIMIT_KEYS.map((k) => `
+                <label>${esc(LIMIT_LABELS[k])}<input type="number" step="0.1"
+                  data-limit="${esc(g.key)}|${esc(k)}"
+                  value="${cur[k] === undefined || cur[k] === null ? "" : cur[k]}"
+                  placeholder="${def[k] === undefined || def[k] === null ? "—" : def[k]}"></label>`).join("")}</div>
+            </div>`;
+          }).join("")}
+        <button class="secondary wide" data-limits-reset><ha-icon icon="mdi:restore"></ha-icon> RIPRISTINA TUTTE LE SOGLIE DI NORMA</button>
       </div>`;
     }
     if (card.type === "active") {
@@ -4306,6 +4630,51 @@ class CyborgDashboard extends HTMLElement {
         <label class="check"><input type="checkbox" data-prop="show_updates" ${card.show_updates !== false ? "checked" : ""}> Includi aggiornamenti disponibili</label>
         <label>MASSIMO IN ELENCO<input type="number" min="3" max="60" data-prop="max" value="${card.max || 8}"></label>
         <button class="secondary wide" data-notif-clear><ha-icon icon="mdi:notification-clear-all"></ha-icon> SVUOTA L'ARCHIVIO AVVISI</button>
+      </div>`;
+    }
+    if (card.type === "trend") {
+      const numeric = Object.keys(this._hass.states).filter((id) => {
+        const st = this._hass.states[id];
+        return Number.isFinite(parseFloat(st.state)) && st.attributes.unit_of_measurement;
+      });
+      const chosen = Array.isArray(card.series) ? card.series : [];
+      const dc = (id) => (this._hass.states[id].attributes.device_class || "");
+      const sameKind = chosen.length ? dc(chosen[0].entity) : null;
+      return `<div class="section">
+        <strong>GRANDEZZE A CONFRONTO</strong>
+        <span class="hint">Fino a otto linee sullo stesso grafico, con una scala verticale sola: è quella che rende leggibile "il bagno è più freddo del soggiorno". ${
+          sameKind ? `Stai confrontando grandezze di tipo <strong>${esc(sameKind)}</strong>.` : ""}</span>
+        <div class="eco-dev-list">${chosen.map((row, i) => {
+          const st = this._hass.states[row.entity];
+          const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
+          const mixed = sameKind && dc(row.entity) !== sameKind;
+          return `<div class="eco-dev-edit">
+            <i class="tr-dot" style="background:${esc(color)}"></i>
+            <div class="ede-txt">
+              <strong>${esc(row.name || (st && st.attributes.friendly_name) || row.entity)}</strong>
+              <small>${esc(row.entity)}${st ? esc(" · " + (st.attributes.unit_of_measurement || "")) : " · non presente"}${
+                mixed ? " · unità diversa dalle altre" : ""}</small>
+            </div>
+            <label class="tr-color"><input type="color" value="${esc(color)}" data-trend-color="${i}"></label>
+            <button class="mini danger" data-trend-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessuna grandezza scelta.</div>'}</div>
+        ${chosen.length >= 8 ? '<span class="hint">Raggiunto il massimo di otto linee.</span>' : `<label>AGGIUNGI UNA GRANDEZZA<select data-trend-add>
+          <option value="">— scegli un'entità numerica —</option>
+          ${numeric.filter((id) => !chosen.some((r) => r.entity === id))
+            .map((id) => `<option value="${esc(id)}">${esc(this._hass.states[id].attributes.friendly_name || id)} · ${esc(this._hass.states[id].attributes.unit_of_measurement || "")}</option>`).join("")}
+        </select></label>`}
+      </div>
+      <div class="section">
+        <strong>PERIODO E SCALA</strong>
+        <label>PERIODO<select data-prop="hours">
+          ${TREND_RANGES.map((r) => `<option value="${r.h}" ${(card.hours || 24) === r.h ? "selected" : ""}>${esc(r.l)}</option>`).join("")}
+        </select></label>
+        <span class="hint">La scala verticale si adatta ai dati. Fissala solo se vuoi confrontare due grafici diversi con lo stesso metro.</span>
+        <div class="two">
+          <label>MINIMO<input type="number" step="0.5" data-prop="y_min" value="${card.y_min ?? ""}" placeholder="auto"></label>
+          <label>MASSIMO<input type="number" step="0.5" data-prop="y_max" value="${card.y_max ?? ""}" placeholder="auto"></label>
+        </div>
       </div>`;
     }
     if (card.type === "lights") {
@@ -5200,6 +5569,60 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-limit]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const [group, key] = el.getAttribute("data-limit").split("|");
+        card.limits = card.limits || {};
+        card.limits[group] = card.limits[group] || {};
+        const raw = el.value.trim();
+        // An empty field means "use the standard", not "no limit": deleting the
+        // key is what makes the placeholder come back.
+        if (raw === "") delete card.limits[group][key];
+        else card.limits[group][key] = Number(raw);
+        if (!Object.keys(card.limits[group]).length) delete card.limits[group];
+        this._touch();
+      };
+    });
+    const limReset = q("[data-limits-reset]");
+    if (limReset && card) limReset.onclick = () => { card.limits = {}; this._touch(); };
+
+    const trendAdd = q("[data-trend-add]");
+    if (trendAdd && card) trendAdd.onchange = () => {
+      if (!trendAdd.value) return;
+      card.series = Array.isArray(card.series) ? card.series : [];
+      if (card.series.length < 8 && !card.series.some((r) => r.entity === trendAdd.value)) {
+        card.series.push({ entity: trendAdd.value, name: "",
+          color: SERIES_COLORS[card.series.length % SERIES_COLORS.length] });
+      }
+      this._trend = {};   // the cache key includes the entity list
+      this._touch();
+    };
+    all("[data-trend-remove]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.series)) return;
+        card.series.splice(parseInt(el.getAttribute("data-trend-remove"), 10), 1);
+        this._trend = {};
+        this._touch();
+      };
+    });
+    all("[data-trend-color]").forEach((el) => {
+      el.onchange = () => {
+        if (!card || !Array.isArray(card.series)) return;
+        const row = card.series[parseInt(el.getAttribute("data-trend-color"), 10)];
+        if (row) { row.color = el.value; this._touch(); }
+      };
+    });
+    all("[data-trend-hours]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const host = el.closest("[data-card-id]");
+        const target = this._cardById(host && host.getAttribute("data-card-id"));
+        if (!target) return;
+        target.hours = parseInt(el.getAttribute("data-trend-hours"), 10);
+        this._touch();
+      };
+    });
     all("[data-light-pickcard]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -5461,6 +5884,28 @@ class CyborgDashboard extends HTMLElement {
         else this._touch();
       };
     });
+    all("[data-wall-type]").forEach((el) => {
+      el.onchange = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const i = parseInt(el.getAttribute("data-wall-type"), 10);
+        const count = roomEdges(room).length;
+        // The array is materialised to the full side count on first edit, so a
+        // later reshape never leaves a hole that silently reads as "wall".
+        const walls = Array.from({ length: count }, (_, j) =>
+          (Array.isArray(room.walls) && room.walls[j]) || "wall");
+        walls[i] = el.value;
+        room.walls = walls;
+        this._touch();
+      };
+    });
+    const wallsReset = q("[data-walls-reset]");
+    if (wallsReset) wallsReset.onclick = () => {
+      const room = this._room(this._selected && this._selected.roomId);
+      if (!room) return;
+      room.walls = [];
+      this._touch();
+    };
     all("[data-room-shape]").forEach((el) => {
       el.onclick = () => {
         const room = this._room(this._selected && this._selected.roomId);
@@ -6703,6 +7148,13 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .mon-head{display:flex;align-items:center;gap:7px;margin-bottom:7px}
 .mon-head ha-icon{--mdc-icon-size:15px;color:var(--accent);opacity:.8}
 .mon-head strong{font:700 10px ui-monospace,monospace;letter-spacing:1.8px;text-transform:uppercase;color:var(--accent)}
+.lim-group{margin-top:9px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--accent) 5%,transparent);border:1px solid color-mix(in srgb,var(--accent) 14%,transparent)}
+.lim-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.lim-head ha-icon{--mdc-icon-size:14px;color:var(--accent)}
+.lim-head strong{font-size:11.5px}
+.lim-head em{flex-basis:100%;font-style:normal;font:9px ui-monospace,monospace;opacity:.4;letter-spacing:.6px}
+.lim-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}
+.lim-grid label{font-size:8.5px;letter-spacing:.9px}
 .mon-head em{font-style:normal;font-size:9.5px;opacity:.35;letter-spacing:.3px}
 .mon-head span{margin-left:auto;font:10px ui-monospace,monospace;opacity:.35}
 .mon-rows{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:4px}
@@ -6846,6 +7298,28 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-room.selected .fp-outline polygon{stroke:#fff;stroke-width:2}
 .fp-room.selected .fp-floor{background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 52%,#0d141d),color-mix(in srgb,var(--rc) 26%,#0b111a));box-shadow:inset 0 0 60px color-mix(in srgb,var(--rc) 45%,transparent),0 0 40px color-mix(in srgb,var(--rc) 70%,transparent)}
 .fp-room.selected .fp-wall{border-color:#fff}
+/* Each kind of side reads differently at a glance: glazing is transparent with
+   a frame, a railing is waist-high with posts, a garage door has its ribs. */
+.fp-wall.glass{background:linear-gradient(180deg,color-mix(in srgb,var(--rc) 22%,transparent),color-mix(in srgb,#bfe9ff 18%,transparent));
+  border:1px solid color-mix(in srgb,#bfe9ff 60%,transparent);box-shadow:inset 0 0 18px color-mix(in srgb,#bfe9ff 22%,transparent)}
+.fp-wall.window{background:repeating-linear-gradient(180deg,color-mix(in srgb,#bfe9ff 16%,transparent) 0 46%,transparent 46% 54%,color-mix(in srgb,#bfe9ff 16%,transparent) 54% 100%);
+  border:1px solid color-mix(in srgb,#bfe9ff 55%,transparent)}
+.fp-wall.railing{background:repeating-linear-gradient(90deg,color-mix(in srgb,var(--rc) 65%,transparent) 0 2px,transparent 2px 14px);
+  border-top:2px solid color-mix(in srgb,var(--rc) 85%,transparent);border-bottom:0}
+.fp-wall.stairs{background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--rc) 40%,transparent) 0 4px,transparent 4px 9px);
+  border:1px solid color-mix(in srgb,var(--rc) 45%,transparent)}
+.fp-wall.garage{background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--rc) 34%,transparent) 0 5px,color-mix(in srgb,#0b1119 40%,transparent) 5px 10px);
+  border:1px solid color-mix(in srgb,var(--rc) 60%,transparent)}
+.fp-wall.door{background:linear-gradient(180deg,color-mix(in srgb,var(--rc) 34%,transparent),color-mix(in srgb,var(--rc) 16%,transparent));
+  border:1px solid color-mix(in srgb,var(--rc) 70%,transparent);border-radius:3px 3px 0 0}
+.wall-list{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.wall-row{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:9px;
+  background:color-mix(in srgb,var(--accent) 5%,transparent);border:1px solid color-mix(in srgb,var(--accent) 14%,transparent)}
+.wall-row>ha-icon{--mdc-icon-size:16px;color:var(--accent);flex-shrink:0}
+.wall-txt{flex:1;min-width:0}
+.wall-txt strong{display:block;font-size:11.5px}
+.wall-txt small{display:block;font:9px ui-monospace,monospace;opacity:.4;text-transform:uppercase;letter-spacing:.8px}
+.wall-row select{width:auto;min-width:120px;padding:4px 6px;font-size:11px}
 .fp-room{transition:opacity .3s ease}
 .fp-room.ghost{opacity:.09;pointer-events:none}
 .fp-room.dim{opacity:.1;pointer-events:none}
@@ -6956,6 +7430,29 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-hud-btn.active{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
 .fp-hud-btn ha-icon{--mdc-icon-size:17px;display:block}
 .fp-hint{position:absolute;right:14px;bottom:18px;font:10px ui-monospace,monospace;letter-spacing:1.4px;opacity:.4;pointer-events:none}
+
+.tr{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+.tr-tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tr-svg{width:100%;height:auto;max-height:240px;display:block;overflow:visible}
+.tr-grid{stroke:rgba(255,255,255,.07);stroke-width:1}
+.tr-ylab{fill:currentColor;opacity:.35;font:9px ui-monospace,monospace;text-anchor:end}
+.tr-xlab{fill:currentColor;opacity:.3;font:9px ui-monospace,monospace}
+.tr-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;
+  filter:drop-shadow(0 0 5px color-mix(in srgb,currentColor 40%,transparent))}
+.tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px}
+.tr-leg{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;text-align:left;
+  background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
+.tr-leg:hover{border-color:color-mix(in srgb,var(--sc) 45%,transparent);background:color-mix(in srgb,var(--sc) 9%,transparent)}
+.tr-leg i{width:11px;height:3px;border-radius:99px;background:var(--sc);flex-shrink:0;box-shadow:0 0 7px var(--sc)}
+.tr-leg-name{flex:1;min-width:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-leg-now{font:11.5px ui-monospace,monospace;font-weight:700;color:var(--sc)}
+.tr-leg-range{font:9px ui-monospace,monospace;opacity:.35;white-space:nowrap}
+.tr-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.tr-color input{width:26px;height:26px;padding:0;border:0;background:none;cursor:pointer}
+@media(max-width:640px){
+  .tr-legend{grid-template-columns:1fr}
+  .tr-leg-range{display:none}
+}
 
 .fp-wrap{display:flex;flex-direction:column;gap:10px}
 .fp-devices{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:5px}

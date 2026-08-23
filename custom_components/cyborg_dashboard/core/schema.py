@@ -65,6 +65,16 @@ DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
 # millions of pixels out of the perspective frustum and simply vanish.
 MIN_LEVEL, MAX_LEVEL = -3, 8
 
+#: Diagnostic groups the monitor card knows about, and therefore the only ones
+#: whose thresholds can be overridden.
+MONITOR_GROUP_KEYS = ("voltage", "current", "temperature", "frequency",
+                      "power_factor", "battery")
+
+#: What can stand on one side of a room. "open" is a real choice — an archway
+#: between kitchen and living room is not a wall — so it has to be storable.
+WALL_TYPE_KEYS = ("wall", "glass", "window", "door", "garage", "railing",
+                  "stairs", "open")
+
 
 def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     """Normalize one floorplan room.
@@ -101,6 +111,13 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     # exclusion list rather than an inclusion one so that a device added to the
     # area later shows up by itself: an inclusion list would silently swallow
     # every new device until somebody remembered to tick it.
+    # What stands on each side of the room, one entry per polygon edge. An
+    # unknown value becomes a plain wall rather than disappearing: a missing
+    # side would silently open the room up.
+    walls = result.get("walls")
+    result["walls"] = ([w if w in WALL_TYPE_KEYS else "wall" for w in walls][:24]
+                       if isinstance(walls, list) else [])
+
     hidden = result.get("hidden")
     result["hidden"] = ([h for h in hidden if isinstance(h, str) and "." in h][:200]
                         if isinstance(hidden, list) else [])
@@ -258,6 +275,56 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if result.get("type") == "people":
         people = result.get("people")
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
+    if result.get("type") == "monitor":
+        # Per-group threshold overrides. Only known groups and known keys
+        # survive; a value that will not parse is dropped so the panel falls
+        # back to the standard instead of to no limit at all.
+        limits = result.get("limits")
+        clean: dict[str, dict[str, float]] = {}
+        if isinstance(limits, dict):
+            for group, values in limits.items():
+                if group not in MONITOR_GROUP_KEYS or not isinstance(values, dict):
+                    continue
+                row: dict[str, float] = {}
+                for key in ("warnLow", "warnHigh", "alarmLow", "alarmHigh"):
+                    if key not in values or values[key] in (None, ""):
+                        continue
+                    try:
+                        row[key] = float(values[key])
+                    except (TypeError, ValueError):
+                        continue
+                if row:
+                    clean[group] = row
+        result["limits"] = clean
+    if result.get("type") == "trend":
+        series = result.get("series")
+        rows: list[dict[str, Any]] = []
+        if isinstance(series, list):
+            for row in series:
+                if not isinstance(row, dict):
+                    continue
+                entity = row.get("entity")
+                if not isinstance(entity, str) or "." not in entity:
+                    continue
+                rows.append({
+                    "entity": entity,
+                    "name": str(row.get("name") or "")[:60],
+                    "color": str(row.get("color") or "")[:32],
+                })
+                # Eight lines is already at the edge of what a reader can tell
+                # apart; past that the chart stops comparing and starts hiding.
+                if len(rows) >= 8:
+                    break
+        result["series"] = rows
+        try:
+            result["hours"] = max(1, min(720, int(float(result.get("hours", 24)))))
+        except (TypeError, ValueError):
+            result["hours"] = 24
+        for key in ("y_min", "y_max"):
+            try:
+                result[key] = float(result[key]) if result.get(key) not in (None, "") else None
+            except (TypeError, ValueError):
+                result[key] = None
     if result.get("type") == "lights":
         lights = result.get("lights")
         result["lights"] = [x for x in lights if isinstance(x, str) and x] if isinstance(lights, list) else []

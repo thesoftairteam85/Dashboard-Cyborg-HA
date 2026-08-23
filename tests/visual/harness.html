@@ -198,6 +198,12 @@ window.__mount=(dash,opts)=>{
         if(opts&&opts.levels&&el._rooms().length>1){
           el._rooms().forEach((r,i)=>{r.level=opts.levels[i%opts.levels.length];});
         }
+        if(opts&&opts.balcony&&el._rooms().length){
+          // the reported real case: one wall, a French window, railings on the
+          // other three sides
+          const r=el._rooms()[el._rooms().length-1];
+          r.title="Balcone"; r.walls=["wall","glass","railing","railing"];
+        }
         if(opts&&opts.lshape&&el._rooms().length){
           el._rooms()[0].points=[[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]];
         }

@@ -4,6 +4,50 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.18.0] - 2026-08-23
+
+Lati della stanza, soglie che decidi tu, confronto degli andamenti.
+
+### Mappa 3D — i lati della stanza
+- Ogni lato di una stanza può essere quello che è davvero: **muro, porta
+  finestra, finestra, porta, basculante, ringhiera, scala, o aperto**. Un
+  balcone non ha quattro muri: ha un muro con una porta finestra e una
+  ringhiera sugli altri tre lati, e ora la mappa lo dice.
+- Ogni tipo ha la sua altezza e la sua trasparenza: la ringhiera è alta poco
+  più di metà ed è traforata, le vetrate si vedono attraverso, un lato aperto
+  non disegna niente.
+- Si sceglie lato per lato dal pannello della stanza, che indica anche
+  l'orientamento (nord/est/sud/ovest) e la lunghezza di ciascun lato.
+
+### Monitoraggio — le soglie le imposti tu
+- Ogni gruppo (tensioni, correnti, temperature, frequenza, fattore di potenza,
+  batterie) ha **quattro soglie modificabili**: avviso sotto/sopra, allarme
+  sotto/sopra.
+- I valori predefiniti restano le norme — EN 50160 per tensione e frequenza,
+  0,90 per il fattore di potenza — e l'intestazione del gruppo dichiara sempre
+  **quali numeri sta usando** e se sono di norma o personalizzati. Lasciando un
+  campo vuoto si torna alla norma.
+- Un armadio server che sta a 78 °C non è un guasto e un inverter che declassa
+  sopra i 60 °C lo è: la stessa soglia per tutti era sbagliata in entrambi i
+  casi.
+- Il fattore di potenza viene valutato in modulo: -0,95 vale come +0,95, il
+  segno dice solo se il carico è induttivo o capacitivo.
+- Una soglia illeggibile nel file salvato torna alla norma invece di
+  **sparire**: un documento corrotto non deve disarmare un controllo.
+
+### Nuova card: confronto andamenti
+- Fino a **otto grandezze sullo stesso grafico**, con una sola scala verticale:
+  è quella che rende leggibile "il bagno è più freddo del soggiorno". La
+  temperatura esterna contro quelle di soggiorno, bagno e soppalco, per dire.
+- Periodo 6 ore / 24 ore / 3 giorni / 7 giorni, colore per linea, scala
+  verticale automatica o fissata a mano.
+- La legenda mostra il valore attuale e il minimo/massimo del periodo per ogni
+  linea.
+
+### Verifica
+- 525 asserzioni sulla logica del pannello, schema completo, **59 asserzioni
+  geometriche misurate** in Chromium headless.
+
 ## [0.17.0] - 2026-08-23
 
 Correzioni ai difetti segnalati, telefono incluso, più le notifiche Telegram
