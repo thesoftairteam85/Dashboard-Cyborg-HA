@@ -38,6 +38,7 @@ const DEFAULT_DASH = {
     ["09-map-focus-edit", { pageIndex: 1, autoRooms: true, editing: true, focusRoom: true }],
     ["12-map-walls",  { pageIndex: 1, autoRooms: true, balcony: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
+    ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
     ["22-economy",    { pageIndex: 0, autoCompose: true, economy: true }],
     ["23-economy-ed", { pageIndex: 0, autoCompose: true, economy: true, editing: true, selectEconomy: true }],
   ];
@@ -249,6 +250,72 @@ const DEFAULT_DASH = {
   ok("le altre stanze si defilano",
      zoomed.rooms.filter((r) => r !== fr).every((r) => r.opacity < 0.2),
      zoomed.rooms.map((r) => r.opacity).join());
+
+  // ---- una card per stanza ------------------------------------------------
+  console.log("\n== CARD STANZA ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, rooms: true });
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: path.resolve(__dirname, "24-rooms.png") });
+  const rc = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll(".rc"));
+    return {
+      count: cards.length,
+      areas: Array.from(document.querySelectorAll("[data-room-lights-off]")).map((b) => b.getAttribute("data-room-lights-off")),
+      withReadings: cards.filter((c) => c.querySelector(".rc-strip")).length,
+      covers: document.querySelectorAll(".rc-cover").length,
+      coverCmds: Array.from(document.querySelectorAll("[data-cover-cmd]")).map((b) => b.getAttribute("data-cover-cmd").split("|")[1]),
+      overflow: cards.some((c) => c.scrollWidth > c.clientWidth + 1),
+    };
+  });
+  ok("una card per ogni area", rc.count === 5, String(rc.count));
+  ok("ogni stanza con luci ha lo spegnimento di gruppo", rc.areas.length >= 4, rc.areas.join());
+  ok("le letture salgono in testa alla card", rc.withReadings >= 3, String(rc.withReadings));
+  ok("le tapparelle hanno i tre comandi giusti",
+     rc.covers > 0 && rc.coverCmds.every((c) => ["open_cover", "stop_cover", "close_cover"].includes(c)),
+     rc.coverCmds.join());
+  ok("nessuna card stanza deborda", !rc.overflow);
+
+  // ---- confronto andamenti -----------------------------------------------
+  console.log("\n== CONFRONTO ANDAMENTI ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trend: true });
+  await page.waitForTimeout(900);
+  const tr = await page.evaluate(() => {
+    const svg = document.querySelector(".tr-svg");
+    if (!svg) return { lines: 0 };
+    const box = svg.getBoundingClientRect();
+    const lines = Array.from(svg.querySelectorAll(".tr-line")).map((p2) => {
+      const b = p2.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height),
+        top: Math.round(b.top - box.top), bottom: Math.round(b.bottom - box.top),
+        stroke: getComputedStyle(p2).stroke };
+    });
+    const labels = Array.from(svg.querySelectorAll(".tr-ylab")).map((t) => t.textContent);
+    return { lines, labels, boxH: Math.round(box.height),
+      legend: Array.from(document.querySelectorAll(".tr-leg")).length };
+  });
+  ok("una linea per grandezza", tr.lines.length === 4, String(tr.lines.length));
+  // the whole failure mode was an axis collapsed to +/-0.6 with every line off
+  // screen: the labels must span the real temperatures
+  ok("la scala verticale copre i valori veri",
+     tr.labels.some((l) => parseFloat(l) > 18) && tr.labels.some((l) => parseFloat(l) < 34),
+     tr.labels.join(","));
+  ok("nessuna linea è fuori dal grafico",
+     tr.lines.every((l) => l.top >= -2 && l.bottom <= tr.boxH + 2),
+     JSON.stringify(tr.lines.map((l) => [l.top, l.bottom])));
+  ok("le linee attraversano tutto il periodo",
+     tr.lines.every((l) => l.w > 200), tr.lines.map((l) => l.w).join());
+  ok("ogni linea ha un colore diverso",
+     new Set(tr.lines.map((l) => l.stroke)).size === 4, tr.lines.map((l) => l.stroke).join(" "));
+  ok("le linee non sono piatte", tr.lines.every((l) => l.h > 5), tr.lines.map((l) => l.h).join());
+  ok("la legenda ha una voce per linea", tr.legend === 4, String(tr.legend));
 
   // ---- sides of a room ----------------------------------------------------
   console.log("\n== LATI DELLA STANZA ==");

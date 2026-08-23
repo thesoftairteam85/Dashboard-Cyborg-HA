@@ -96,7 +96,23 @@ const hass={states,
     if(m.type==="config/area_registry/list") return AREA.map(([area_id,name,icon])=>({area_id,name,icon}));
     if(m.type==="config/device_registry/list") return [];
     if(m.type==="config/entity_registry/list") return entReg;
-    if(m.type==="history/history_during_period") return {};
+    if(m.type==="history/history_during_period"){
+      const out={}; const now=Date.now();
+      const base={"sensor.balcone_temp":28.9,"sensor.soggiorno_temp":26.3,
+                  "sensor.bagno_temp":24.8,"sensor.camera_temp":21.8};
+      for(const id of m.entity_ids||[]){
+        const b=base[id]; if(b===undefined){out[id]=[];continue;}
+        const pts=[];
+        for(let i=0;i<48;i++){
+          // deterministic wiggle: no Math.random, so the screenshots are stable
+          const t=now-(48-i)*1800000;
+          const v=b+Math.sin(i/6+b)*2.4+Math.cos(i/11)*0.9;
+          pts.push({lu:t/1000,s:v.toFixed(2)});
+        }
+        out[id]=pts;
+      }
+      return out;
+    }
     if(m.type==="cyborg_dashboard/notifications") return {available:true,notifications:[
       {id:"cy-9",ts:new Date(Date.now()-90*1000).toISOString(),source:"sent",channel:"telegram",
        channel_label:"Telegram",title:"Allarme sicurezza",message:"Movimento rilevato in salotto alle 03:14. Videocamera TY1.",service:"notify.send_message"},
@@ -179,6 +195,16 @@ window.__mount=(dash,opts)=>{
           if(opts.openTree){el._flowOpen={flowcard:true};}
           if(opts.monitor){sec.items.push({id:"moncard",type:"monitor",entity_id:"",name:"",size:"lg",
             appearance:{},states:{},actions:{},grid_entity:"sensor.rete_potenza",limit_w:3300,groups:[],max_per_group:8});}
+        }
+        if(opts&&opts.rooms){ el._addRoomSection(); }
+        if(opts&&opts.trend){
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"trcard",type:"trend",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},hours:24,y_min:null,y_max:null,
+            series:[{entity:"sensor.balcone_temp",name:"Esterna",color:"#00e5ff"},
+                    {entity:"sensor.soggiorno_temp",name:"Soggiorno",color:"#ffd166"},
+                    {entity:"sensor.bagno_temp",name:"Bagno",color:"#06d6a0"},
+                    {entity:"sensor.camera_temp",name:"Soppalco",color:"#c77dff"}]});
         }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];

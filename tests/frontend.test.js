@@ -1492,6 +1492,68 @@ console.log("\n== 20. SOGLIE CONFIGURABILI ==");
   delete states["sensor.pf_neg"];
 }
 
+console.log("\n== 21. CARD STANZA ==");
+{
+  el._registry = {
+    areas: [{ area_id: "soggiorno", name: "Soggiorno", icon: "mdi:sofa" },
+            { area_id: "bagno", name: "Bagno", icon: null }],
+    byArea: { soggiorno: ["light.sog_1", "light.sog_2", "climate.sog", "cover.sog_tap",
+                          "switch.sog_presa", "sensor.sog_t", "sensor.sog_h",
+                          "sensor.sog_rssi", "binary_sensor.sog_porta"],
+              bagno: [] },
+    entityArea: {}, category: { "sensor.sog_rssi": "diagnostic" } };
+  states["light.sog_1"] = S("on", { friendly_name: "Faretti", supported_color_modes: ["brightness"], brightness: 180 });
+  states["light.sog_2"] = S("off", { friendly_name: "Piantana", supported_color_modes: ["hs"] });
+  states["climate.sog"] = S("heat", { friendly_name: "Termostato", current_temperature: 21.4, temperature: 22 });
+  states["cover.sog_tap"] = S("open", { friendly_name: "Tapparella", current_position: 70 });
+  states["switch.sog_presa"] = S("on", { friendly_name: "Presa TV" });
+  states["sensor.sog_t"] = S("21.4", { friendly_name: "Soggiorno Temperatura", device_class: "temperature", unit_of_measurement: "°C" });
+  states["sensor.sog_h"] = S("47", { friendly_name: "Soggiorno Umidità", device_class: "humidity", unit_of_measurement: "%" });
+  states["sensor.sog_rssi"] = S("-58", { friendly_name: "RSSI" });
+  states["binary_sensor.sog_porta"] = S("off", { friendly_name: "Porta", device_class: "door" });
+
+  const card = { id: "rc1", type: "room", entity_id: "", name: "Soggiorno", size: "md",
+    appearance: {}, states: {}, actions: {}, area: "soggiorno", hidden: [], max_readings: 4, show_others: true };
+  const h = el._roomCardBody(card);
+  ok("la card raccoglie i dispositivi dell'area", el._roomCardEntities(card).length === 8,
+     String(el._roomCardEntities(card).length));
+  ok("le entità di diagnostica restano fuori", !el._roomCardEntities(card).includes("sensor.sog_rssi"));
+  ok("le letture numeriche vanno in testa", h.includes("rc-strip") && h.includes("21.4"));
+  ok("le luci hanno il loro blocco con il conteggio acceso", h.includes("Luci") && h.includes(">1/2<"),
+     (h.match(/<em>[^<]*<\/em>/g) || []).join());
+  ok("il clima mostra attuale e impostata", h.includes("21.4°") && h.includes("22°"));
+  ok("la tapparella ha apri, ferma e chiudi",
+     h.includes("open_cover") && h.includes("stop_cover") && h.includes("close_cover"));
+  ok("la tapparella non usa turn_on", !h.includes("cover|turn_on"));
+  ok("la posizione della tapparella è mostrata", h.includes("70%"));
+  ok("le prese sono comandabili", h.includes("data-toggle-entity=\"switch.sog_presa\""));
+  ok("c'è lo spegnimento delle luci della stanza", h.includes('data-room-lights-off="soggiorno"'));
+  ok("una luce dimmerabile ha il cursore", h.includes('data-light-bri="light.sog_1"'));
+  ok("una luce a colori offre il pannello", h.includes('data-light-open="light.sog_2"'));
+
+  card.hidden = ["switch.sog_presa", "light.sog_2"];
+  const h2 = el._roomCardBody(card);
+  ok("nascondere un dispositivo lo toglie dalla card", !h2.includes("Presa TV") && !h2.includes("Piantana"));
+  ok("gli altri restano", h2.includes("Faretti"));
+  card.hidden = [];
+
+  card.show_others = false;
+  ok("il gruppo Altro si può togliere", !el._roomCardBody(card).includes("Altro"));
+  card.show_others = true;
+
+  card.max_readings = 0;
+  ok("le letture in testa si possono azzerare", !el._roomCardBody(card).includes("rc-strip"));
+  card.max_readings = 4;
+
+  ok("un'area vuota lo dice", el._roomCardBody({ ...card, area: "bagno" }).includes("Nessun dispositivo"));
+  ok("senza area la card spiega cosa fare", el._roomCardBody({ ...card, area: null }).includes("Collega quest"));
+  ok("card stanza: nessun undefined", !/>undefined</.test(h) && !h.includes("[object"));
+
+  for (const id of ["light.sog_1","light.sog_2","climate.sog","cover.sog_tap","switch.sog_presa",
+                    "sensor.sog_t","sensor.sog_h","sensor.sog_rssi","binary_sensor.sog_porta"]) delete states[id];
+  el._registry = null;
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

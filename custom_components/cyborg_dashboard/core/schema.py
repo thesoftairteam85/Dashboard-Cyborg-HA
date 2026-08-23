@@ -275,6 +275,17 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if result.get("type") == "people":
         people = result.get("people")
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
+    if result.get("type") == "room":
+        area = result.get("area")
+        result["area"] = area if isinstance(area, str) and area else None
+        hidden = result.get("hidden")
+        result["hidden"] = ([h for h in hidden if isinstance(h, str) and "." in h][:200]
+                            if isinstance(hidden, list) else [])
+        try:
+            result["max_readings"] = max(0, min(8, int(float(result.get("max_readings", 4)))))
+        except (TypeError, ValueError):
+            result["max_readings"] = 4
+        result["show_others"] = bool(result.get("show_others", True))
     if result.get("type") == "monitor":
         # Per-group threshold overrides. Only known groups and known keys
         # survive; a value that will not parse is dropped so the panel falls

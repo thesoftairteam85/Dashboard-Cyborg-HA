@@ -797,6 +797,7 @@ const CARD_TYPES = [
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
+  { k: "room", l: "Stanza", solo: true, d: "Una stanza intera in una card: luci, clima, aperture e sensori dell'area, con i comandi." },
   { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
   { k: "irrigation", l: "Irrigazione", solo: true, d: "Zone di irrigazione: avvio a tempo garantito da Home Assistant, umidità del terreno, programmi." },
@@ -954,9 +955,10 @@ function cameraStream(entityId, st) {
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation", "trend"]);
+  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room"]);
 
 const COMPOSITE_META = {
+  room:          ["Stanza", "Dispositivi della stanza", "mdi:home-floor-g", "md"],
   trend:         ["Confronto andamenti", "Storico a confronto", "mdi:chart-multiple", "lg"],
   lights:        ["Luci", "Illuminazione della casa", "mdi:lightbulb-group", "lg"],
   irrigation:    ["Irrigazione", "Zone e programmi", "mdi:sprinkler-variant", "lg"],
@@ -1276,6 +1278,14 @@ class CyborgDashboard extends HTMLElement {
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
         }
+        if (it.type === "room") {
+          for (const id of this._roomCardEntities(it)) {
+            const rs = this._hass.states[id];
+            parts.push(id + "=" + (rs ? rs.state + ":" + (rs.attributes.brightness || "")
+              + ":" + (rs.attributes.current_position ?? "") : "?"));
+          }
+          parts.push("rl:" + JSON.stringify(this._lightOpen || {}));
+        }
         if (it.type === "trend") {
           parts.push("tr:" + (it.hours || 24) + ":" + this._trendSeries(it).map((r) => {
             const ts = this._hass.states[r.entity];
@@ -1459,6 +1469,37 @@ class CyborgDashboard extends HTMLElement {
       if (base.seed === "monitor") { /* wired by the user in the card editor */ }
       if (base.seed === "economy") this._detectEconomy(card);
     }
+    this._page().sections.push(section);
+    this._selected = { kind: "section", sectionId: section.id };
+    this._touch();
+  }
+
+  /**
+   * One card per Home Assistant area, in a single Stanze section.
+   *
+   * Building this by hand is twelve trips through the card editor for a normal
+   * flat, and every one of them is the same three choices. The areas are
+   * already maintained in Home Assistant; this just projects them.
+   */
+  async _addRoomSection() {
+    // The registry is not loaded on a sections page, and making the user click
+    // twice for no visible reason is the kind of thing that reads as broken.
+    if (!this._registry) await this._loadRegistry();
+    const areas = (this._registry && this._registry.areas) || [];
+    if (!areas.length) {
+      this._error = "Nessuna area configurata in Home Assistant (Impostazioni → Aree)";
+      this._touch(true);
+      return;
+    }
+    const section = { id: uid("sec"), title: "Stanze", icon: "mdi:home-group",
+      accent: "#06d6a0", collapsed: false,
+      items: areas.map((a) => ({
+        id: uid("card"), type: "room", entity_id: "",
+        name: a.name || a.area_id, size: "md",
+        appearance: { icon: a.icon || roomIconFor(a.name || a.area_id) },
+        states: {}, actions: {},
+        area: a.area_id, hidden: [], max_readings: 4, show_others: true,
+      })) };
     this._page().sections.push(section);
     this._selected = { kind: "section", sectionId: section.id };
     this._touch();
@@ -3214,6 +3255,127 @@ class CyborgDashboard extends HTMLElement {
       });
   }
 
+  // ------------------------------------------------------------ stanza ---
+
+  /**
+   * One room, with its devices grouped by what they do.
+   *
+   * Bound to a Home Assistant area rather than to a hand-picked list: an area
+   * is the thing the user already maintains, and a device moved into it
+   * appears here without anyone editing the dashboard. Diagnostic entities are
+   * excluded, and anything explicitly hidden stays hidden — the same exclusion
+   * list the 3D map uses, so a device silenced in one place is silenced in
+   * both.
+   */
+  _roomCardEntities(item) {
+    if (!this._registry) return [];
+    const hidden = new Set(Array.isArray(item.hidden) ? item.hidden : []);
+    const cat = this._registry.category || {};
+    return (this._registry.byArea[item.area] || []).filter((id) => {
+      if (hidden.has(id) || cat[id]) return false;
+      const st = this._hass.states[id];
+      return !!st && st.state !== "unavailable";
+    });
+  }
+
+  _roomCardBody(item) {
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+    if (!item.area) {
+      const areas = (this._registry && this._registry.areas) || [];
+      return `<div class="ov-empty"><ha-icon icon="mdi:home-search-outline"></ha-icon>
+        <span>Collega quest card a un'area di Home Assistant dall'editor.${
+          areas.length ? ` Ne sono disponibili ${areas.length}.` : ""}</span></div>`;
+    }
+    const ids = this._roomCardEntities(item);
+    if (!ids.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:home-outline"></ha-icon>
+        <span>${this._registry ? "Nessun dispositivo in quest'area." : "Lettura del registro…"}</span></div>`;
+    }
+
+    // Readings go in the header strip, controls go in the body: a temperature
+    // is something you look at, a light is something you press.
+    const readings = [], lights = [], covers = [], climates = [], switches = [], others = [];
+    for (const id of ids) {
+      const d = domainOf(id);
+      const st = this._hass.states[id];
+      if (d === "light") lights.push(id);
+      else if (d === "cover") covers.push(id);
+      else if (d === "climate" || d === "fan" || d === "humidifier") climates.push(id);
+      else if (d === "switch" || d === "input_boolean") switches.push(id);
+      else if (d === "sensor" || d === "binary_sensor") {
+        if (d === "sensor" && Number.isFinite(parseFloat(st.state))) readings.push(id);
+        else others.push(id);
+      } else others.push(id);
+    }
+    const onLights = lights.filter((id) => this._hass.states[id].state === "on").length;
+
+    // ?? and not ||: 0 is a legitimate choice ("no readings in the header")
+    // and || would quietly turn it back into 4.
+    const strip = readings.slice(0, item.max_readings ?? 4).map((id) => {
+      const st = this._hass.states[id];
+      const n = parseFloat(st.state);
+      return `<button class="rc-read" data-more-info="${esc(id)}">
+        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+        <strong>${esc(Math.abs(n) >= 100 ? Math.round(n) : n.toFixed(1))}<i>${esc(st.attributes.unit_of_measurement || "")}</i></strong>
+        <small>${esc(String(st.attributes.friendly_name || id).replace(/\s*\b(temperatura|umidit[àa]|potenza)\b\s*/i, "").trim() || (st.attributes.device_class || ""))}</small>
+      </button>`;
+    }).join("");
+
+    const block = (title, icon, list, render) => list.length ? `<section class="rc-block">
+        <header><ha-icon icon="${esc(icon)}"></ha-icon><strong>${esc(title)}</strong><em>${list.length}</em></header>
+        ${list.map(render).join("")}
+      </section>` : "";
+
+    const toggleRow = (id) => {
+      const st = this._hass.states[id];
+      const on = ON_STATES.has(st.state);
+      return `<button class="rc-row${on ? " on" : ""}" data-toggle-entity="${esc(id)}">
+        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+        <span>${esc(st.attributes.friendly_name || id)}</span>
+        <small>${esc(stateWords(st.state, st.attributes.device_class))}</small>
+      </button>`;
+    };
+    const coverRow = (id) => {
+      const st = this._hass.states[id];
+      const pos = st.attributes.current_position;
+      return `<div class="rc-cover">
+        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+        <span>${esc(st.attributes.friendly_name || id)}</span>
+        <small>${esc(pos !== undefined ? pos + "%" : stateWords(st.state, st.attributes.device_class))}</small>
+        <button class="mini" data-cover-cmd="${esc(id)}|open_cover" title="Apri"><ha-icon icon="mdi:chevron-up"></ha-icon></button>
+        <button class="mini" data-cover-cmd="${esc(id)}|stop_cover" title="Ferma"><ha-icon icon="mdi:stop"></ha-icon></button>
+        <button class="mini" data-cover-cmd="${esc(id)}|close_cover" title="Chiudi"><ha-icon icon="mdi:chevron-down"></ha-icon></button>
+      </div>`;
+    };
+    const climateRow = (id) => {
+      const st = this._hass.states[id];
+      const cur = st.attributes.current_temperature;
+      const set = st.attributes.temperature;
+      const on = st.state !== "off" && st.state !== "unavailable";
+      return `<button class="rc-row${on ? " on" : ""}" data-more-info="${esc(id)}">
+        <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+        <span>${esc(st.attributes.friendly_name || id)}</span>
+        <small>${esc([cur !== undefined ? cur + "°" : null, set !== undefined ? "→ " + set + "°" : null, stateWords(st.state)]
+          .filter(Boolean).join(" "))}</small>
+      </button>`;
+    };
+
+    return `<div class="rc">
+      ${strip ? `<div class="rc-strip">${strip}</div>` : ""}
+      ${lights.length ? `<section class="rc-block">
+        <header><ha-icon icon="mdi:lightbulb-group"></ha-icon><strong>Luci</strong>
+          <em>${onLights}/${lights.length}</em>
+          <button class="act-off" data-room-lights-off="${esc(item.area)}" title="Spegni le luci"><ha-icon icon="mdi:power"></ha-icon></button>
+        </header>
+        ${lights.map((id) => this._lightRow(id, item)).join("")}
+      </section>` : ""}
+      ${block("Clima", "mdi:thermostat", climates, climateRow)}
+      ${block("Aperture", "mdi:window-shutter", covers, coverRow)}
+      ${block("Prese e interruttori", "mdi:power-plug", switches, toggleRow)}
+      ${item.show_others === false ? "" : block("Altro", "mdi:shape-outline", others.slice(0, 8), toggleRow)}
+    </div>`;
+  }
+
   // --------------------------------------------------- confronto andamenti ---
 
   /**
@@ -3307,8 +3469,14 @@ class CyborgDashboard extends HTMLElement {
       return `<div class="ov-empty"><ha-icon icon="mdi:chart-line"></ha-icon>
         <span>Nessun dato registrato nel periodo scelto.</span></div>`;
     }
-    if (Number.isFinite(Number(item.y_min))) lo = Number(item.y_min);
-    if (Number.isFinite(Number(item.y_max))) hi = Number(item.y_max);
+    // Number(null) is 0 and Number("") is 0, both of which are finite: testing
+    // the coerced value treated "no manual bound" as a bound of zero and
+    // collapsed the whole scale to +/-0.6, so no line was ever on screen.
+    const bound = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v))
+      ? null : Number(v));
+    const yMin = bound(item.y_min), yMax = bound(item.y_max);
+    if (yMin !== null) lo = yMin;
+    if (yMax !== null) hi = yMax;
     if (hi - lo < 0.5) { const mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5; }
     const pad = (hi - lo) * 0.08;
     lo -= pad; hi += pad;
@@ -4258,6 +4426,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "monitor") return this._monitorBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
+    if (type === "room") return this._roomCardBody(item);
     if (type === "trend") return this._trendBody(item);
     if (type === "lights") return this._lightsBody(item);
     if (type === "irrigation") return this._irrigationBody(item);
@@ -4631,6 +4800,41 @@ class CyborgDashboard extends HTMLElement {
         <label>MASSIMO IN ELENCO<input type="number" min="3" max="60" data-prop="max" value="${card.max || 8}"></label>
         <button class="secondary wide" data-notif-clear><ha-icon icon="mdi:notification-clear-all"></ha-icon> SVUOTA L'ARCHIVIO AVVISI</button>
       </div>`;
+    }
+    if (card.type === "room") {
+      if (!this._registry && !this._registryLoading) this._loadRegistry();
+      const areas = (this._registry && this._registry.areas) || [];
+      const ids = card.area ? this._roomCardEntities(card) : [];
+      const cat = (this._registry && this._registry.category) || {};
+      const pool = card.area && this._registry ? (this._registry.byArea[card.area] || []).filter((id) => !cat[id]) : [];
+      const hidden = new Set(Array.isArray(card.hidden) ? card.hidden : []);
+      return `<div class="section">
+        <strong>STANZA</strong>
+        <label>AREA DI HOME ASSISTANT<select data-prop="area">
+          <option value="">— scegli un'area —</option>
+          ${areas.map((a) => `<option value="${esc(a.area_id)}" ${card.area === a.area_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+        </select></label>
+        <span class="hint">${areas.length
+          ? "La card segue l'area: un dispositivo spostato in questa stanza in Home Assistant compare qui da solo, senza toccare la dashboard."
+          : "Nessuna area configurata in Home Assistant. Creale in Impostazioni → Aree."}</span>
+        ${card.area ? `<span class="hint">${ids.length} dispositivi visibili su ${pool.length} nell'area.</span>` : ""}
+      </div>
+      ${card.area ? `<div class="section">
+        <strong>COSA MOSTRARE</strong>
+        <span class="hint">Le entità di diagnostica e configurazione sono già escluse. Qui togli quelle che non ti interessano.</span>
+        <div class="room-entities">${pool.map((id) => {
+          const shown = !hidden.has(id);
+          const st = this._hass.states[id];
+          return `<div class="room-ent${shown ? "" : " hidden"}">
+            <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+            <span>${esc((st && st.attributes.friendly_name) || id)}</span>
+            <button class="mini" data-roomcard-vis="${esc(id)}" title="${shown ? "Nascondi" : "Mostra"}">
+              <ha-icon icon="${shown ? "mdi:eye" : "mdi:eye-off"}"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Area vuota.</div>'}</div>
+        <label>LETTURE IN TESTA<input type="number" min="0" max="8" data-prop="max_readings" value="${card.max_readings ?? 4}"></label>
+        <label class="check"><input type="checkbox" data-prop="show_others" ${card.show_others !== false ? "checked" : ""}> Mostra anche il gruppo "Altro"</label>
+      </div>` : ""}`;
     }
     if (card.type === "trend") {
       const numeric = Object.keys(this._hass.states).filter((id) => {
@@ -5293,7 +5497,8 @@ class CyborgDashboard extends HTMLElement {
             ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
             ${this._editing ? `${floorplan
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
-                 : '<button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>'}
+                 : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
+                    <button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>`}
                <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
               <ha-icon icon="${this._editing ? "mdi:eye-outline" : "mdi:pencil-outline"}"></ha-icon>
@@ -5349,6 +5554,8 @@ class CyborgDashboard extends HTMLElement {
     };
     const save = q("[data-save]");
     if (save) save.onclick = () => this._save();
+    const addRooms = q("[data-add-rooms]");
+    if (addRooms) addRooms.onclick = () => this._addRoomSection();
     const addSec = q("[data-add-section]");
     if (addSec) addSec.onclick = () => this._addSection(null);
 
@@ -5569,6 +5776,33 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-roomcard-vis]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-roomcard-vis");
+        const hidden = Array.isArray(card.hidden) ? card.hidden.slice() : [];
+        card.hidden = hidden.includes(id) ? hidden.filter((x) => x !== id) : hidden.concat([id]);
+        this._touch();
+      };
+    });
+    all("[data-room-lights-off]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const area = el.getAttribute("data-room-lights-off");
+        const ids = ((this._registry && this._registry.byArea[area]) || [])
+          .filter((id) => domainOf(id) === "light" && this._hass.states[id]
+            && this._hass.states[id].state === "on");
+        if (ids.length) this._hass.callService("light", "turn_off", { entity_id: ids });
+      };
+    });
+    all("[data-cover-cmd]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, service] = el.getAttribute("data-cover-cmd").split("|");
+        // cover has no turn_on/turn_off: open_cover / close_cover / stop_cover
+        this._hass.callService("cover", service, { entity_id: id });
+      };
+    });
     all("[data-limit]").forEach((el) => {
       el.onchange = () => {
         if (!card) return;
@@ -7431,6 +7665,35 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-hud-btn ha-icon{--mdc-icon-size:17px;display:block}
 .fp-hint{position:absolute;right:14px;bottom:18px;font:10px ui-monospace,monospace;letter-spacing:1.4px;opacity:.4;pointer-events:none}
 
+.rc{margin-top:12px;display:flex;flex-direction:column;gap:10px}
+.rc-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(74px,1fr));gap:6px}
+.rc-read{display:flex;flex-direction:column;align-items:center;gap:1px;padding:8px 5px;border-radius:10px;
+  background:color-mix(in srgb,var(--accent) 7%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent);color:var(--primary-text-color)}
+.rc-read ha-icon{--mdc-icon-size:15px;color:var(--accent);opacity:.8}
+.rc-read strong{font-size:16px;font-weight:700;line-height:1.1}
+.rc-read strong i{font-size:9px;font-style:normal;opacity:.5;margin-left:1px}
+.rc-read small{font:8.5px ui-monospace,monospace;letter-spacing:.6px;opacity:.42;text-transform:uppercase;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-block{display:flex;flex-direction:column;gap:3px}
+.rc-block>header{display:flex;align-items:center;gap:7px;padding:4px 2px 2px}
+.rc-block>header ha-icon{--mdc-icon-size:14px;opacity:.5}
+.rc-block>header strong{flex:1;font:10px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;opacity:.68}
+.rc-block>header em{font-style:normal;font:10px ui-monospace,monospace;opacity:.45}
+.rc-block>header .act-off{--gc:var(--accent)}
+.rc-row{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border-radius:9px;text-align:left;
+  background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
+.rc-row.on{background:color-mix(in srgb,var(--accent) 11%,transparent);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
+.rc-row:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+.rc-row ha-icon{--mdc-icon-size:17px;color:#93a3b5;flex-shrink:0}
+.rc-row.on ha-icon{color:var(--accent)}
+.rc-row span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-row small{font:9.5px ui-monospace,monospace;letter-spacing:.5px;opacity:.5;text-transform:uppercase;flex-shrink:0}
+.rc-cover{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:9px;background:rgba(255,255,255,.03)}
+.rc-cover>ha-icon{--mdc-icon-size:17px;color:#8ecae6;flex-shrink:0}
+.rc-cover span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-cover small{font:9.5px ui-monospace,monospace;opacity:.5;flex-shrink:0}
+@media(max-width:640px){.rc-strip{grid-template-columns:repeat(auto-fit,minmax(66px,1fr))}}
+
 .tr{margin-top:12px;display:flex;flex-direction:column;gap:9px}
 .tr-tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tr-svg{width:100%;height:auto;max-height:240px;display:block;overflow:visible}
@@ -7439,14 +7702,14 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .tr-xlab{fill:currentColor;opacity:.3;font:9px ui-monospace,monospace}
 .tr-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;
   filter:drop-shadow(0 0 5px color-mix(in srgb,currentColor 40%,transparent))}
-.tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px}
+.tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px}
 .tr-leg{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;text-align:left;
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
 .tr-leg:hover{border-color:color-mix(in srgb,var(--sc) 45%,transparent);background:color-mix(in srgb,var(--sc) 9%,transparent)}
 .tr-leg i{width:11px;height:3px;border-radius:99px;background:var(--sc);flex-shrink:0;box-shadow:0 0 7px var(--sc)}
 .tr-leg-name{flex:1;min-width:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tr-leg-now{font:11.5px ui-monospace,monospace;font-weight:700;color:var(--sc)}
-.tr-leg-range{font:9px ui-monospace,monospace;opacity:.35;white-space:nowrap}
+.tr-leg-range{font:8.5px ui-monospace,monospace;opacity:.3;white-space:nowrap}
 .tr-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 .tr-color input{width:26px;height:26px;padding:0;border:0;background:none;cursor:pointer}
 @media(max-width:640px){

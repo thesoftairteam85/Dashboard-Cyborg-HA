@@ -4,6 +4,37 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.19.0] - 2026-08-23
+
+La sezione Stanze, e il confronto andamenti che ora disegna davvero le linee.
+
+### Nuova sezione: Stanze
+- **Una card per ogni stanza**, con un solo pulsante: *STANZE* nella barra in
+  alto crea una card per ogni area di Home Assistant.
+- Ogni card raccoglie i dispositivi della sua area e li mette in ordine di
+  significato: le **letture** (temperatura, umidità, potenza) in testa, poi
+  **Luci** — con intensità, colore e temperatura per chi le supporta — **Clima**
+  con temperatura attuale e impostata, **Aperture** con apri/ferma/chiudi e la
+  posizione, **Prese e interruttori**, e infine *Altro*.
+- La card **segue l'area**: un dispositivo spostato in quella stanza in Home
+  Assistant compare qui da solo, senza toccare la dashboard. Le entità di
+  diagnostica e configurazione restano fuori, e ogni dispositivo ha un occhio
+  per nasconderlo.
+- Spegnimento di tutte le luci della stanza dall'intestazione del gruppo.
+
+### Correzioni
+- **Il confronto andamenti non disegnava nessuna linea.** Con la scala
+  verticale in automatico il limite era `null`, e `Number(null)` è `0` — un
+  numero finito. Il grafico si tarava quindi fra -0,6 e +0,6 e tutte le linee
+  finivano fuori dal riquadro. Ora "automatico" è distinto da "zero".
+- La legenda del grafico troncava i nomi a poche lettere.
+- `max_readings: 0` sulla card stanza tornava a 4: `||` tratta lo zero come
+  "non impostato", e zero letture in testa è una scelta legittima.
+
+### Verifica
+- 544 asserzioni sulla logica del pannello, schema completo, **71 asserzioni
+  geometriche misurate** in Chromium headless.
+
 ## [0.18.0] - 2026-08-23
 
 Lati della stanza, soglie che decidi tu, confronto degli andamenti.
