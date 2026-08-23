@@ -68,6 +68,7 @@ Dashboard**. Il pannello compare nella barra laterale.
         cyborg-dashboard.js   pannello completo (web component)
     tests/
       schema.test.py     schema e migrazioni
+      notifications.test.py  registro avvisi: letto/da leggere ed eliminazione
       frontend.test.js   logica del pannello
       visual/            rendering reale in Chromium headless
 
@@ -86,6 +87,7 @@ Dashboard**. Il pannello compare nella barra laterale.
 ## Test
 
     python3 tests/schema.test.py       # schema e migrazioni
+    python3 tests/notifications.test.py  # registro avvisi
     node    tests/frontend.test.js     # logica del pannello
     (cd tests/visual && python3 -m http.server 8899 &) && node tests/visual/shoot.js
 

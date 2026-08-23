@@ -2305,6 +2305,106 @@ console.log("\n== 28. GRAFICO CHE SEGUE LE STANZE ==");
   ok("stato ripristinato dopo la sezione 28", el._registry === null);
 }
 
+console.log("\n== 29. AVVISI: LETTI, DA LEGGERE, ELIMINATI ==");
+{
+  const sent = [
+    { id: "cy-1", title: "Lavatrice", message: "Ciclo terminato.", channel: "telegram",
+      channel_label: "Telegram", source: "sent", ts: new Date(Date.now() - 3600e3).toISOString(), read: false },
+    { id: "cy-2", title: "Allarme", message: "Porta aperta.", channel: "telegram",
+      channel_label: "Telegram", source: "sent", ts: new Date(Date.now() - 7200e3).toISOString(), read: true },
+    { id: "cy-3", title: "Ciao", message: "Accendi le luci", channel: "telegram",
+      channel_label: "Telegram", source: "received", ts: new Date(Date.now() - 60e3).toISOString(), read: false },
+  ];
+  el._sentNotifs = JSON.parse(JSON.stringify(sent));
+  el._sentPending = false;
+  el._notifs = {};
+  el._notifFilter = "";
+
+  const card = { id: "nc", type: "notifications", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {}, max: 8 };
+  let body = el._notificationsBody(card);
+
+  ok("ogni avviso ha il suo pulsante di eliminazione",
+     ["cy-1", "cy-2", "cy-3"].every(id => body.includes(`data-notif-del="${id}"`)));
+  ok("ogni avviso si può segnare letto o da leggere",
+     ["cy-1", "cy-2", "cy-3"].every(id => body.includes(`data-notif-read="${id}"`)));
+  ok("il già letto è marcato come tale", body.includes('data-notif-read="cy-2" data-read="1"'));
+  ok("i non letti portano il pallino", (body.match(/notif-dot/g) || []).length === 2,
+     String((body.match(/notif-dot/g) || []).length));
+  ok("il contatore dei da leggere è giusto", body.includes("DA LEGGERE · 2"), body.slice(0, 0) || "");
+  ok("c'è il filtro e le azioni di gruppo",
+     body.includes('data-notif-filter="unread"') && body.includes("data-notif-readall")
+     && body.includes("data-notif-purge"));
+
+  // -- filter --
+  el._notifFilter = "unread";
+  body = el._notificationsBody(card);
+  ok("il filtro mostra solo i da leggere",
+     body.includes('data-notif-del="cy-1"') && !body.includes('data-notif-del="cy-2"'));
+  ok("il filtro non cancella niente", el._sentNotifs.length === 3);
+  el._notifFilter = "";
+
+  // -- marking read: local first, server after --
+  const calls = [];
+  const realWS = el._hass.callWS;
+  el._hass.callWS = (m) => { calls.push(m); return Promise.resolve({}); };
+
+  el._notifRead(["cy-1"], true);
+  ok("segnare letto aggiorna subito la copia locale",
+     el._sentNotifs.find(n => n.id === "cy-1").read === true);
+  ok("e lo dice al server, non al browser",
+     calls.some(c => c.type === "cyborg_dashboard/notifications/read"
+       && c.ids && c.ids[0] === "cy-1" && c.read === true), JSON.stringify(calls));
+
+  el._notifRead(["cy-1"], false);
+  ok("si può rimettere fra i da leggere",
+     el._sentNotifs.find(n => n.id === "cy-1").read === false);
+
+  calls.length = 0;
+  el._notifRead(null, true);
+  ok("segna tutti letti li prende tutti", el._sentNotifs.every(n => n.read));
+  ok("e manda ids nullo, non l'elenco",
+     calls[0].type === "cyborg_dashboard/notifications/read" && calls[0].ids === null);
+
+  // -- delete one --
+  el._sentNotifs = JSON.parse(JSON.stringify(sent));
+  calls.length = 0;
+  el._notifDelete(["cy-2"], false);
+  ok("eliminare toglie solo quello indicato",
+     el._sentNotifs.map(n => n.id).join() === "cy-1,cy-3", el._sentNotifs.map(n => n.id).join());
+  ok("l'eliminazione passa dal server",
+     calls[0].type === "cyborg_dashboard/notifications/delete" && calls[0].ids[0] === "cy-2");
+
+  // -- purge only the read ones: the one nobody has seen must survive --
+  el._sentNotifs = JSON.parse(JSON.stringify(sent));
+  calls.length = 0;
+  el._notifDelete(null, true);
+  ok("pulisci i letti non tocca i da leggere",
+     el._sentNotifs.map(n => n.id).join() === "cy-1,cy-3", el._sentNotifs.map(n => n.id).join());
+  ok("la pulizia dichiara read_only al server", calls[0].read_only === true);
+
+  // -- everything read and filtered: an explicit empty, not a blank card --
+  el._sentNotifs.forEach(n => { n.read = true; });
+  el._notifFilter = "unread";
+  body = el._notificationsBody(card);
+  ok("con tutto letto il filtro spiega perché è vuoto",
+     body.includes("Nessun avviso da leggere"));
+  ok("ma la barra resta per tornare a TUTTE", body.includes('data-notif-filter=""'));
+  el._notifFilter = "";
+
+  // -- persistent notifications are Home Assistant's: dismiss, not delete --
+  el._notifs = { n1: { notification_id: "n1", title: "Matter", message: "Nuovo dispositivo" } };
+  body = el._notificationsBody(card);
+  ok("le notifiche persistenti hanno il tasto per eliminarle",
+     body.includes('data-notif-dismiss="n1"'));
+  ok("ma non fingono uno stato di lettura che non hanno",
+     !body.includes('data-notif-read="n1"'));
+
+  el._hass.callWS = realWS;
+  el._notifs = {}; el._sentNotifs = null; el._sentPending = false; el._notifFilter = "";
+  ok("stato ripristinato dopo la sezione 29", el._sentNotifs === null);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

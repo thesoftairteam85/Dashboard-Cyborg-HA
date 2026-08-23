@@ -1489,6 +1489,10 @@ class CyborgDashboard extends HTMLElement {
           parts.push("nt:" + Object.keys(this._notifs || {}).length
             + ":" + ((this._sentNotifs || [])[0] || {}).id
             + ":" + (this._sentNotifs || []).length
+            // read state and the view filter belong in the signature: without
+            // them a change arriving from another screen would not repaint.
+            + ":" + (this._sentNotifs || []).filter((n) => !n.read).length
+            + ":" + (this._notifFilter || "")
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
         }
@@ -3798,39 +3802,48 @@ class CyborgDashboard extends HTMLElement {
     const wantSent = item.show_sent !== false;
     if (wantSent) this._loadSentNotifications();
 
-    const notifs = Object.values(this._notifs || {});
+    const notifs = Object.entries(this._notifs || {});
     const updates = item.show_updates === false ? [] : Object.keys(this._hass.states)
       .filter((id) => id.startsWith("update.") && this._hass.states[id].state === "on")
       .map((id) => this._hass.states[id]);
-    const sent = wantSent ? (this._sentNotifs || []) : [];
+    const all = wantSent ? (this._sentNotifs || []) : [];
+    const unread = all.filter((n) => !n.read).length;
+    const onlyUnread = this._notifFilter === "unread";
+    const sent = onlyUnread ? all.filter((n) => !n.read) : all;
     const now = Date.now();
     const cap = item.max || 8;
 
-    if (!notifs.length && !updates.length && !sent.length) {
+    if (!notifs.length && !updates.length && !all.length) {
       return `<div class="ov-empty ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon>
         <span>${this._sentPending && wantSent
           ? "Lettura degli avvisi..."
           : "Nessun avviso. Sistema in ordine."}</span></div>`;
     }
 
-    const persistentRows = notifs.map((n) => `<div class="notif-row" style="--nc:#ffd166">
+    // Persistent notifications belong to Home Assistant, not to this log, so
+    // there is nothing here to mark as read: the only meaningful action is
+    // dismissing them, which is exactly what the core service does.
+    const persistentRows = notifs.map(([key, n]) => `<div class="notif-row" style="--nc:#ffd166">
         <ha-icon icon="mdi:bell-ring-outline"></ha-icon>
         <div class="notif-txt"><strong>${esc(n.title || "Notifica")}</strong>
           <small>${esc(String(n.message || "").slice(0, 180))}</small></div>
         <span class="notif-when">${esc(agoWords(n.created_at, now))}</span>
+        <button class="notif-x" data-notif-dismiss="${esc(n.notification_id || key)}" title="Elimina"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>`).join("");
 
     const sentRows = sent.slice(0, cap).map((n) => {
       const ch = notifChannel(n.channel);
       const inbound = n.source === "received";
-      return `<div class="notif-row${inbound ? " in" : ""}" style="--nc:${esc(ch.color)}">
+      return `<div class="notif-row${inbound ? " in" : ""}${n.read ? " read" : " unread"}" style="--nc:${esc(ch.color)}">
         <ha-icon icon="${esc(inbound ? "mdi:message-reply-text" : ch.icon)}"></ha-icon>
-        <div class="notif-txt">
-          <strong>${esc(n.title || (inbound ? "Messaggio ricevuto" : n.channel_label || ch.l))}</strong>
+        <div class="notif-txt" data-notif-read="${esc(n.id)}" data-read="${n.read ? "1" : "0"}"
+             title="${n.read ? "Segna come da leggere" : "Segna come letto"}">
+          <strong>${n.read ? "" : '<i class="notif-dot"></i>'}${esc(n.title || (inbound ? "Messaggio ricevuto" : n.channel_label || ch.l))}</strong>
           <small>${esc(String(n.message || "").slice(0, 180))}</small>
           <em>${esc(inbound ? "ricevuto da " + (n.channel_label || ch.l) : "inviato via " + (n.channel_label || ch.l))}</em>
         </div>
         <span class="notif-when">${esc(agoWords(n.ts, now))}</span>
+        <button class="notif-x" data-notif-del="${esc(n.id)}" title="Elimina questo avviso"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>`;
     }).join("");
 
@@ -3840,10 +3853,24 @@ class CyborgDashboard extends HTMLElement {
           <small>${esc(updates.slice(0, 3).map((u) => u.attributes.friendly_name || "").join(" · "))}</small></div>
       </div>` : "";
 
+    const bar = all.length ? `<div class="notif-bar">
+        <div class="cf-chips">
+          <button class="${onlyUnread ? "" : "on"}" data-notif-filter="">TUTTE · ${all.length}</button>
+          <button class="${onlyUnread ? "on" : ""}" data-notif-filter="unread">DA LEGGERE · ${unread}</button>
+        </div>
+        <span class="notif-acts">
+          ${unread ? '<button class="mini" data-notif-readall><ha-icon icon="mdi:email-open-outline"></ha-icon> SEGNA TUTTI LETTI</button>' : ""}
+          ${all.length - unread ? '<button class="mini" data-notif-purge title="Elimina solo quelli già letti"><ha-icon icon="mdi:broom"></ha-icon> PULISCI I LETTI</button>' : ""}
+        </span>
+      </div>` : "";
+
+    const empty = all.length && !sent.length
+      ? `<div class="ov-empty ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon><span>Nessun avviso da leggere.</span></div>` : "";
+
     const more = sent.length > cap
       ? `<div class="act-more">+${sent.length - cap} avvisi più vecchi</div>` : "";
 
-    return `<div class="notif">${persistentRows}${updateRow}${sentRows}${more}</div>`;
+    return `<div class="notif">${bar}${persistentRows}${updateRow}${sentRows}${empty}${more}</div>`;
   }
 
   /**
@@ -3859,7 +3886,11 @@ class CyborgDashboard extends HTMLElement {
         this._sentNotifs = (res && res.notifications) || [];
         this._sentPending = false;
         this._subscribe("sent", { type: "cyborg_dashboard/notifications/subscribe" }, (ev) => {
-          if (!ev || !ev.notification) return;
+          if (!ev) return;
+          // Two shapes on one channel: a new alert, or "somebody changed the
+          // list somewhere else" — read on the phone, deleted on the tablet.
+          if (ev.reload) { this._refetchNotifications(); return; }
+          if (!ev.notification) return;
           this._sentNotifs = [ev.notification].concat(this._sentNotifs || []).slice(0, 120);
           this._touch(true);
         });
@@ -3872,6 +3903,45 @@ class CyborgDashboard extends HTMLElement {
         this._sentPending = false;
         this._touch(true);
       });
+  }
+
+  /** Re-read the log after it changed on the server. */
+  _refetchNotifications() {
+    this._hass.callWS({ type: "cyborg_dashboard/notifications", limit: 60 })
+      .then((res) => { this._sentNotifs = (res && res.notifications) || []; this._touch(true); })
+      .catch(() => { /* the card keeps what it has rather than blanking */ });
+  }
+
+  /**
+   * Read state and deletions go to the server, never to localStorage.
+   *
+   * An alert read on the phone must be read on the wall tablet too, and it
+   * must survive a browser that clears its storage. Keeping the flag next to
+   * the alert itself is the only version where two screens cannot disagree.
+   *
+   * The local copy is updated immediately so the row responds under the
+   * finger, and the server's broadcast refetch then makes it authoritative:
+   * an optimistic paint that a failed call would leave lying is corrected
+   * within one round trip.
+   */
+  _notifRead(ids, read) {
+    const set = new Set(ids || []);
+    for (const n of this._sentNotifs || []) {
+      if (!ids || set.has(n.id)) n.read = read;
+    }
+    this._touch(true);
+    this._hass.callWS({ type: "cyborg_dashboard/notifications/read", ids: ids || null, read })
+      .catch(() => this._refetchNotifications());
+  }
+
+  _notifDelete(ids, readOnly) {
+    const set = new Set(ids || []);
+    this._sentNotifs = (this._sentNotifs || []).filter((n) =>
+      !(ids ? set.has(n.id) : (readOnly && n.read)));
+    this._touch(true);
+    this._hass.callWS({ type: "cyborg_dashboard/notifications/delete",
+      ids: ids || null, read_only: !!readOnly })
+      .catch(() => this._refetchNotifications());
   }
 
   // ---------------------------------------------------------- comfort ---
@@ -7168,6 +7238,48 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-notif-filter]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        // The filter is a VIEW, kept on the component and not in the saved
+        // document: which alerts you are looking at right now is not a
+        // configuration change, and persisting it would mark the dashboard
+        // dirty every time somebody glanced at the unread list.
+        this._notifFilter = el.getAttribute("data-notif-filter") || "";
+        this._touch(true);
+      };
+    });
+    all("[data-notif-read]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        this._notifRead([el.getAttribute("data-notif-read")], el.getAttribute("data-read") !== "1");
+      };
+    });
+    all("[data-notif-del]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        this._notifDelete([el.getAttribute("data-notif-del")], false);
+      };
+    });
+    all("[data-notif-dismiss]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        // A persistent notification belongs to Home Assistant: the panel does
+        // not own it and must not fake its removal locally.
+        this._hass.callService("persistent_notification", "dismiss",
+          { notification_id: el.getAttribute("data-notif-dismiss") });
+      };
+    });
+    const notifReadAll = q("[data-notif-readall]");
+    if (notifReadAll) notifReadAll.onclick = (ev) => {
+      ev.stopPropagation();
+      this._notifRead(null, true);
+    };
+    const notifPurge = q("[data-notif-purge]");
+    if (notifPurge) notifPurge.onclick = (ev) => {
+      ev.stopPropagation();
+      this._notifDelete(null, true);
+    };
     all("[data-comfort-filter]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
@@ -8899,6 +9011,19 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
    to somebody: dashed border so the direction reads at a glance. */
 .notif-row.in{border-style:dashed;background:transparent}
 .notif-row.upd{--nc:#8ecae6}
+/* Read alerts stay in the list but stop competing for attention: fading is
+   enough, hiding them would make "where did it go" the next question. */
+.notif-row.read{opacity:.5;background:transparent}
+.notif-row.read:hover{opacity:.8}
+.notif-row.unread{box-shadow:inset 2px 0 0 var(--nc,#ffd166)}
+.notif-row [data-notif-read]{cursor:pointer}
+.notif-dot{display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:var(--nc,#ffd166);vertical-align:middle;box-shadow:0 0 7px var(--nc,#ffd166)}
+.notif-x{flex-shrink:0;align-self:flex-start;width:22px;height:22px;padding:0;display:flex;align-items:center;justify-content:center;border-radius:7px;border:1px solid transparent;background:transparent;color:var(--primary-text-color);opacity:.35}
+.notif-x ha-icon{--mdc-icon-size:14px}
+.notif-x:hover{opacity:1;color:#ff6b6b;border-color:color-mix(in srgb,#ff6b6b 45%,transparent)}
+.notif-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:space-between;margin-bottom:2px}
+.notif-acts{display:flex;gap:6px;flex-wrap:wrap}
+.notif-acts .mini{font-size:9.5px}
 
 .ppl{margin-top:12px;display:flex;flex-direction:column;gap:5px}
 .ppl-row{display:flex;align-items:center;gap:9px;width:100%;padding:6px 8px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid transparent;color:var(--primary-text-color);text-align:left;font-weight:500;letter-spacing:0}
@@ -9804,7 +9929,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.25.0";
+const CYBORG_BUILD = "0.26.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

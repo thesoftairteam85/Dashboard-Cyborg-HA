@@ -700,6 +700,100 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== AVVISI: LETTI ED ELIMINATI ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, overview: true });
+  await page.waitForTimeout(900);
+
+  const nf = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".notif-row")).map((r) => {
+      const b = r.getBoundingClientRect();
+      const x = r.querySelector(".notif-x");
+      const xb = x ? x.getBoundingClientRect() : null;
+      return { read: r.classList.contains("read"), unread: r.classList.contains("unread"),
+        // the "updates available" row is derived from update.* entities, not a
+        // stored alert: it correctly has nothing to delete
+        upd: r.classList.contains("upd"),
+        w: Math.round(b.width), right: Math.round(b.right), h: Math.round(b.height),
+        opacity: Number(getComputedStyle(r).opacity),
+        xw: xb ? Math.round(xb.width) : 0, xh: xb ? Math.round(xb.height) : 0,
+        xInside: xb ? (xb.right <= b.right + 1 && xb.left >= b.left) : false };
+    });
+    return { rows, winW: window.innerWidth,
+      filters: document.querySelectorAll("[data-notif-filter]").length,
+      readAll: !!document.querySelector("[data-notif-readall]"),
+      purge: !!document.querySelector("[data-notif-purge]") };
+  });
+  ok("gli avvisi hanno delle righe", nf.rows.length >= 3, String(nf.rows.length));
+  const del = nf.rows.filter((r) => !r.upd);
+  ok("ogni avviso porta il suo pulsante di eliminazione",
+     del.length >= 3 && del.every((r) => r.xw > 0), del.map((r) => r.xw).join());
+  ok("la riga degli aggiornamenti non finge di essere eliminabile",
+     nf.rows.filter((r) => r.upd).every((r) => r.xw === 0));
+  ok("il pulsante sta dentro la riga, non fuori",
+     del.every((r) => r.xInside));
+  ok("il letto è visibilmente più spento del da leggere",
+     nf.rows.some((r) => r.read) && nf.rows.some((r) => r.unread)
+     && Math.max(...nf.rows.filter((r) => r.read).map((r) => r.opacity))
+        < Math.min(...nf.rows.filter((r) => r.unread).map((r) => r.opacity)),
+     nf.rows.map((r) => (r.read ? "L" : "N") + r.opacity).join());
+  ok("nessuna riga deborda", nf.rows.every((r) => r.right <= nf.winW + 1));
+  ok("ci sono i due filtri e le azioni di gruppo",
+     nf.filters === 2 && nf.readAll && nf.purge,
+     nf.filters + "/" + nf.readAll + "/" + nf.purge);
+
+  // Clicking the text toggles read; clicking the cross removes the row. Both
+  // must act on the row they are on and no other.
+  const acted = await page.evaluate(async () => {
+    const before = Array.from(document.querySelectorAll("[data-notif-read]"))
+      .map((n) => n.getAttribute("data-notif-read"));
+    document.querySelector('[data-notif-read="cy-9"]').click();
+    await new Promise((r) => setTimeout(r, 120));
+    const nowRead = document.querySelector('[data-notif-read="cy-9"]').getAttribute("data-read");
+    document.querySelector('[data-notif-del="cy-8"]').click();
+    await new Promise((r) => setTimeout(r, 120));
+    const after = Array.from(document.querySelectorAll("[data-notif-read]"))
+      .map((n) => n.getAttribute("data-notif-read"));
+    return { before, nowRead, after };
+  });
+  ok("toccare un avviso lo segna come letto", acted.nowRead === "1", acted.nowRead);
+  ok("la croce elimina quello giusto e solo quello",
+     !acted.after.includes("cy-8") && acted.after.includes("cy-9")
+     && acted.after.length === acted.before.length - 1,
+     acted.before.join() + " -> " + acted.after.join());
+
+  const phoneN = await browser.newPage({ viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneN.on("pageerror", (e) => errors.push("PHONE-NOTIF: " + e.message));
+  await phoneN.goto("http://127.0.0.1:8899/harness.html");
+  await phoneN.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneN.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneN.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, overview: true });
+  await phoneN.waitForTimeout(900);
+  const pn = await phoneN.evaluate(() => {
+    const xs = Array.from(document.querySelectorAll(".notif-x")).map((x) => {
+      const b = x.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height), right: Math.round(b.right) };
+    });
+    const bar = document.querySelector(".notif-bar");
+    return { xs, winW: window.innerWidth,
+      barRight: bar ? Math.round(bar.getBoundingClientRect().right) : 0,
+      scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: le croci restano nello schermo",
+     pn.xs.length > 0 && pn.xs.every((x) => x.right <= pn.winW + 1), String(pn.xs.length));
+  ok("telefono: le croci sono toccabili", pn.xs.every((x) => x.w >= 20 && x.h >= 20),
+     pn.xs.map((x) => x.w + "x" + x.h).join());
+  ok("telefono: la barra dei filtri non deborda", pn.barRight <= pn.winW + 1,
+     pn.barRight + " vs " + pn.winW);
+  ok("telefono: la pagina non scrolla in orizzontale", pn.scrollW <= pn.winW + 1,
+     pn.scrollW + " vs " + pn.winW);
+  await phoneN.close();
+
   console.log("\n== GRAFICO CHE SEGUE LE STANZE ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

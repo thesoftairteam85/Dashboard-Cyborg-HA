@@ -138,6 +138,11 @@ class NotificationLog:
         if isinstance(stored, dict):
             for entry in stored.get("entries") or []:
                 if isinstance(entry, dict) and entry.get("message"):
+                    # Entries written before read tracking existed default to
+                    # READ. Defaulting them to unread would greet the user with
+                    # a badge of 120 "new" alerts from last month on the first
+                    # start after the update, which is worse than useless.
+                    entry["read"] = bool(entry.get("read", True))
                     self._entries.append(entry)
             try:
                 self._seq = int(stored.get("seq", len(self._entries)))
@@ -225,11 +230,18 @@ class NotificationLog:
         entry["id"] = f"cy-{self._seq}"
         entry["ts"] = dt_util.utcnow().isoformat()
         entry["mono"] = time.monotonic()
+        # Unread until somebody says otherwise. The flag lives on the entry and
+        # on disk, not in the browser: an alert read on the phone must not come
+        # back as new on the wall tablet.
+        entry["read"] = False
         self._entries.append(entry)
 
+        # Subscribers receive the whole payload, not the bare entry: the same
+        # channel carries "here is a new alert" and "the list changed under
+        # you", and a single shape keeps the frontend from guessing.
         for send in list(self._subscribers):
             try:
-                send(entry)
+                send({"notification": entry})
             except Exception:  # noqa: BLE001 - a dead socket must not stop the log
                 self._subscribers.remove(send)
 
@@ -261,6 +273,69 @@ class NotificationLog:
         return unsubscribe
 
     @callback
+    def async_unread(self) -> int:
+        return sum(1 for e in self._entries if not e.get("read"))
+
+    @callback
+    def async_mark_read(self, ids: list[str] | None, read: bool = True) -> int:
+        """Flag entries as read (or unread). ``ids=None`` means all of them."""
+        wanted = set(ids) if ids else None
+        touched = 0
+        for entry in self._entries:
+            if wanted is not None and entry.get("id") not in wanted:
+                continue
+            if bool(entry.get("read")) != read:
+                entry["read"] = read
+                touched += 1
+        if touched:
+            self._store.async_delay_save(self._data_to_save, 1)
+            self._broadcast_reload()
+        return touched
+
+    @callback
+    def async_delete(self, ids: list[str] | None = None, read_only: bool = False) -> int:
+        """Remove entries: the ones listed, or every already-read one.
+
+        Two selectors rather than one because they answer different questions.
+        ``ids`` is "get rid of THIS"; ``read_only`` is the housekeeping sweep
+        that empties the box without touching anything still unread — deleting
+        an alert nobody has seen is losing information, not tidying up.
+        """
+        wanted = set(ids) if ids else None
+        before = len(self._entries)
+        kept = [
+            e for e in self._entries
+            if not (
+                (wanted is not None and e.get("id") in wanted)
+                or (read_only and e.get("read"))
+            )
+        ]
+        if len(kept) == before:
+            return 0
+        self._entries.clear()
+        self._entries.extend(kept)
+        self._store.async_delay_save(self._data_to_save, 1)
+        self._broadcast_reload()
+        return before - len(kept)
+
+    @callback
+    def _broadcast_reload(self) -> None:
+        """Tell every open panel that the list changed underneath it.
+
+        Read state and deletions are shared, not per-browser: marking an alert
+        read on the phone must grey it out on the wall tablet too. Rather than
+        diffing, subscribers are told to refetch — the payload is a few
+        kilobytes and a stale panel showing a deleted alert is a worse bug than
+        one extra round trip.
+        """
+        for send in list(self._subscribers):
+            try:
+                send({"reload": True})
+            except Exception:  # noqa: BLE001 - a dead socket must not stop the log
+                self._subscribers.remove(send)
+
+    @callback
     def async_clear(self) -> None:
         self._entries.clear()
         self._store.async_delay_save(self._data_to_save, 1)
+        self._broadcast_reload()

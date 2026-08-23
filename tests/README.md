@@ -1,6 +1,7 @@
 # Test
 
-    python3 tests/schema.test.py       # schema + migrazioni v2->v3->v4
+    python3 tests/schema.test.py       # schema + migrazioni
+    python3 tests/notifications.test.py  # registro avvisi: letto/da leggere ed eliminazione
     node    tests/frontend.test.js     # logica pannello (102 asserzioni)
     (cd tests/visual && python3 -m http.server 8899 &) && node tests/visual/shoot.js
 

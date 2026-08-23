@@ -4,6 +4,60 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.26.0] - 2026-08-23
+
+Gli avvisi si possono leggere, segnare e buttare via. Uno alla volta.
+
+### Il problema
+Il registro avvisi era in sola lettura: un elenco che cresceva e basta.
+L'unica operazione esistente era «svuota tutto», che è il contrario di quello
+che serve — buttare via anche l'allarme che non hai ancora visto non è fare
+ordine, è perdere informazione.
+
+### Novità
+- **Stato letto / da leggere per ogni avviso.** Un tocco sul testo lo segna
+  letto, un altro lo rimette fra i da leggere. I letti restano in elenco ma
+  sbiadiscono; i da leggere portano un pallino e una barra di colore sul
+  bordo. Nasconderli sarebbe peggio: «dov'è finito» diventerebbe la domanda
+  successiva.
+- **Eliminazione singola.** Ogni avviso ha la sua croce.
+- **Filtro TUTTE / DA LEGGERE**, con i conteggi in chiaro sulle linguette.
+- **SEGNA TUTTI LETTI** e **PULISCI I LETTI**. La pulizia è la scopa che
+  svuota la casella *senza toccare niente di non letto*: è la differenza fra
+  fare ordine e perdere un allarme.
+- **Le notifiche persistenti di Home Assistant hanno il loro tasto elimina**,
+  che chiama `persistent_notification.dismiss`. Non hanno stato di lettura e
+  la card non finge che ce l'abbiano: non sono sue, sono di Home Assistant.
+
+### Analisi
+- **Lo stato «letto» sta sul server, accanto all'avviso, non nel browser.**
+  Un avviso letto sul telefono deve risultare letto anche sul tablet a muro, e
+  deve sopravvivere a un browser che pulisce i propri dati. È l'unica versione
+  in cui due schermi non possono essere in disaccordo.
+- Quando qualcosa cambia, il registro dice a tutti i pannelli aperti di
+  rileggere invece di mandare una differenza. Il payload sono pochi kilobyte;
+  un pannello che mostra un avviso già eliminato è un bug peggiore di un
+  giro di rete in più.
+- Il tocco aggiorna **subito** la copia locale e poi conferma col server: la
+  riga risponde sotto il dito, e se la chiamata fallisce il rilettura
+  successiva rimette le cose a posto entro un giro.
+- Gli avvisi salvati **prima** di questa versione partono come **letti**.
+  Metterli fra i da leggere accoglierebbe l'utente con un contatore di 120
+  avvisi «nuovi» del mese scorso, che è peggio che inutile.
+
+### Verifiche
+- Nuova suite `tests/notifications.test.py` (22 asserzioni) sul registro:
+  che una pulizia non porti mai via un non letto, che un'operazione a vuoto
+  non svegli i pannelli, che un socket morto si tolga di mezzo da solo invece
+  di fermare il registro, e che le voci senza il campo `read` vengano lette
+  come già lette.
+- 745 asserzioni frontend (22 nuove) e **147 misurate** in Chromium (13
+  nuove), fra cui: che la croce elimini quella riga e nessun'altra, che il
+  letto sia *misurabilmente* più spento del da leggere, che la riga degli
+  aggiornamenti non finga di essere eliminabile, e che su schermo da 390 px
+  le croci restino dentro lo schermo e sopra i 20 px di lato.
+
+
 ## [0.25.0] - 2026-08-23
 
 Il grafico di confronto non è più un elenco fisso: segue le stanze da solo.

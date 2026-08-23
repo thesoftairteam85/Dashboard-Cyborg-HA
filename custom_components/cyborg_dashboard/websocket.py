@@ -17,6 +17,8 @@ TYPE_SAVE = "cyborg_dashboard/save"
 TYPE_NOTIFICATIONS = "cyborg_dashboard/notifications"
 TYPE_NOTIFICATIONS_SUBSCRIBE = "cyborg_dashboard/notifications/subscribe"
 TYPE_NOTIFICATIONS_CLEAR = "cyborg_dashboard/notifications/clear"
+TYPE_NOTIFICATIONS_READ = "cyborg_dashboard/notifications/read"
+TYPE_NOTIFICATIONS_DELETE = "cyborg_dashboard/notifications/delete"
 TYPE_SCHEDULE = "cyborg_dashboard/schedule"
 TYPE_SCHEDULE_SET = "cyborg_dashboard/schedule/set"
 TYPE_RUN_FOR = "cyborg_dashboard/run_for"
@@ -46,6 +48,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_notifications)
     websocket_api.async_register_command(hass, _ws_notifications_subscribe)
     websocket_api.async_register_command(hass, _ws_notifications_clear)
+    websocket_api.async_register_command(hass, _ws_notifications_read)
+    websocket_api.async_register_command(hass, _ws_notifications_delete)
     websocket_api.async_register_command(hass, _ws_schedule)
     websocket_api.async_register_command(hass, _ws_schedule_set)
     websocket_api.async_register_command(hass, _ws_run_for)
@@ -127,8 +131,10 @@ def _ws_notifications_subscribe(hass: HomeAssistant, connection: websocket_api.A
         return
 
     @callback
-    def forward(entry: dict[str, Any]) -> None:
-        connection.send_message(websocket_api.event_message(msg["id"], {"notification": entry}))
+    def forward(payload: dict[str, Any]) -> None:
+        # The log decides the shape: {"notification": ...} for a new alert,
+        # {"reload": True} when read state or deletions changed it elsewhere.
+        connection.send_message(websocket_api.event_message(msg["id"], payload))
 
     connection.subscriptions[msg["id"]] = log.async_subscribe(forward)
     connection.send_result(msg["id"])
@@ -142,6 +148,42 @@ def _ws_notifications_clear(hass: HomeAssistant, connection: websocket_api.Activ
     if log is not None:
         log.async_clear()
     connection.send_result(msg["id"], {"cleared": True})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_NOTIFICATIONS_READ,
+    vol.Optional("ids"): vol.Any([str], None),
+    vol.Optional("read", default=True): bool,
+})
+@callback
+def _ws_notifications_read(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Mark alerts read or unread. Omitting ``ids`` means all of them."""
+    log = _log(hass)
+    if log is None:
+        connection.send_error(msg["id"], "not_ready", "Registro notifiche non ancora pronto")
+        return
+    changed = log.async_mark_read(msg.get("ids"), msg["read"])
+    connection.send_result(msg["id"], {"changed": changed, "unread": log.async_unread()})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_NOTIFICATIONS_DELETE,
+    vol.Optional("ids"): vol.Any([str], None),
+    vol.Optional("read_only", default=False): bool,
+})
+@callback
+def _ws_notifications_delete(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Delete the listed alerts, or every already-read one."""
+    log = _log(hass)
+    if log is None:
+        connection.send_error(msg["id"], "not_ready", "Registro notifiche non ancora pronto")
+        return
+    ids = msg.get("ids")
+    if not ids and not msg["read_only"]:
+        connection.send_error(msg["id"], "no_selection", "Nessun avviso indicato")
+        return
+    removed = log.async_delete(ids, msg["read_only"])
+    connection.send_result(msg["id"], {"removed": removed, "unread": log.async_unread()})
 
 
 # ----------------------------------------------------------------- schedule

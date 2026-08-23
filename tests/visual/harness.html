@@ -130,13 +130,15 @@ const hass={states,
       }
       return out;
     }
+    if(m.type==="cyborg_dashboard/notifications/read") return {changed:1,unread:0};
+    if(m.type==="cyborg_dashboard/notifications/delete") return {removed:1,unread:0};
     if(m.type==="cyborg_dashboard/notifications") return {available:true,notifications:[
       {id:"cy-9",ts:new Date(Date.now()-90*1000).toISOString(),source:"sent",channel:"telegram",
-       channel_label:"Telegram",title:"Allarme sicurezza",message:"Movimento rilevato in salotto alle 03:14. Videocamera TY1.",service:"notify.send_message"},
+       read:false,channel_label:"Telegram",title:"Allarme sicurezza",message:"Movimento rilevato in salotto alle 03:14. Videocamera TY1.",service:"notify.send_message"},
       {id:"cy-8",ts:new Date(Date.now()-42*60000).toISOString(),source:"sent",channel:"mobile",
-       channel_label:"App iPhone di Oscar",title:"Lavatrice",message:"Ciclo terminato.",service:"notify.mobile_app_iphone_di_oscar"},
+       read:true,channel_label:"App iPhone di Oscar",title:"Lavatrice",message:"Ciclo terminato.",service:"notify.mobile_app_iphone_di_oscar"},
       {id:"cy-7",ts:new Date(Date.now()-3*3600000).toISOString(),source:"received",channel:"telegram",
-       channel_label:"Telegram",title:"Oscar",message:"/stato",service:"telegram_command"},
+       read:false,channel_label:"Telegram",title:"Oscar",message:"/stato",service:"telegram_command"},
       {id:"cy-6",ts:new Date(Date.now()-9*3600000).toISOString(),source:"sent",channel:"telegram",
        channel_label:"Telegram",title:"Fotovoltaico",message:"Produzione giornaliera 24,8 kWh, autoconsumo 61%.",service:"telegram_bot.send_message"}]};
     if(m.type==="cyborg_dashboard/notifications/clear") return {cleared:true};
