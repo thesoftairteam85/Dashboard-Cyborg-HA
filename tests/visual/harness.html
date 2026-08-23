@@ -1,4 +1,5 @@
-<!doctype html><html><head><meta charset="utf-8"><style>
+<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta charset="utf-8"><style>
 html,body{margin:0;background:#0b1119;color:#e8f4ff;font-family:Inter,Roboto,system-ui,sans-serif}
 :root{--primary-background-color:#0b1119;--primary-text-color:#e8f4ff;--card-background-color:#111a24;
 --divider-color:#24313f;--primary-color:#00e5ff;--accent:#00e5ff}
@@ -67,6 +68,13 @@ const states={
  "media_player.salotto":S("playing",{friendly_name:"Salotto"}),
  "cover.camera_tapparella2":S("open",{friendly_name:"Tapparella studio"}),
  "sensor.balcone_temp":S("28.9",{friendly_name:"Balcone Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
+ "sensor.energia_rete":S("1310",{friendly_name:"Energia prelevata",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "sensor.energia_immessa":S("486",{friendly_name:"Energia immessa",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "sensor.energia_pv":S("1082",{friendly_name:"Energia prodotta",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "sensor.energia_pdc":S("612",{friendly_name:"Pompa di calore",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "sensor.energia_lavatrice":S("141",{friendly_name:"Lavatrice",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "sensor.energia_forno":S("74",{friendly_name:"Forno",device_class:"energy",state_class:"total_increasing",unit_of_measurement:"kWh"}),
+ "vacuum.robot":S("cleaning",{friendly_name:"Robot aspirapolvere",battery_level:64}),
 };
 const AREA=[["soggiorno","Soggiorno",null],["camera_da_letto","Camera da letto",null],
  ["bagno","Bagno","mdi:toilet"],["cucina","Cucina",null],["balcone","Balcone","mdi:balcony"]];
@@ -89,6 +97,35 @@ const hass={states,
     if(m.type==="config/device_registry/list") return [];
     if(m.type==="config/entity_registry/list") return entReg;
     if(m.type==="history/history_during_period") return {};
+    if(m.type==="cyborg_dashboard/notifications") return {available:true,notifications:[
+      {id:"cy-9",ts:new Date(Date.now()-90*1000).toISOString(),source:"sent",channel:"telegram",
+       channel_label:"Telegram",title:"Allarme sicurezza",message:"Movimento rilevato in salotto alle 03:14. Videocamera TY1.",service:"notify.send_message"},
+      {id:"cy-8",ts:new Date(Date.now()-42*60000).toISOString(),source:"sent",channel:"mobile",
+       channel_label:"App iPhone di Oscar",title:"Lavatrice",message:"Ciclo terminato.",service:"notify.mobile_app_iphone_di_oscar"},
+      {id:"cy-7",ts:new Date(Date.now()-3*3600000).toISOString(),source:"received",channel:"telegram",
+       channel_label:"Telegram",title:"Oscar",message:"/stato",service:"telegram_command"},
+      {id:"cy-6",ts:new Date(Date.now()-9*3600000).toISOString(),source:"sent",channel:"telegram",
+       channel_label:"Telegram",title:"Fotovoltaico",message:"Produzione giornaliera 24,8 kWh, autoconsumo 61%.",service:"telegram_bot.send_message"}]};
+    if(m.type==="cyborg_dashboard/notifications/clear") return {cleared:true};
+    if(m.type==="energy/get_prefs") return {energy_sources:[
+      {type:"grid",stat_energy_from:"sensor.energia_rete",stat_energy_to:"sensor.energia_immessa",number_energy_price:0.31},
+      {type:"solar",stat_energy_from:"sensor.energia_pv"}],
+      device_consumption:[{stat_consumption:"sensor.energia_pdc",name:"Pompa di calore"},
+        {stat_consumption:"sensor.energia_lavatrice",name:"Lavatrice"},
+        {stat_consumption:"sensor.energia_forno",name:"Forno"}]};
+    if(m.type==="recorder/statistics_during_period"){
+      // a statistic's sum is a monotonic meter: the harness returns a first
+      // and a last bucket so the panel computes last-minus-first as it does live
+      const TOT={"sensor.energia_rete":[1000,1310],"sensor.energia_immessa":[400,486],
+        "sensor.energia_pv":[900,1082],"sensor.energia_pdc":[500,612],
+        "sensor.energia_lavatrice":[120,141],"sensor.energia_forno":[60,74]};
+      const out={};
+      for(const id of m.statistic_ids||[]){
+        const t=TOT[id]; if(!t) continue;
+        out[id]=[{start:m.start_time,sum:t[0]},{start:m.end_time,sum:t[1]}];
+      }
+      return out;
+    }
     return {};
   },
   callService:(d,s,data)=>{window.__CALLS__=(window.__CALLS__||[]).concat([d+"."+s+" "+JSON.stringify(data)])},
@@ -142,6 +179,18 @@ window.__mount=(dash,opts)=>{
           if(opts.openTree){el._flowOpen={flowcard:true};}
           if(opts.monitor){sec.items.push({id:"moncard",type:"monitor",entity_id:"",name:"",size:"lg",
             appearance:{},states:{},actions:{},grid_entity:"sensor.rete_potenza",limit_w:3300,groups:[],max_per_group:8});}
+        }
+        if(opts&&opts.economy){
+          const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
+          sec.items.unshift({id:"ecocard",type:"economy",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},period:"month",
+            grid_import:"sensor.energia_rete",grid_export:"sensor.energia_immessa",solar:"sensor.energia_pv",
+            price_import:0.31,price_export:0.10,
+            devices:[{entity:"sensor.energia_pdc",name:"Pompa di calore",icon:"",kind:"load"},
+                     {entity:"sensor.energia_lavatrice",name:"Lavatrice",icon:"",kind:"load"},
+                     {entity:"sensor.energia_forno",name:"Forno",icon:"",kind:"load"},
+                     {entity:"sensor.energia_pv",name:"Fotovoltaico",icon:"",kind:"source"}]});
+          if(opts.selectEconomy){el._selected={kind:"card",sectionId:sec.id,itemId:"ecocard"};}
         }
         if(opts&&opts.view){Object.assign(el._page().view,opts.view);}
         if(opts&&opts.selectRoom&&el._rooms().length){el._selected={kind:"room",roomId:el._rooms()[0].id};}

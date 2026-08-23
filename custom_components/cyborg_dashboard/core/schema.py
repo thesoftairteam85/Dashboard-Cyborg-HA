@@ -97,6 +97,14 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     result["points"] = _normalize_points(result.get("points"))
     result["spots"] = _normalize_spots(result.get("spots"))
 
+    # Entities the user has explicitly hidden inside this room. Stored as an
+    # exclusion list rather than an inclusion one so that a device added to the
+    # area later shows up by itself: an inclusion list would silently swallow
+    # every new device until somebody remembered to tick it.
+    hidden = result.get("hidden")
+    result["hidden"] = ([h for h in hidden if isinstance(h, str) and "." in h][:200]
+                        if isinstance(hidden, list) else [])
+
     # entities: None/"auto" means "derive from the area registry at render time"
     entities = result.get("entities")
     result["entities"] = entities if isinstance(entities, list) else None
@@ -250,9 +258,111 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if result.get("type") == "people":
         people = result.get("people")
         result["people"] = [p for p in people if isinstance(p, str) and p] if isinstance(people, list) else []
+    if result.get("type") == "lights":
+        lights = result.get("lights")
+        result["lights"] = [x for x in lights if isinstance(x, str) and x] if isinstance(lights, list) else []
+        result["group_by_area"] = bool(result.get("group_by_area", True))
+    if result.get("type") == "irrigation":
+        zones = result.get("zones")
+        rows: list[dict[str, Any]] = []
+        if isinstance(zones, list):
+            for zone in zones:
+                if not isinstance(zone, dict):
+                    continue
+                entity = zone.get("entity")
+                if not isinstance(entity, str) or "." not in entity:
+                    continue
+                try:
+                    minutes = max(1, min(720, int(float(zone.get("minutes", 10)))))
+                except (TypeError, ValueError):
+                    minutes = 10
+                moisture = zone.get("moisture")
+                rows.append({
+                    "entity": entity,
+                    "name": str(zone.get("name") or "")[:80],
+                    "icon": str(zone.get("icon") or "")[:64],
+                    "minutes": minutes,
+                    "moisture": moisture if isinstance(moisture, str) and moisture else None,
+                })
+                if len(rows) >= 24:
+                    break
+        result["zones"] = rows
+        rain = result.get("rain_sensor")
+        result["rain_sensor"] = rain if isinstance(rain, str) and rain else None
+        presets = result.get("presets")
+        clean_presets: list[int] = []
+        if isinstance(presets, list):
+            for value in presets:
+                try:
+                    clean_presets.append(max(1, min(720, int(float(value)))))
+                except (TypeError, ValueError):
+                    continue
+        result["presets"] = clean_presets[:6]
+    if result.get("type") == "camera":
+        # Live thumbnails: an MJPEG stream per tile instead of a still refreshed
+        # on a timer. Off by default because eight simultaneous streams saturate
+        # a wall tablet, but on a card with one or two cameras it removes the
+        # refresh delay entirely.
+        result["live"] = bool(result.get("live", False))
     if result.get("type") == "notifications":
         result["show_updates"] = bool(result.get("show_updates", True))
+        # Messages Cyborg saw leave the house (Telegram and the rest). Default
+        # on: an install whose alarms all go to Telegram would otherwise show
+        # an empty alerts card, which is exactly the complaint this answers.
+        result["show_sent"] = bool(result.get("show_sent", True))
+        try:
+            result["max"] = max(3, min(60, int(result.get("max", 8))))
+        except (TypeError, ValueError):
+            result["max"] = 8
     if result.get("type") == "economy":
+        # Per-device detail. Each row is one long-term statistic in kWh, the
+        # same object the Home Assistant energy dashboard calls an "individual
+        # device", so the list can be filled straight from energy/get_prefs
+        # instead of asking the user to find twelve sensors by hand.
+        devices = result.get("devices")
+        rows: list[dict[str, Any]] = []
+        if isinstance(devices, list):
+            for dev in devices:
+                if not isinstance(dev, dict):
+                    continue
+                entity = dev.get("entity")
+                if not isinstance(entity, str) or not entity:
+                    continue
+                rows.append({
+                    "entity": entity,
+                    "name": str(dev.get("name") or "")[:80],
+                    "icon": str(dev.get("icon") or "")[:64],
+                    # "load" spends money, "source" produces it. A battery or a
+                    # second string is not a consumer and must not be billed.
+                    "kind": "source" if dev.get("kind") == "source" else "load",
+                    # A load measured downstream of another meter — the fridge
+                    # on a kitchen socket strip — must declare its parent, or
+                    # its kWh are billed twice: once in its own row and once
+                    # inside the parent's. Home Assistant models the same
+                    # relation as included_in_stat.
+                    "parent": (dev.get("parent")
+                               if isinstance(dev.get("parent"), str) and dev.get("parent") else None),
+                })
+                if len(rows) >= 24:
+                    break
+        # Drop parents that point outside the list or form a cycle: a dangling
+        # parent would silently exclude a row from every total, and a cycle
+        # would make the nesting walk never terminate.
+        known = {r["entity"] for r in rows}
+        for row in rows:
+            if row["parent"] not in known or row["parent"] == row["entity"]:
+                row["parent"] = None
+        by_entity = {r["entity"]: r for r in rows}
+        for row in rows:
+            seen = {row["entity"]}
+            node = row
+            while node["parent"]:
+                if node["parent"] in seen:
+                    node["parent"] = None
+                    break
+                seen.add(node["parent"])
+                node = by_entity[node["parent"]]
+        result["devices"] = rows
         for key in ("grid_import", "grid_export", "solar"):
             value = result.get(key)
             result[key] = value if isinstance(value, str) and value else None

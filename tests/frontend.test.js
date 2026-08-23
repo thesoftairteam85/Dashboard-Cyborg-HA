@@ -1119,6 +1119,302 @@ el._dashboard = { version: 5, revision: 0, theme: { accent: "#00e5ff" }, pages: 
 el._pageIndex = 0;
 ok("stato ripristinato per i test successivi", !el._isFloorplan());
 
+console.log("\n== 17. ATTIVI ORA, AVVISI, DETTAGLIO ENERGIA ==");
+
+// -- helpers ----------------------------------------------------------------
+const T0 = Date.parse("2026-08-23T12:00:00Z");
+ok("meno di 90 secondi -> 'ora'", sinceWords(T0 - 40000, T0) === "ora");
+ok("minuti", sinceWords(T0 - 12 * 60000, T0) === "da 12 min");
+ok("ore", sinceWords(T0 - 135 * 60000, T0) === "da 2 h 15", sinceWords(T0 - 135 * 60000, T0));
+ok("ore tonde senza minuti", sinceWords(T0 - 120 * 60000, T0) === "da 2 h", sinceWords(T0 - 120 * 60000, T0));
+ok("ieri", sinceWords(T0 - 26 * 3600000, T0) === "da ieri");
+ok("giorni", sinceWords(T0 - 72 * 3600000, T0) === "da 3 giorni");
+ok("timestamp assente non produce testo", sinceWords(0, T0) === "");
+// Date.parse(0) coerces the number to the string "0" and yields the year
+// 2000, so an entity with no last_changed used to render "da 9731 giorni"
+states["light.senza_storia"] = S("on", { friendly_name: "Luce senza storia" });
+delete states["light.senza_storia"].last_changed;
+{
+  const rows = el._activeEntities({ domains: ["light"] });
+  const orphan = rows.find(r => r.id === "light.senza_storia");
+  ok("un'entita' senza last_changed non finge di essere accesa dal 2000",
+     orphan && orphan.since === 0 && sinceWords(orphan.since, T0) === "",
+     orphan ? String(orphan.since) : "riga assente");
+}
+delete states["light.senza_storia"];
+ok("avviso appena arrivato", agoWords(new Date(T0 - 20000).toISOString(), T0) === "adesso");
+ok("avviso di un'ora fa", agoWords(new Date(T0 - 3700000).toISOString(), T0) === "1 h fa");
+ok("data non valida non rompe nulla", agoWords("non-una-data", T0) === "");
+ok("canale sconosciuto ha comunque icona e colore",
+   !!notifChannel("marziano").icon && !!notifChannel("marziano").color);
+ok("telegram ha il suo canale", notifChannel("telegram").l === "Telegram");
+
+// -- grouping ---------------------------------------------------------------
+states["light.cucina_faretti"] = S("on", { friendly_name: "Faretti Cucina", brightness: 128 });
+states["light.piantana"] = S("on", { friendly_name: "Piantana", brightness: 255, color_temp_kelvin: 2700 });
+states["cover.tapparella_salotto"] = S("open", { friendly_name: "Tapparella Salotto", current_position: 60 });
+states["media_player.tv"] = S("playing", { friendly_name: "TV Salotto", media_title: "Il Padrino" });
+states["vacuum.robot"] = S("cleaning", { friendly_name: "Robot", battery_level: 72 });
+states["siren.camera_soppalco_siren"].state = "on";
+
+el._dashboard = { version: 5, revision: 0, theme: { accent: "#00e5ff" }, pages: [
+  { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [
+    { id: "s1", title: "Casa", icon: "mdi:home", accent: "#00e5ff", items: [
+      { id: "actcard", type: "active", entity_id: "", name: "", size: "lg",
+        appearance: {}, states: {}, actions: {}, domains: [], max: 12 }]}]}]};
+el._pageIndex = 0; el._editing = false; el._selected = null;
+el._registry = { areas: [{ area_id: "cucina", name: "Cucina" }],
+  byArea: { cucina: ["light.cucina_faretti"] },
+  entityArea: { "light.cucina_faretti": "Cucina", "light.piantana": "Soggiorno" } };
+
+const actCard = el._sections()[0].items[0];
+const grouped = el._activeGroups(actCard);
+const gk = grouped.map(g => g.group.k);
+ok("i gruppi seguono un ordine fisso", gk.join() === gk.slice().sort((a,b) =>
+   ["luci","carichi","clima","aperture","media","pulizia","allarmi"].indexOf(a) -
+   ["luci","carichi","clima","aperture","media","pulizia","allarmi"].indexOf(b)).join(), gk.join());
+const luciRows = (grouped.find(g => g.group.k === "luci") || {rows:[]}).rows.map(r => r.id);
+ok("le luci finiscono nel gruppo luci",
+   luciRows.includes("light.cucina_faretti") && luciRows.includes("light.piantana")
+   && luciRows.every(id => id.startsWith("light.")), luciRows.join());
+ok("le tapparelle non finiscono fra le luci",
+   (grouped.find(g => g.group.k === "aperture") || {rows:[]}).rows.some(r => r.id === "cover.tapparella_salotto"));
+ok("il media player ha il suo gruppo",
+   (grouped.find(g => g.group.k === "media") || {rows:[]}).rows.length === 1);
+ok("la sirena e' un gruppo di allarme",
+   (grouped.find(g => g.group.k === "allarmi") || {}).group.alert === true);
+ok("ogni gruppo sa come spegnersi", grouped.every(g => g.group.off && g.group.off.service));
+ok("i servizi di spegnimento esistono nel dominio giusto",
+   grouped.every(g => ["light","homeassistant","cover","media_player","vacuum","siren"].includes(g.group.off.domain)));
+
+const lucGroup = grouped.find(g => g.group.k === "luci");
+ok("una luce dimmerata mostra la percentuale",
+   lucGroup.group.detail(states["light.cucina_faretti"]) === "50%",
+   lucGroup.group.detail(states["light.cucina_faretti"]));
+ok("una luce con temperatura mostra i kelvin",
+   lucGroup.group.detail(states["light.piantana"]).includes("2700K"));
+const apeGroup = grouped.find(g => g.group.k === "aperture");
+ok("una tapparella mostra quanto e' aperta",
+   apeGroup.group.detail(states["cover.tapparella_salotto"]) === "aperta al 60%");
+const medGroup = grouped.find(g => g.group.k === "media");
+ok("il media mostra cosa sta suonando",
+   medGroup.group.detail(states["media_player.tv"]) === "Il Padrino");
+const climaGroup = grouped.find(g => g.group.k === "clima");
+ok("il clima mostra temperatura attuale e impostata",
+   climaGroup.group.detail(states["climate.thermostat"]).includes("22.4°")
+   && climaGroup.group.detail(states["climate.thermostat"]).includes("21°"),
+   climaGroup.group.detail(states["climate.thermostat"]));
+
+el.render();
+let a17 = el.innerHTML;
+ok("la card mostra i gruppi", a17.includes("act-group") && a17.includes("Luci accese"));
+ok("ogni gruppo ha un pulsante di spegnimento", (a17.match(/data-act-off="/g) || []).length >= 5);
+ok("l'area della luce compare accanto al nome", a17.includes("Cucina · 50%"));
+ok("il tempo di accensione compare", /act-since/.test(a17));
+ok("le pastiglie riassuntive ci sono", (a17.match(/act-chip/g) || []).length >= 5);
+ok("la sirena viene evidenziata", a17.includes("act-row alert"));
+ok("nessun gruppo sparisce del tutto per il limite",
+   grouped.every(g => a17.includes(g.group.l)));
+
+// the old card never repainted when a light changed: composite cards carry no
+// entity_id, so nothing about them was in the signature
+const sigBefore = el._buildSignature();
+states["light.piantana"] = S("off", { friendly_name: "Piantana" });
+ok("spegnere una luce cambia la firma della card attivi", el._buildSignature() !== sigBefore);
+states["light.piantana"] = S("on", { friendly_name: "Piantana", brightness: 255, color_temp_kelvin: 2700 });
+
+// -- notifications ----------------------------------------------------------
+el._sections()[0].items = [{ id: "ntcard", type: "notifications", entity_id: "", name: "", size: "md",
+  appearance: {}, states: {}, actions: {}, show_updates: true, show_sent: true, max: 8 }];
+el._notifs = {};
+el._sentNotifs = [
+  { id: "cy-3", ts: new Date(T0 - 120000).toISOString(), source: "sent", channel: "telegram",
+    channel_label: "Telegram", title: "Allarme", message: "Movimento rilevato in salotto", service: "notify.send_message" },
+  { id: "cy-2", ts: new Date(T0 - 7200000).toISOString(), source: "received", channel: "telegram",
+    channel_label: "Telegram", title: "Oscar", message: "/stato", service: "telegram_command" },
+];
+el._sentPending = false;
+el.render();
+let n17 = el.innerHTML;
+ok("gli avvisi Telegram compaiono nella card", n17.includes("Movimento rilevato in salotto"));
+ok("si distingue inviato da ricevuto", n17.includes("inviato via Telegram") && n17.includes("ricevuto da Telegram"));
+ok("un messaggio in arrivo e' marcato", n17.includes("notif-row in"));
+ok("gli aggiornamenti disponibili restano", n17.includes("aggiornament"));
+ok("il tempo relativo compare", n17.includes("notif-when"));
+el._sections()[0].items[0].show_sent = false;
+el.render();
+ok("si possono escludere i messaggi inviati", !el.innerHTML.includes("Movimento rilevato in salotto"));
+el._sections()[0].items[0].show_sent = true;
+// an update fixture from an earlier section is still pending, and a pending
+// update is itself an alert: switch updates off to reach the empty state
+el._sections()[0].items[0].show_updates = false;
+el._sentNotifs = []; el._sentPending = false;
+el.render();
+ok("senza avvisi la card dice che e' tutto a posto", el.innerHTML.includes("Sistema in ordine"));
+el._sentNotifs = null; el._sentPending = true;
+el.render();
+ok("durante il caricamento non dice che non c'e' niente", el.innerHTML.includes("Lettura degli avvisi"));
+el._sentPending = false; el._sentNotifs = [];
+el._sections()[0].items[0].show_updates = true;
+
+// -- economy per-device -----------------------------------------------------
+states["sensor.energia_lavatrice"] = S("120", { friendly_name: "Lavatrice", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+states["sensor.energia_pdc"] = S("400", { friendly_name: "Pompa di calore", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+states["sensor.energia_stringa2"] = S("90", { friendly_name: "Stringa 2", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+const eco17 = { id: "eco", type: "economy", entity_id: "", name: "", size: "lg",
+  appearance: {}, states: {}, actions: {},
+  grid_import: "sensor.energia_totale", grid_export: null, solar: null,
+  price_import: 0.30, price_export: 0.10, period: "month",
+  devices: [
+    { entity: "sensor.energia_lavatrice", name: "Lavatrice", icon: "", kind: "load" },
+    { entity: "sensor.energia_pdc", name: "Pompa di calore", icon: "", kind: "load" },
+    { entity: "sensor.energia_stringa2", name: "Stringa 2", icon: "", kind: "source" }] };
+const ecoD17 = { imported: 300, exported: 0, produced: 0,
+  devices: { "sensor.energia_lavatrice": 30, "sensor.energia_pdc": 120, "sensor.energia_stringa2": 45 } };
+const ecoH17 = el._economyDevices(eco17, ecoD17);
+ok("il dettaglio elenca ogni dispositivo",
+   ecoH17.includes("Lavatrice") && ecoH17.includes("Pompa di calore") && ecoH17.includes("Stringa 2"));
+ok("i consumi sono ordinati dal maggiore",
+   ecoH17.indexOf("Pompa di calore") < ecoH17.indexOf("Lavatrice"));
+ok("il costo usa la tariffa di prelievo", ecoH17.includes("36,00"), ecoH17.match(/ed-eur">[^<]*/g).join());
+ok("chi produce usa la tariffa di immissione e ha il segno piu'",
+   ecoH17.includes(">+4,50"), (ecoH17.match(/ed-eur">[^<]*/g) || []).join());
+ok("produzione e consumo sono separati",
+   ecoH17.includes("CONSUMI PER DISPOSITIVO") && ecoH17.includes("PRODUZIONE PER SORGENTE"));
+ok("il totale misurato e' la somma dei carichi", ecoH17.includes("150.0 kWh"));
+// 300 imported - 150 measured = 150 unaccounted; hiding it would make six
+// plugs look like the whole bill
+ok("il non misurato viene dichiarato", ecoH17.includes("Non misurato") && ecoH17.includes("150.0 kWh"));
+ok("le percentuali sono sul consumo di casa, non sul misurato",
+   ecoH17.includes(">40%"), (ecoH17.match(/ed-pct">[^<]*/g) || []).join());
+ok("una sorgente non viene conteggiata come costo", !ecoH17.includes(">13,50"));
+ok("un dispositivo senza statistiche viene omesso, non mostrato a zero",
+   !el._economyDevices(eco17, { imported: 300, devices: {} }).includes("Lavatrice"));
+ok("senza dispositivi il dettaglio spiega cosa fare",
+   el._economyDevices({ devices: [] }, ecoD17).includes("Dashboard Energia"));
+
+el._sections()[0].items = [];
+el._notifs = {}; el._sentNotifs = null;
+states["siren.camera_soppalco_siren"].state = "off";
+delete states["light.cucina_faretti"]; delete states["light.piantana"];
+delete states["cover.tapparella_salotto"]; delete states["media_player.tv"]; delete states["vacuum.robot"];
+ok("stato ripristinato dopo la sezione 17", el._activeEntities({}).length >= 0);
+
+console.log("\n== 18. GAUGE DEL CONTATORE ==");
+{
+  const mon = { id: "mon", type: "monitor", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {}, groups: [], max_per_group: 8,
+    grid_entity: "sensor.gauge_test", limit_w: 3300 };
+  const arcOf = (html) => {
+    // the value arc is the second .mg-arc; the first is the track
+    const paths = html.match(/<path class="mg-arc [^"]*"[^>]*d="[^"]*"/g) || [];
+    const value = paths.find(p => p.includes("mg-arc value"));
+    if (!value) return null;
+    const m = /d="M([\d.-]+),([\d.-]+) A92,92 0 (\d) 1 ([\d.-]+),([\d.-]+)"/.exec(value);
+    return m ? { x1: +m[1], y1: +m[2], large: +m[3], x2: +m[4], y2: +m[5] } : null;
+  };
+  const at = (watts) => {
+    states["sensor.gauge_test"] = S(String(watts), { device_class: "power", unit_of_measurement: "W" });
+    return arcOf(el._gridGauge(mon));
+  };
+
+  const low = at(660);      // 20%
+  const half = at(1650);    // 50%
+  const past = at(1716);    // 52% - the reading in the phone screenshot
+  const high = at(2970);    // 90%
+  ok("il gauge disegna l'arco del valore", !!low && !!past && !!high);
+  // The dial is a half turn: the sweep can never exceed 180 degrees, so the
+  // large-arc flag must be 0 at every reading. It used to flip past 50% and
+  // the renderer took the long way round the circle.
+  ok("l'arco non prende mai la strada lunga",
+     [low, half, past, high].every(a => a.large === 0),
+     [low, half, past, high].map(a => a.large).join());
+  ok("l'arco parte sempre da sinistra", [low, past, high].every(a => Math.abs(a.x1 - 28) < 1));
+  // 52% of a half turn is 93.6 degrees: the end point must be just past the
+  // top of the dial, not back down the far side
+  ok("al 52% l'arco finisce appena oltre la cima",
+     past.x2 > 120 && past.x2 < 140 && past.y2 < 30,
+     past.x2.toFixed(1) + "," + past.y2.toFixed(1));
+  ok("al 90% l'arco arriva quasi a destra", high.x2 > 195, high.x2.toFixed(1));
+  ok("al 20% l'arco resta nella metà sinistra", low.x2 < 120, low.x2.toFixed(1));
+  ok("l'arco cresce in modo monotono", low.x2 < past.x2 && past.x2 < high.x2);
+  ok("il gauge dichiara la percentuale giusta", el._gridGauge(mon).includes("90% del contatore"));
+  ok("oltre il limite lo dice", (states["sensor.gauge_test"] = S("4000", { device_class: "power", unit_of_measurement: "W" }),
+     el._gridGauge(mon).includes("oltre il limite")));
+  ok("senza sensore non inventa un valore",
+     el._gridGauge({ ...mon, grid_entity: null }).includes("non collegato"));
+  delete states["sensor.gauge_test"];
+}
+
+console.log("\n== 19. GERARCHIA DEI CARICHI E VISIBILITA' NELLE STANZE ==");
+{
+  states["sensor.e_quadro"] = S("900", { friendly_name: "Quadro FEM", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+  states["sensor.e_cucina"] = S("300", { friendly_name: "Presa cucina", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+  states["sensor.e_frigg"] = S("80", { friendly_name: "Friggitrice", device_class: "energy", state_class: "total_increasing", unit_of_measurement: "kWh" });
+  const card = { id: "eco2", type: "economy", entity_id: "", price_import: 0.30, price_export: 0.10,
+    grid_import: "sensor.energia_totale", period: "month",
+    devices: [
+      { entity: "sensor.e_quadro", name: "Quadro FEM", icon: "", kind: "load", parent: null },
+      { entity: "sensor.e_cucina", name: "Presa cucina", icon: "", kind: "load", parent: "sensor.e_quadro" },
+      { entity: "sensor.e_frigg", name: "Friggitrice", icon: "", kind: "load", parent: "sensor.e_cucina" }] };
+  const data = { imported: 400, exported: 0, produced: 0,
+    devices: { "sensor.e_quadro": 200, "sensor.e_cucina": 60, "sensor.e_frigg": 20 } };
+  const html = el._economyDevices(card, data);
+  // 200 + 60 + 20 = 280 would bill the same kilowatt-hours three times over;
+  // only the root is a real total
+  ok("il totale conta solo i carichi radice", html.includes("200.0 kWh · 60,00"),
+     (html.match(/eco-dev-head[^]*?<\/div>/) || [""])[0].slice(0, 160));
+  ok("i figli sono comunque elencati",
+     html.includes("Presa cucina") && html.includes("Friggitrice"));
+  ok("i figli sono annidati visivamente", (html.match(/eco-dev[^"]* child/g) || []).length === 2,
+     String((html.match(/eco-dev[^"]* child/g) || []).length));
+  ok("il padre dichiara quanto consuma al netto dei figli", html.includes("di cui propri 140.0 kWh"),
+     (html.match(/di cui propri [^<]*/g) || []).join());
+  ok("il figlio intermedio scala a sua volta il proprio figlio", html.includes("di cui propri 40.0 kWh"));
+  // 400 imported - 200 root = 200 unaccounted, not 400 - 280
+  ok("il non misurato usa il totale corretto", html.includes("Non misurato") && html.includes("200.0 kWh"));
+  ok("un carico foglia non dichiara quote proprie",
+     (html.match(/di cui propri/g) || []).length === 2);
+
+  // a dangling or circular parent must not break the card
+  const bad = JSON.parse(JSON.stringify(card));
+  bad.devices[0].parent = "sensor.inesistente";
+  ok("un padre inesistente non fa sparire il carico",
+     el._economyDevices(bad, data).includes("Quadro FEM"));
+  delete states["sensor.e_quadro"]; delete states["sensor.e_cucina"]; delete states["sensor.e_frigg"];
+}
+{
+  // room visibility
+  el._registry = { areas: [{ area_id: "sala", name: "Sala" }],
+    byArea: { sala: ["light.sala_1", "sensor.sala_temp", "sensor.sala_rssi", "button.sala_restart", "sensor.sala_giu"] },
+    entityArea: {}, category: { "sensor.sala_rssi": "diagnostic", "button.sala_restart": "config" } };
+  states["light.sala_1"] = S("on", { friendly_name: "Luce sala" });
+  states["sensor.sala_temp"] = S("21.5", { friendly_name: "Temp sala", device_class: "temperature", unit_of_measurement: "°C" });
+  states["sensor.sala_rssi"] = S("-62", { friendly_name: "RSSI", device_class: "signal_strength" });
+  states["button.sala_restart"] = S("unknown", { friendly_name: "Riavvia" });
+  states["sensor.sala_giu"] = S("unavailable", { friendly_name: "Sensore rotto" });
+
+  const room = { id: "r", area_id: "sala", entities: null, hidden: [] };
+  const visible = el._roomAllEntities(room);
+  ok("le entità di diagnostica non entrano nella stanza", !visible.includes("sensor.sala_rssi"));
+  ok("le entità di configurazione non entrano nella stanza", !visible.includes("button.sala_restart"));
+  ok("le entità non disponibili non entrano nella stanza", !visible.includes("sensor.sala_giu"));
+  ok("quelle utili restano", visible.includes("light.sala_1") && visible.includes("sensor.sala_temp"),
+     visible.join());
+  room.hidden = ["sensor.sala_temp"];
+  ok("nascondere un dispositivo lo toglie dalla stanza",
+     !el._roomAllEntities(room).includes("sensor.sala_temp"));
+  ok("resta però fra i candidati, per poterlo riattivare",
+     el._roomCandidates(room).includes("sensor.sala_temp"));
+  room.entities = ["light.sala_1", "sensor.sala_rssi"];
+  room.hidden = [];
+  ok("una lista scelta a mano non viene filtrata",
+     el._roomAllEntities(room).includes("sensor.sala_rssi"));
+  delete states["light.sala_1"]; delete states["sensor.sala_temp"];
+  delete states["sensor.sala_rssi"]; delete states["button.sala_restart"]; delete states["sensor.sala_giu"];
+  el._registry = null;
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

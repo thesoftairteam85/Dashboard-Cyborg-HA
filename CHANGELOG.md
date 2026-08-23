@@ -4,6 +4,93 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.17.0] - 2026-08-23
+
+Correzioni ai difetti segnalati, telefono incluso, più le notifiche Telegram
+negli avvisi e il dettaglio per dispositivo nell'analisi economica.
+
+### Correzioni
+- **Il gauge del contatore disegnava l'arco al contrario oltre il 50%.** La
+  bandiera SVG *large-arc* veniva alzata appena il valore superava metà scala,
+  e il browser prendeva la strada lunga attorno al cerchio: 266° invece di 94°.
+  Da qui i due "blob" staccati al posto dell'arco. Sotto il 50% era corretto,
+  ed è per questo che era sfuggito.
+- **La mappa 3D non si adattava al telefono.** Lo zoom è un numero di pixel per
+  unità di pianta: quello giusto su un pannello da 1500px fa uscire la casa da
+  uno schermo da 390px. Ora la vista si adatta da sola alla larghezza reale, e
+  c'è un pulsante *adatta allo schermo*.
+- **Sul telefono non si poteva interagire con le stanze.** Ogni elemento che ha
+  un gesto proprio ora lo rivendica (`touch-action`), altrimenti se lo prendeva
+  lo scroll della pagina. In più: **trascina lo sfondo per ruotare la casa,
+  pizzica per zoomare**, maniglie e vertici ingranditi per il dito.
+- **Entrando in una stanza sul telefono i dispositivi si accavallavano.** Le
+  targhette con nome e valore sono uscite dalla scena e sono diventate un
+  **elenco sotto la mappa**, leggibile a qualsiasi larghezza. Sul telefono la
+  barra dei comandi sta su una riga sola.
+- **L'anteprima delle videocamere si rompeva.** L'aggiornamento riutilizzava
+  l'URL precedente, con dentro il token di accesso: quando Home Assistant lo
+  ruota, ogni richiesta successiva torna 401 e il browser disegna la sua icona
+  di immagine rotta — il "?" sopra il riquadro. Ora il token viene riletto a
+  ogni aggiornamento. Tolto anche il `loading="lazy"` che ritardava la prima
+  immagine fino allo scroll, e un errore di caricamento ora si spiega invece di
+  mostrare un'icona rotta. Nuova opzione **anteprime sempre in diretta**.
+- **Doppio conteggio dei carichi.** Nell'analisi economica ogni contatore può
+  ora dichiarare di essere **compreso dentro** un altro: la friggitrice dentro
+  la presa cucina, la presa cucina dentro il quadro FEM. Solo i carichi radice
+  entrano nel totale, i figli restano elencati e annidati, e ogni padre mostra
+  anche quanto consuma **al netto dei figli**. Prima 200 + 60 + 20 faceva 280
+  kWh di kilowattora contati fino a tre volte.
+- **Le stanze mostravano tutte le entità.** Le entità di diagnostica e
+  configurazione (versioni firmware, RSSI, pulsanti di riavvio) non entrano più
+  nella stanza — Home Assistant le marca già come tali. E ogni dispositivo ha
+  un **occhio** nell'editor della stanza per nasconderlo o mostrarlo. La lista
+  è di esclusione, così un dispositivo aggiunto domani all'area compare da solo.
+- Un'entità senza `last_changed` risultava accesa "da 9731 giorni":
+  `Date.parse(0)` non è 0, è l'anno 2000.
+
+### Avvisi
+- **Le notifiche Telegram arrivano negli avvisi della Panoramica.** Home
+  Assistant non conserva nulla di ciò che invia; Cyborg ora registra ogni
+  chiamata ai servizi `notify` e `telegram_bot` — quindi Telegram, app mobile,
+  push web ed e-mail con un solo aggancio — e le ripropone nella card, anche
+  dopo un riavvio. In tempo reale, via sottoscrizione.
+- Si distingue ciò che è **partito** da casa da ciò che è **arrivato** al bot.
+- Nota tecnica: l'evento `telegram_sent` esiste ma non contiene il testo del
+  messaggio, solo chat_id e message_id. Per un elenco di avvisi è inutile, ed è
+  il motivo per cui la sorgente è la chiamata al servizio.
+
+### Attivi ora
+- Riscritta. Un elenco piatto che mescola una lampada dimmerata, una tapparella
+  aperta, una pompa di calore in deumidificazione e una cassa in pausa non dice
+  niente. Ora è **raggruppata**: luci, prese, clima, aperture, media, pulizia,
+  sirene. Ogni riga dice **dov'è** (la stanza) e **da quando**, e ogni gruppo ha
+  il suo spegnimento in blocco.
+
+### Analisi economica
+- **Voce per ogni dispositivo**: quanti kWh e quanti euro nel periodo, con la
+  quota sul consumo di casa e il **non misurato** dichiarato apertamente.
+- Le sorgenti sono separate dai carichi e valorizzate alla tariffa di
+  immissione.
+- **Importazione dalla Dashboard Energia** dei dispositivi individuali, con un
+  clic. Corretto anche il rilevamento della rete: esistono due formati di
+  configurazione in Home Assistant e ne veniva letto uno solo.
+
+### Nuove sezioni
+- **Luci** — tutte le luci per stanza, con accensione, intensità, colore,
+  temperatura in kelvin ed effetti. I comandi compaiono in base a ciò che ogni
+  corpo illuminante dichiara di saper fare, quindi le RGB che installerai
+  avranno i loro comandi senza toccare niente.
+- **Irrigazione** — zone con avvio a tempo, umidità del terreno e sensore
+  pioggia.
+- **Orari** per luci e zone, eseguiti da Home Assistant e non dal browser: una
+  valvola aperta "per dieci minuti" si chiude anche se chiudi la pagina,
+  blocchi il telefono o riavvii il sistema a metà ciclo.
+
+### Verifica
+- 503 asserzioni sulla logica del pannello, schema completo, **53 asserzioni
+  geometriche misurate** in Chromium headless — di cui 14 su uno schermo da
+  390px, dove prima non veniva provato niente.
+
 ## [0.16.0] - 2026-08-23
 
 La mappa 3D diventa un edificio: si ridimensiona, cambia forma, sale e scende

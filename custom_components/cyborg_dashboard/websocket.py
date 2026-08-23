@@ -10,8 +10,17 @@ from homeassistant.core import HomeAssistant, callback
 
 from .core.storage import DashboardConflictError, DashboardStorage
 
+DOMAIN = "cyborg_dashboard"
+
 TYPE_GET = "cyborg_dashboard/get"
 TYPE_SAVE = "cyborg_dashboard/save"
+TYPE_NOTIFICATIONS = "cyborg_dashboard/notifications"
+TYPE_NOTIFICATIONS_SUBSCRIBE = "cyborg_dashboard/notifications/subscribe"
+TYPE_NOTIFICATIONS_CLEAR = "cyborg_dashboard/notifications/clear"
+TYPE_SCHEDULE = "cyborg_dashboard/schedule"
+TYPE_SCHEDULE_SET = "cyborg_dashboard/schedule/set"
+TYPE_RUN_FOR = "cyborg_dashboard/run_for"
+TYPE_RUN_CANCEL = "cyborg_dashboard/run_for/cancel"
 
 
 def async_register_websocket(hass: HomeAssistant) -> None:
@@ -34,6 +43,13 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     """
     websocket_api.async_register_command(hass, _ws_get)
     websocket_api.async_register_command(hass, _ws_save)
+    websocket_api.async_register_command(hass, _ws_notifications)
+    websocket_api.async_register_command(hass, _ws_notifications_subscribe)
+    websocket_api.async_register_command(hass, _ws_notifications_clear)
+    websocket_api.async_register_command(hass, _ws_schedule)
+    websocket_api.async_register_command(hass, _ws_schedule_set)
+    websocket_api.async_register_command(hass, _ws_run_for)
+    websocket_api.async_register_command(hass, _ws_run_cancel)
 
 
 @websocket_api.websocket_command({"type": TYPE_GET})
@@ -74,3 +90,124 @@ async def _ws_save(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
         )
         return
     connection.send_result(msg["id"], {"saved": True, "revision": revision})
+
+
+def _log(hass: HomeAssistant):
+    """The notification log, or None if setup has not reached it yet."""
+    return hass.data.get(DOMAIN, {}).get("notifications")
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_NOTIFICATIONS,
+    vol.Optional("limit", default=50): vol.All(int, vol.Range(min=1, max=120)),
+})
+@callback
+def _ws_notifications(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Return the notifications Home Assistant has sent, newest first."""
+    log = _log(hass)
+    connection.send_result(msg["id"], {
+        "notifications": log.async_list(msg["limit"]) if log else [],
+        "available": log is not None,
+    })
+
+
+@websocket_api.websocket_command({"type": TYPE_NOTIFICATIONS_SUBSCRIBE})
+@callback
+def _ws_notifications_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Push each new notification to the panel as it happens.
+
+    A subscription rather than polling: an alert that shows up thirty seconds
+    late is not an alert. The unsubscribe callback is handed to
+    connection.subscriptions so that closing the browser tab detaches the
+    listener; without that the log would accumulate dead sockets forever.
+    """
+    log = _log(hass)
+    if log is None:
+        connection.send_error(msg["id"], "not_ready", "Registro notifiche non ancora pronto")
+        return
+
+    @callback
+    def forward(entry: dict[str, Any]) -> None:
+        connection.send_message(websocket_api.event_message(msg["id"], {"notification": entry}))
+
+    connection.subscriptions[msg["id"]] = log.async_subscribe(forward)
+    connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command({"type": TYPE_NOTIFICATIONS_CLEAR})
+@callback
+def _ws_notifications_clear(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Empty the log."""
+    log = _log(hass)
+    if log is not None:
+        log.async_clear()
+    connection.send_result(msg["id"], {"cleared": True})
+
+
+# ----------------------------------------------------------------- schedule
+
+
+def _sched(hass: HomeAssistant):
+    return hass.data.get(DOMAIN, {}).get("scheduler")
+
+
+@websocket_api.websocket_command({"type": TYPE_SCHEDULE})
+@callback
+def _ws_schedule(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Recurring jobs and the countdowns currently running."""
+    sched = _sched(hass)
+    connection.send_result(msg["id"], sched.async_list() if sched else {"jobs": [], "timers": []})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_SCHEDULE_SET,
+    vol.Required("jobs"): list,
+})
+@callback
+def _ws_schedule_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Replace the whole job list and re-arm the listeners.
+
+    Replace rather than patch: the panel always holds the complete list, and a
+    partial update protocol would need conflict handling for a feature where
+    the whole payload is a few hundred bytes.
+    """
+    sched = _sched(hass)
+    if sched is None:
+        connection.send_error(msg["id"], "not_ready", "Pianificatore non ancora pronto")
+        return
+    connection.send_result(msg["id"], {"jobs": sched.async_set_jobs(msg["jobs"])})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_RUN_FOR,
+    vol.Required("entity_id"): str,
+    vol.Required("minutes"): vol.Coerce(float),
+    vol.Optional("data"): dict,
+})
+@callback
+def _ws_run_for(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Switch something on now and guarantee Home Assistant switches it off."""
+    sched = _sched(hass)
+    if sched is None:
+        connection.send_error(msg["id"], "not_ready", "Pianificatore non ancora pronto")
+        return
+    timer = sched.async_run_for(msg["entity_id"], msg["minutes"], msg.get("data"))
+    connection.send_result(msg["id"], {"timer": timer})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_RUN_CANCEL,
+    vol.Required("entity_id"): str,
+    vol.Optional("turn_off", default=True): bool,
+})
+@callback
+def _ws_run_cancel(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Stop a countdown, switching the entity off unless asked not to."""
+    sched = _sched(hass)
+    if sched is None:
+        connection.send_error(msg["id"], "not_ready", "Pianificatore non ancora pronto")
+        return
+    sched.async_cancel_timer_for(msg["entity_id"])
+    if msg["turn_off"]:
+        sched.async_turn_off(msg["entity_id"])
+    connection.send_result(msg["id"], {"cancelled": True})

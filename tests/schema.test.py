@@ -250,4 +250,43 @@ assert rt["pages"][0]["rooms"][1]["spots"]["light.b"] == [0.3, 0.4]
 assert rt["pages"][0]["view"]["active_level"] == 1
 assert schema.normalize_dashboard(rt) == rt
 
+
+# ---- economy per-device rows + notification log ----------------------------
+
+eco = schema.normalize_item({"type": "economy", "devices": [
+    {"entity": "sensor.lavatrice", "name": "Lavatrice"},
+    {"entity": "sensor.pv2", "kind": "source"},
+    {"entity": "sensor.brutto", "kind": "chissa"},
+    {"name": "senza entita"},
+    "non un dizionario",
+    {"entity": 42},
+]}, 0)
+assert [d["entity"] for d in eco["devices"]] == ["sensor.lavatrice", "sensor.pv2", "sensor.brutto"]
+assert eco["devices"][0]["kind"] == "load", "il default e' un carico, non una sorgente"
+assert eco["devices"][1]["kind"] == "source"
+assert eco["devices"][2]["kind"] == "load", "un kind sconosciuto non deve diventare sorgente"
+assert eco["devices"][0]["name"] == "Lavatrice" and eco["devices"][1]["name"] == ""
+assert schema.normalize_item({"type": "economy"}, 0)["devices"] == []
+assert schema.normalize_item({"type": "economy", "devices": "tutti"}, 0)["devices"] == []
+# 24 righe e' il tetto: una lista arbitrariamente lunga diventa una query
+# statistiche arbitrariamente lunga a ogni ridisegno
+assert len(schema.normalize_item(
+    {"type": "economy", "devices": [{"entity": f"sensor.d{i}"} for i in range(80)]}, 0)["devices"]) == 24
+assert schema.normalize_item({"type": "economy", "devices": [
+    {"entity": "sensor.x", "name": "n" * 500, "icon": "i" * 500}]}, 0)["devices"][0]["name"] == "n" * 80
+
+nt = schema.normalize_item({"type": "notifications"}, 0)
+assert nt["show_sent"] is True and nt["show_updates"] is True and nt["max"] == 8
+assert schema.normalize_item({"type": "notifications", "show_sent": False}, 0)["show_sent"] is False
+assert schema.normalize_item({"type": "notifications", "max": 999}, 0)["max"] == 60
+assert schema.normalize_item({"type": "notifications", "max": "tutti"}, 0)["max"] == 8
+
+# a stored card from before the breakdown existed keeps everything it had
+old_eco = {"id": "e1", "type": "economy", "entity_id": "", "grid_import": "sensor.rete",
+           "price_import": 0.31, "period": "year"}
+mig_eco = schema.normalize_item(old_eco, 0)
+assert mig_eco["grid_import"] == "sensor.rete" and mig_eco["price_import"] == 0.31
+assert mig_eco["period"] == "year" and mig_eco["devices"] == []
+assert schema.normalize_item(mig_eco, 0) == mig_eco
+
 print("schema: tutti i test passati")

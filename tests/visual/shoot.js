@@ -36,6 +36,9 @@ const DEFAULT_DASH = {
     ["07-map-lshape", { pageIndex: 1, autoRooms: true, editing: true, selectRoom: true, lshape: true }],
     ["08-map-focus",  { pageIndex: 1, autoRooms: true, focusRoom: true }],
     ["09-map-focus-edit", { pageIndex: 1, autoRooms: true, editing: true, focusRoom: true }],
+    ["20-overview",   { pageIndex: 0, overview: true }],
+    ["22-economy",    { pageIndex: 0, autoCompose: true, economy: true }],
+    ["23-economy-ed", { pageIndex: 0, autoCompose: true, economy: true, editing: true, selectEconomy: true }],
   ];
   for (const [name, opts] of shots) {
     // full reload per shot: __mount wipes document.body, which is fine once but
@@ -245,6 +248,89 @@ const DEFAULT_DASH = {
   ok("le altre stanze si defilano",
      zoomed.rooms.filter((r) => r !== fr).every((r) => r.opacity < 0.2),
      zoomed.rooms.map((r) => r.opacity).join());
+
+  // ---- phone: the map has to fit and stay usable at 390px ----------------
+  console.log("\n== TELEFONO ==");
+  const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  phone.on("pageerror", (e) => errors.push("PHONE PAGEERROR: " + e.message));
+  await phone.goto("http://127.0.0.1:8899/harness.html");
+  await phone.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phone.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phone.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true });
+  await phone.waitForTimeout(700);
+  await phone.screenshot({ path: path.resolve(__dirname, "50-phone-map.png"), fullPage: false });
+
+  const m = await phone.evaluate(() => {
+    const vp = document.querySelector("[data-fp-viewport]").getBoundingClientRect();
+    const rooms = Array.from(document.querySelectorAll(".fp-room .fp-floor")).map((f) => {
+      const r = f.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) };
+    });
+    const hud = document.querySelector(".fp-hud").getBoundingClientRect();
+    return {
+      vp: { l: Math.round(vp.left), r: Math.round(vp.right), t: Math.round(vp.top), b: Math.round(vp.bottom), w: Math.round(vp.width), h: Math.round(vp.height) },
+      rooms, hud: { l: Math.round(hud.left), r: Math.round(hud.right), w: Math.round(hud.width) },
+      docW: document.documentElement.scrollWidth,
+      winW: window.innerWidth,
+      touchAction: getComputedStyle(document.querySelector("[data-fp-viewport]")).touchAction,
+      zoom: Number(getComputedStyle(document.querySelector("[data-fp-viewport]")).getPropertyValue("--zoom")),
+    };
+  });
+  ok("telefono: la pagina non scrolla in orizzontale", m.docW <= m.winW + 1, m.docW + " vs " + m.winW);
+  ok("telefono: il riquadro della mappa sta nello schermo", m.vp.w <= m.winW, m.vp.w + " vs " + m.winW);
+  // the whole point of the fit: every room inside the viewport, not one corner
+  ok("telefono: tutte le stanze entrano nel riquadro",
+     m.rooms.every((r) => r.left >= m.vp.l - 2 && r.right <= m.vp.r + 2 && r.top >= m.vp.t - 2 && r.bottom <= m.vp.b + 2),
+     m.rooms.map((r) => `${r.left}..${r.right}`).join(" | ") + "  vp " + m.vp.l + ".." + m.vp.r);
+  ok("telefono: la pianta non si riduce a un puntino",
+     m.rooms.length && Math.max(...m.rooms.map((r) => r.right - r.left)) > 40,
+     String(Math.max(...m.rooms.map((r) => r.right - r.left))));
+  ok("telefono: la barra comandi non deborda", m.hud.r <= m.winW + 1 && m.hud.l >= -1, m.hud.l + ".." + m.hud.r);
+  const hudRows = await phone.evaluate(() => {
+    const tops = Array.from(document.querySelectorAll(".fp-hud .fp-hud-btn"))
+      .filter((b) => getComputedStyle(b).display !== "none")
+      .map((b) => Math.round(b.getBoundingClientRect().top));
+    return { rows: new Set(tops).size, count: tops.length };
+  });
+  ok("telefono: i comandi stanno su una riga sola", hudRows.rows === 1,
+     hudRows.count + " pulsanti su " + hudRows.rows + " righe");
+  ok("telefono: il riquadro cattura i gesti", m.touchAction === "none", m.touchAction);
+  ok("telefono: lo zoom è stato adattato", m.zoom > 0.29 && m.zoom < 3.01, String(m.zoom));
+
+  // a room must be reachable by finger
+  await phone.evaluate(() => window.__EL__._focusRoom(window.__EL__._rooms()[0].id));
+  await phone.waitForTimeout(600);
+  await phone.screenshot({ path: path.resolve(__dirname, "51-phone-room.png"), fullPage: false });
+  const f = await phone.evaluate(() => {
+    const bar = document.querySelector(".fp-focus-bar");
+    const vp = document.querySelector("[data-fp-viewport]").getBoundingClientRect();
+    const spots = Array.from(document.querySelectorAll(".fp-spot-btn")).map((s) => {
+      const r = s.getBoundingClientRect();
+      return { w: Math.round(r.width), cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+    });
+    return { bar: !!bar, barW: bar ? Math.round(bar.getBoundingClientRect().width) : 0,
+      vpW: Math.round(vp.width), spots };
+  });
+  ok("telefono: entrando in una stanza compare la barra", f.bar && f.barW <= f.vpW, f.barW + " vs " + f.vpW);
+  ok("telefono: le icone dei dispositivi sono toccabili",
+     f.spots.length > 0 && f.spots.every((s) => s.w >= 28), f.spots.map((s) => s.w).join());
+  const list = await phone.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".fp-dev")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height), t: Math.round(b.top), text: r.textContent.trim().slice(0, 30) };
+    });
+    const tip = document.querySelector(".fp-spot-tip");
+    return { rows, tipDisplay: tip ? getComputedStyle(tip).display : "none-el",
+      winW: window.innerWidth };
+  });
+  ok("telefono: sotto la mappa compare l'elenco dei dispositivi", list.rows.length >= 3, String(list.rows.length));
+  ok("telefono: le targhette sui pin sono nascoste", list.tipDisplay === "none", list.tipDisplay);
+  ok("telefono: l'elenco non deborda", list.rows.every((r) => r.w <= list.winW), list.rows.map((r) => r.w).join());
+  ok("telefono: le righe dell'elenco non si sovrappongono",
+     list.rows.every((r, i) => i === 0 || r.t >= list.rows[i - 1].t + list.rows[i - 1].h - 1));
+  ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
+  await phone.close();
 
   console.log("\n" + (errors.length ? "ERRORS:\n" + errors.join("\n") : "nessun errore console/pagina"));
   console.log(pass + " passati, " + fail + " falliti");
