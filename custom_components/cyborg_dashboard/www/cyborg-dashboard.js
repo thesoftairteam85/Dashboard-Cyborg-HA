@@ -1490,13 +1490,29 @@ function sparkline(points, w, h) {
  * not of the weather.
  */
 /** "14:30" from an ISO timestamp, or an em dash when it is not one. */
+/**
+ * A real number, or null.
+ *
+ * `Number(null)` is 0 and `Number("")` is 0, and both are finite — so the
+ * obvious `Number.isFinite(Number(v))` treats "no value" as a confident zero.
+ * That has now produced three separate visible bugs in this project: a trend
+ * axis collapsed to zero, a "0 °C impostata" on a unit that reports no
+ * setpoint, and an "ora null°". One helper, used everywhere a state or an
+ * attribute becomes a number, so there is no fourth.
+ */
+function num(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function hhmm2(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "\u2014"
     : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
 
-function hourlyChart(points, labels, unit) {
+function hourlyChart(points, labels, unit, meta) {
   if (!points || points.length < 2) return "";
   const W = 520, H = 132, PAD_L = 34, PAD_R = 8, PAD_T = 10, PAD_B = 18;
   let min = Math.min(...points), max = Math.max(...points);
@@ -1528,14 +1544,25 @@ function hourlyChart(points, labels, unit) {
   const mark = (i, cls) => `<circle class="wxc-dot ${cls}" cx="${x(i).toFixed(1)}" cy="${y(points[i]).toFixed(1)}" r="3"/>
     <text class="wxc-mark ${cls}" x="${x(i).toFixed(1)}" y="${(y(points[i]) - 7).toFixed(1)}" text-anchor="middle">${Math.round(points[i])}°</text>`;
 
-  return `<svg class="wxc" viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperatura delle prossime ore">
+  // Geometry travels with the markup so the pointer handler does not have to
+  // recompute it — and cannot drift out of step with what was drawn.
+  const geom = { W, H, PAD_L, PAD_R, PAD_T, PAD_B, min, max, n: points.length,
+    points, labels: labels || [], unit, meta: meta || [] };
+  return `<div class="wxc-plot">
+    <svg class="wxc" viewBox="0 0 ${W} ${H}" data-wx-chart='${esc(JSON.stringify(geom))}'>
       ${grid}
       <path class="wxc-area" d="${area}"/>
       <path class="wxc-line" d="${line}"/>
       ${mark(hi, "hi")}${hi === lo ? "" : mark(lo, "lo")}
       ${xlabs}
       <text class="wxc-unit" x="${PAD_L - 5}" y="${PAD_T - 2}" text-anchor="end">${esc(unit)}</text>
-    </svg>`;
+      <g class="wxc-hover">
+        <line class="wxc-cursor" x1="0" y1="${PAD_T}" x2="0" y2="${H - PAD_B}"/>
+        <circle class="wxc-pt" r="4"/>
+      </g>
+    </svg>
+    <div class="wxc-read" hidden></div>
+  </div>`;
 }
 
 class CyborgDashboard extends HTMLElement {
@@ -4367,13 +4394,33 @@ class CyborgDashboard extends HTMLElement {
     }).slice(0, 6);
   }
 
+  /**
+   * The order of the blocks inside the card, decided by the user.
+   *
+   * A card is not a fixed template: where the suspension row sits relative to
+   * the units, and which unit comes first, are the user's call — the
+   * suspension may be the first thing you look at in one house and a footnote
+   * in another. `order` is a list of block keys ("manual", or an entity id);
+   * anything not listed keeps its natural position at the end, so adding a
+   * unit later never needs the order to be rewritten.
+   */
+  _thermoBlocks(item) {
+    const units = this._thermoUnits(item);
+    const manual = item.show_manual === false ? [] : this._thermoManual(item);
+    const keys = (manual.length ? ["manual"] : []).concat(units);
+    const wanted = Array.isArray(item.order) ? item.order.filter((k) => keys.includes(k)) : [];
+    return wanted.concat(keys.filter((k) => !wanted.includes(k)));
+  }
+
   _thermostatBody(item) {
     const units = this._thermoUnits(item);
     const manual = item.show_manual === false ? [] : this._thermoManual(item);
 
     if (!units.length && !manual.length) {
       return `<div class="ov-empty"><ha-icon icon="mdi:thermostat-box"></ha-icon>
-        <span>Nessun termostato o condizionatore in Home Assistant.</span></div>`;
+        <span>${manual.length || this._thermoUnits({}).length
+          ? "Nessun blocco da mostrare."
+          : "Nessun termostato o condizionatore in Home Assistant."}</span></div>`;
     }
 
     const manualOn = manual.filter((id) => ON_STATES.has(this._hass.states[id].state));
@@ -4390,8 +4437,13 @@ class CyborgDashboard extends HTMLElement {
         }).join("")}
       </div>` : "";
 
-    const cards = units.map((id) => this._thermoUnit(id, item)).join("");
-    return `<div class="th">${manualRows}<div class="th-grid">${cards}</div></div>`;
+    // One flow, not "the suspension row and then a grid of units": the grid was
+    // what made the suspension row structurally unmovable.
+    const cols = item.columns === "1" ? "one" : item.columns === "2" ? "two" : "";
+    const blocks = this._thermoBlocks(item).map((key) => key === "manual"
+      ? `<div class="th-block manual">${manualRows}</div>`
+      : `<div class="th-block">${this._thermoUnit(key, item)}</div>`).join("");
+    return `<div class="th"><div class="th-grid ${esc(cols)}">${blocks}</div></div>`;
   }
 
   /** One unit: state, current reading, setpoint, and only the controls it has. */
@@ -4424,7 +4476,11 @@ class CyborgDashboard extends HTMLElement {
     // the target first and then switching on is a normal way to use a
     // thermostat, and forbidding it is the same class of mistake as offering a
     // control that does nothing — just in the opposite direction.
-    const canSet = has(CLIMATE_F.TARGET_TEMP) && target !== undefined;
+    //
+    // Number.isFinite and not `!== undefined`: a stopped unit reports
+    // `temperature: null`, and Number(null) is 0 — so the card was showing a
+    // confident "0 °C impostata" for a setpoint that does not exist.
+    const canSet = has(CLIMATE_F.TARGET_TEMP) && num(target) !== null;
     const decimals = step < 1 ? 1 : 0;
 
     const modes = (a.hvac_modes || []).filter((m) => m !== "off");
@@ -4441,7 +4497,7 @@ class CyborgDashboard extends HTMLElement {
       <div class="th-head">
         <ha-icon icon="${esc(HVAC_ICONS[mode] || "mdi:thermostat-box")}"></ha-icon>
         <div class="th-name"><strong>${esc(a.friendly_name || id)}</strong>
-          <small>${esc(hvacWords(mode))}${cur !== undefined ? " · ora " + esc(String(cur)) + "°" : ""}</small></div>
+          <small>${esc(hvacWords(mode))}${num(cur) !== null ? " · ora " + esc(String(num(cur))) + "°" : ""}</small></div>
         ${has(CLIMATE_F.TURN_ON) || has(CLIMATE_F.TURN_OFF)
           ? `<button class="th-power ${on ? "on" : ""}" data-thermo-power="${esc(id)}"
                title="${on ? "Spegni" : "Accendi"}"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
@@ -4454,6 +4510,8 @@ class CyborgDashboard extends HTMLElement {
       </div>
       <input class="th-range" type="range" min="${Number.isFinite(lo) ? lo : 5}" max="${Number.isFinite(hi) ? hi : 35}"
         step="${step}" value="${esc(String(target))}" data-thermo-temp="${esc(id)}">` : ""}
+      ${!canSet && has(CLIMATE_F.TARGET_TEMP)
+        ? `<div class="th-noset">Nessuna temperatura impostata: l'unità non ne riporta una in questo stato.</div>` : ""}
       ${modes.length ? `<div class="th-modes">
         ${modes.map((m) => `<button class="th-mode ${m === mode ? "on" : ""}" data-thermo-mode="${esc(id)}|${esc(m)}"
             style="--tm:${esc(HVAC_COLORS[m] || "#8ea3b8")}" title="${esc(hvacWords(m))}">
@@ -4481,8 +4539,8 @@ class CyborgDashboard extends HTMLElement {
     const st = this._hass.states[id];
     if (!st) return;
     const a = st.attributes || {};
-    const lo = Number.isFinite(Number(a.min_temp)) ? Number(a.min_temp) : 5;
-    const hi = Number.isFinite(Number(a.max_temp)) ? Number(a.max_temp) : 35;
+    const lo = num(a.min_temp) ?? 5;
+    const hi = num(a.max_temp) ?? 35;
     const step = Number(a.target_temp_step) || 0.5;
     const clamped = Math.max(lo, Math.min(hi, Math.round(value / step) * step));
     // Optimistic paint so the number follows the thumb, corrected by the next
@@ -5979,7 +6037,14 @@ class CyborgDashboard extends HTMLElement {
 
     const temps = hourly.map((h) => h.temperature).filter((n) => Number.isFinite(n));
     const spark = temps.length > 1
-      ? hourlyChart(temps, hourly.map((h) => hhmm2(h.datetime)), unit) : "";
+      ? hourlyChart(temps, hourly.map((h) => hhmm2(h.datetime)), unit,
+          hourly.map((h) => {
+            const [, cl] = WEATHER_CONDITIONS[h.condition] || ["", String(h.condition || "")];
+            return { cond: cl,
+              rain: num(h.precipitation_probability) !== null ? num(h.precipitation_probability) + "%" : null,
+              mm: num(h.precipitation) !== null && num(h.precipitation) > 0 ? num(h.precipitation) + " mm" : null,
+              wind: num(h.wind_speed) !== null ? Math.round(num(h.wind_speed)) + " " + (a.wind_speed_unit || "km/h") : null };
+          })) : "";
 
     const sun = this._hass.states["sun.sun"];
     const hhmm = hhmm2;
@@ -6023,15 +6088,42 @@ class CyborgDashboard extends HTMLElement {
 
         ${daily.length ? `<div class="wxd-block">
           <h4>Prossimi giorni</h4>
-          <div class="wxd-days">${daily.map((d) => {
+          <div class="wxd-days">${daily.map((d, di2) => {
             const dt = new Date(d.datetime);
-            const [di] = WEATHER_CONDITIONS[d.condition] || ["mdi:weather-cloudy"];
-            return `<div class="wxd-day">
-              <span>${esc(WEEKDAYS[dt.getDay()] || "")}</span>
-              <ha-icon icon="${esc(di)}"></ha-icon>
-              <b>${esc(d.temperature !== undefined ? Math.round(d.temperature) + "°" : "—")}</b>
-              <i>${esc(d.templow !== undefined && d.templow !== null ? Math.round(d.templow) + "°" : "")}</i>
-              ${d.precipitation ? `<em>${esc(d.precipitation)} mm</em>` : ""}
+            const [di, dlabel] = WEATHER_CONDITIONS[d.condition] || ["mdi:weather-cloudy", String(d.condition || "")];
+            const open = (this._wxDay || {})[id] === di2;
+            // Every field the forecast actually carries, and nothing invented:
+            // met.no gives wind and cloud cover, other providers give humidity
+            // or UV, and a row that always shows the same six labels would be
+            // half empty dashes on most of them.
+            const detail = [
+              ["mdi:thermometer-high", "Massima", num(d.temperature) !== null ? num(d.temperature) + "°" : null],
+              ["mdi:thermometer-low", "Minima", num(d.templow) !== null ? num(d.templow) + "°" : null],
+              ["mdi:weather-pouring", "Pioggia", num(d.precipitation) !== null ? num(d.precipitation) + " mm" : null],
+              ["mdi:umbrella-outline", "Probabilità", num(d.precipitation_probability) !== null ? num(d.precipitation_probability) + "%" : null],
+              ["mdi:weather-windy", "Vento", num(d.wind_speed) !== null ? Math.round(num(d.wind_speed)) + " " + (a.wind_speed_unit || "km/h") : null],
+              ["mdi:compass-outline", "Direzione", num(d.wind_bearing) !== null ? windRose(num(d.wind_bearing)) : null],
+              ["mdi:water-percent", "Umidità", num(d.humidity) !== null ? Math.round(num(d.humidity)) + "%" : null],
+              ["mdi:weather-cloudy", "Nuvolosità", num(d.cloud_coverage) !== null ? Math.round(num(d.cloud_coverage)) + "%" : null],
+              ["mdi:weather-sunny-alert", "Indice UV", num(d.uv_index) !== null ? String(num(d.uv_index)) : null],
+              ["mdi:gauge", "Pressione", num(d.pressure) !== null ? Math.round(num(d.pressure)) + " " + (a.pressure_unit || "hPa") : null],
+            ].filter((row) => row[2] !== null);
+            return `<div class="wxd-day-wrap ${open ? "open" : ""}">
+              <button class="wxd-day" data-wx-day="${esc(id)}|${di2}">
+                <span>${esc(WEEKDAYS[dt.getDay()] || "")}</span>
+                <ha-icon icon="${esc(di)}"></ha-icon>
+                <b>${esc(num(d.temperature) !== null ? Math.round(num(d.temperature)) + "°" : "—")}</b>
+                <i>${esc(num(d.templow) !== null ? Math.round(num(d.templow)) + "°" : "")}</i>
+                ${d.precipitation ? `<em>${esc(d.precipitation)} mm</em>` : ""}
+                <ha-icon class="wxd-chev" icon="${open ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
+              </button>
+              ${open ? `<div class="wxd-day-detail">
+                <div class="wxd-day-cond">${esc(dlabel)}${
+                  dt ? " · " + esc(dt.getDate() + "/" + (dt.getMonth() + 1)) : ""}</div>
+                <div class="wxd-facts">${detail.map(([ic, k, v]) => `
+                  <div class="wxd-fact"><ha-icon icon="${esc(ic)}"></ha-icon>
+                    <span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join("")}</div>
+              </div>` : ""}
             </div>`;
           }).join("")}</div>
         </div>` : ""}
@@ -6766,14 +6858,38 @@ class CyborgDashboard extends HTMLElement {
           </button>`).join("")}
         </div>` : ""}
         <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca un interruttore..." autocomplete="off">
-        <div class="entity-results">${matches.map((id) => `<button class="entity-row" data-thermo-man-add="${esc(id)}">
+        <div class="entity-results">${matches.map((id) => `<div class="entity-result-row" data-thermo-man-add="${esc(id)}">
             <ha-icon icon="${esc(autoIcon(id, this._hass.states[id]))}"></ha-icon>
-            <span><strong>${esc(name(id))}</strong><small>${esc(id)}</small></span>
-          </button>`).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`}
+            <div class="err-text"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
+            <span class="err-state">${esc(this._hass.states[id].state)}</span>
+          </div>`).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`}
+      </div>
+      <div class="section">
+        <strong>ORDINE NELLA CARD</strong>
+        <span class="hint">Decidi tu cosa viene prima. Vale anche per la riga di sospensione: sopra le unità, in mezzo o in fondo. Quello che aggiungi domani entra in coda, senza rifare l'ordine.</span>
+        ${this._thermoBlocks(card).map((key, i, arr) => {
+          const isManual = key === "manual";
+          const st = isManual ? null : this._hass.states[key];
+          return `<div class="eco-dev-edit">
+            <ha-icon icon="${esc(isManual ? "mdi:hand-back-right" : "mdi:thermostat-box")}"></ha-icon>
+            <div class="ede-txt"><strong>${esc(isManual ? "Sospensione automazioni" : ((st && st.attributes.friendly_name) || key))}</strong>
+              <small>${esc(isManual ? "riga in cima o dove vuoi tu" : key)}</small></div>
+            <button class="mini" data-thermo-ord="${i}:-1" ${i === 0 ? "disabled" : ""} title="Sposta su"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+            <button class="mini" data-thermo-ord="${i}:1" ${i === arr.length - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Niente da ordinare.</div>'}
       </div>
       <div class="section">
         <strong>DETTAGLI</strong>
         <label class="check"><input type="checkbox" data-prop="show_extras" ${card.show_extras !== false ? "checked" : ""}> Mostra ventola, programma e flusso</label>
+        <label>LARGHEZZA DEI BLOCCHI
+          <select data-prop="columns">
+            <option value="auto" ${(card.columns || "auto") === "auto" ? "selected" : ""}>Automatica</option>
+            <option value="1" ${card.columns === "1" ? "selected" : ""}>Una colonna</option>
+            <option value="2" ${card.columns === "2" ? "selected" : ""}>Due colonne</option>
+          </select>
+          <span class="hint">Con una colonna sola l'ordine si legge dall'alto in basso, senza che i blocchi scivolino di fianco.</span>
+        </label>
       </div>`;
     }
     if (card.type === "comfort") {
@@ -8119,6 +8235,20 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-thermo-ord]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const [i, d] = el.getAttribute("data-thermo-ord").split(":").map(Number);
+        // Materialise the order the first time it is touched: until then the
+        // card has no stored order at all, it just renders the natural one.
+        const order = this._thermoBlocks(card);
+        const j = i + d;
+        if (j < 0 || j >= order.length) return;
+        [order[i], order[j]] = [order[j], order[i]];
+        card.order = order;
+        this._touch();
+      };
+    });
     all("[data-thermo-mode-sel]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -8185,8 +8315,8 @@ class CyborgDashboard extends HTMLElement {
         const st = this._hass.states[id];
         if (!st) return;
         const step = Number(st.attributes.target_temp_step) || 0.5;
-        const cur = Number(st.attributes.temperature);
-        if (!Number.isFinite(cur)) return;
+        const cur = num(st.attributes.temperature);
+        if (cur === null) return;
         this._thermoTemp(id, cur + step * Number(dir));
       };
     });
@@ -8555,6 +8685,61 @@ class CyborgDashboard extends HTMLElement {
      * every pointermove would rebuild the SVG under the finger and the chart
      * would fight the cursor instead of following it.
      */
+    all("[data-wx-day]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, idx] = el.getAttribute("data-wx-day").split("|");
+        this._wxDay = this._wxDay || {};
+        // Same row again closes it: an accordion that only ever opens leaves
+        // the user with no way back to the compact list.
+        this._wxDay[id] = this._wxDay[id] === Number(idx) ? null : Number(idx);
+        this._touch(true);
+      };
+    });
+
+    /** Same pointer readout as the comparison chart, on the weather curve. */
+    all("[data-wx-chart]").forEach((svg) => {
+      let g;
+      try { g = JSON.parse(svg.getAttribute("data-wx-chart")); } catch (e) { return; }
+      if (!g || !g.points || g.points.length < 2) return;
+      const plot = svg.closest(".wxc-plot");
+      const read = plot && plot.querySelector(".wxc-read");
+      const cursor = svg.querySelector(".wxc-cursor");
+      const dot = svg.querySelector(".wxc-pt");
+      if (!plot || !read || !cursor || !dot) return;
+
+      const xOf = (i) => g.PAD_L + (i / (g.n - 1)) * (g.W - g.PAD_L - g.PAD_R);
+      const yOf = (v) => g.PAD_T + (1 - (v - g.min) / (g.max - g.min)) * (g.H - g.PAD_T - g.PAD_B);
+
+      const move = (ev) => {
+        const box = svg.getBoundingClientRect();
+        if (!box.width) return;
+        const vx = ((ev.clientX - box.left) / box.width) * g.W;
+        const frac = Math.max(0, Math.min(1, (vx - g.PAD_L) / Math.max(1, g.W - g.PAD_L - g.PAD_R)));
+        // Snap to an actual forecast hour: the provider gives one value per
+        // hour and inventing what lies between two of them would be fiction.
+        const i = Math.round(frac * (g.n - 1));
+        cursor.setAttribute("x1", xOf(i).toFixed(1));
+        cursor.setAttribute("x2", xOf(i).toFixed(1));
+        dot.setAttribute("cx", xOf(i).toFixed(1));
+        dot.setAttribute("cy", yOf(g.points[i]).toFixed(1));
+        const m = g.meta[i] || {};
+        const bits = [`<b>${esc(Math.round(g.points[i] * 10) / 10)}${esc(g.unit)}</b>`];
+        if (m.cond) bits.push(esc(m.cond));
+        if (m.rain) bits.push("pioggia " + esc(m.rain));
+        if (m.mm) bits.push(esc(m.mm));
+        if (m.wind) bits.push("vento " + esc(m.wind));
+        read.innerHTML = `<span class="wxc-read-t">${esc(g.labels[i] || "")}</span>` + bits.join(" · ");
+        read.hidden = false;
+        plot.classList.add("hovering");
+      };
+      const clear = () => { plot.classList.remove("hovering"); read.hidden = true; };
+      svg.onpointermove = move;
+      svg.onpointerdown = move;
+      svg.onpointerleave = clear;
+      svg.onpointercancel = clear;
+    });
+
     all("[data-trend-svg]").forEach((svg) => {
       const geom = (this._trendGeom || {})[svg.getAttribute("data-trend-svg")];
       if (!geom || !geom.series.length) return;
@@ -10196,6 +10381,12 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .th-sw.on{background:#ff924c}
 .th-sw.on::after{transform:translateX(14px)}
 .th-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.th-grid.one{grid-template-columns:1fr}
+.th-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+/* The suspension row spans the full width wherever it lands, so moving it
+   between two units does not leave a half-width orphan. */
+.th-block.manual{grid-column:1/-1}
+.th-block.manual .th-manual{margin-bottom:0}
 .th-unit{padding:12px;border-radius:14px;border:1px solid var(--divider-color);background:rgba(255,255,255,.02)}
 .th-unit.on{border-color:color-mix(in srgb,var(--th) 42%,transparent);background:color-mix(in srgb,var(--th) 8%,transparent)}
 .th-head{display:flex;align-items:center;gap:9px}
@@ -10228,6 +10419,8 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .th-pick{font:8.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.75}
 .th-pick select{width:100%;margin-top:3px;font-size:11px;text-transform:none;letter-spacing:0}
 .th-na{margin-top:9px;font-size:11px;opacity:.45}
+.th-noset{margin-top:10px;padding:8px 10px;border-radius:9px;font-size:10.5px;opacity:.5;
+  border:1px dashed var(--divider-color)}
 /* Suggestions look like an offer, not like a setting that is already on. */
 .th-hints{margin-top:8px;padding:9px;border-radius:11px;border:1px dashed rgba(255,255,255,.12)}
 .th-hint{display:flex;align-items:center;gap:8px;width:100%;margin-top:6px;padding:7px 9px;border-radius:9px;
@@ -11116,6 +11309,25 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .wxc-mark{font:9px ui-monospace,monospace;font-weight:700}
 .wxc-mark.hi{fill:#ff924c}
 .wxc-mark.lo{fill:#4cc9f0}
+.wxc-plot{position:relative}
+.wxc{touch-action:pan-y}
+.wxc-hover{opacity:0;transition:opacity .12s;pointer-events:none}
+.wxc-plot.hovering .wxc-hover{opacity:1}
+.wxc-cursor{stroke:var(--accent);opacity:.5;stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
+.wxc-pt{fill:var(--accent);stroke:var(--card-background-color,#111a24);stroke-width:2;vector-effect:non-scaling-stroke}
+.wxc-read{display:flex;flex-wrap:wrap;align-items:center;gap:4px 9px;margin-top:6px;padding:7px 9px;
+  border-radius:10px;font-size:10.5px;background:color-mix(in srgb,var(--card-background-color) 82%,transparent);
+  border:1px solid var(--divider-color)}
+.wxc-read b{font:12px ui-monospace,monospace;font-weight:700;color:var(--accent)}
+.wxc-read-t{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.5}
+/* Giorni apribili */
+.wxd-day-wrap{border-radius:11px;overflow:hidden;background:rgba(255,255,255,.03)}
+.wxd-day-wrap.open{background:color-mix(in srgb,var(--accent) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 26%,transparent)}
+.wxd-day{width:100%;background:transparent;border:0;color:inherit;text-align:left}
+.wxd-chev{--mdc-icon-size:15px;opacity:.4;flex-shrink:0}
+.wxd-day-detail{padding:2px 11px 11px}
+.wxd-day-cond{font:9.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.5;margin-bottom:8px}
 .ovl-title{flex:1;min-width:0}
 .ovl-title strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ovl-title small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.7px;opacity:.45;

@@ -504,6 +504,14 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                            if isinstance(raw, list) else [])
         result["show_manual"] = bool(result.get("show_manual", True))
         result["show_extras"] = bool(result.get("show_extras", True))
+        # Block order chosen by the user. Keys not present any more are kept
+        # rather than pruned: an entity that is briefly unavailable must not
+        # lose its place in the order.
+        order = result.get("order")
+        result["order"] = ([x for x in order if isinstance(x, str) and x][:40]
+                           if isinstance(order, list) else [])
+        columns = result.get("columns")
+        result["columns"] = columns if columns in ("1", "2") else "auto"
     if result.get("type") == "lights":
         lights = result.get("lights")
         result["lights"] = [x for x in lights if isinstance(x, str) and x] if isinstance(lights, list) else []

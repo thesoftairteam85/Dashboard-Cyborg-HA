@@ -817,6 +817,19 @@ const DEFAULT_DASH = {
   const wx = await page.evaluate(async () => {
     const el = window.__EL__;
     el._hass.config = { location_name: "Casa Oscar", latitude: 45.568022, longitude: 9.765472 };
+    el._forecast = el._forecast || {};
+    el._forecast["weather.casa_oscar"] = [
+      { datetime: "2026-08-24T12:00:00+02:00", condition: "sunny", temperature: 28, templow: 19,
+        precipitation: 1.7, precipitation_probability: 20, wind_speed: 11, wind_bearing: 142,
+        cloud_coverage: 12 },
+      { datetime: "2026-08-25T12:00:00+02:00", condition: "partlycloudy", temperature: 26, templow: 18,
+        precipitation: 5.4, precipitation_probability: 60, wind_speed: 18, wind_bearing: 210 },
+      { datetime: "2026-08-26T12:00:00+02:00", condition: "rainy", temperature: 23, templow: 17 },
+      { datetime: "2026-08-27T12:00:00+02:00", condition: "cloudy", temperature: 29, templow: 22,
+        precipitation: 0, wind_speed: 7 },
+      { datetime: "2026-08-28T12:00:00+02:00", condition: "sunny", temperature: 30, templow: 23,
+        precipitation: 7.2, precipitation_probability: 80, wind_speed: 22, wind_bearing: 15 },
+    ];
     el._openOverlay("weather", "weather.casa_oscar");
     await new Promise((r) => setTimeout(r, 400));
     const head = document.querySelector(".ovl-title");
@@ -845,6 +858,74 @@ const DEFAULT_DASH = {
   ok("ci sono le ore sull'asse orizzontale",
      wx.xlabs.length >= 3 && wx.xlabs.every((l) => /\d{1,2}:\d{2}/.test(l)), wx.xlabs.join(" "));
   ok("massimo e minimo sono etichettati", wx.marks >= 2, String(wx.marks));
+
+  // the same pointer readout as the comparison chart
+  const wxBox = await page.evaluate(() => {
+    const svg = document.querySelector(".wxc");
+    const b = svg.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width * 0.4), y: Math.round(b.top + b.height / 2),
+      left: Math.round(b.left), top: Math.round(b.top) };
+  });
+  await page.mouse.move(wxBox.x, wxBox.y);
+  await page.waitForTimeout(200);
+  const wxHov = await page.evaluate(() => {
+    const plot = document.querySelector(".wxc-plot");
+    const read = plot.querySelector(".wxc-read");
+    const dot = plot.querySelector(".wxc-pt");
+    const cur = plot.querySelector(".wxc-cursor");
+    return { hovering: plot.classList.contains("hovering"),
+      hidden: read.hidden, text: read.textContent.replace(/\s+/g, " ").trim(),
+      cx: Number(dot.getAttribute("cx")), cy: Number(dot.getAttribute("cy")),
+      curX: Number(cur.getAttribute("x1")),
+      o: Number(getComputedStyle(plot.querySelector(".wxc-hover")).opacity) };
+  });
+  ok("anche sul meteo il puntatore dà il dettaglio",
+     wxHov.hovering && !wxHov.hidden && wxHov.o === 1, JSON.stringify(wxHov));
+  ok("con ora e temperatura", /\d{1,2}:\d{2}/.test(wxHov.text) && /°/.test(wxHov.text),
+     wxHov.text.slice(0, 70));
+  ok("e il punto sta sulla curva, sotto la guida",
+     wxHov.cy > 0 && Math.abs(wxHov.cx - wxHov.curX) < 0.5,
+     JSON.stringify([wxHov.cx, wxHov.curX, wxHov.cy]));
+  await page.mouse.move(wxBox.left - 40, wxBox.top - 60);
+  await page.waitForTimeout(180);
+  ok("e uscendo sparisce", await page.evaluate(() =>
+     document.querySelector(".wxc-read").hidden));
+
+  // days must open on the detail the provider actually sent
+  const day = await page.evaluate(async () => {
+    const rows = Array.from(document.querySelectorAll("[data-wx-day]"));
+    const before = document.querySelectorAll(".wxd-day-detail").length;
+    rows[1].click();
+    await new Promise((r) => setTimeout(r, 250));
+    const det = document.querySelector(".wxd-day-detail");
+    const facts = det ? Array.from(det.querySelectorAll(".wxd-fact span")).map((x) => x.textContent) : [];
+    const open = document.querySelectorAll(".wxd-day-wrap.open").length;
+    return { rows: rows.length, before, facts, open };
+  });
+  ok("i giorni sono apribili", day.rows >= 5 && day.before === 0, JSON.stringify(day.rows));
+  ok("aprendone uno compaiono i dettagli di quel giorno",
+     day.open === 1 && day.facts.length >= 2, JSON.stringify(day.facts));
+  ok("massima e minima sono fra i dettagli",
+     day.facts.some((f) => /Massima/i.test(f)) && day.facts.some((f) => /Minima/i.test(f)),
+     day.facts.join());
+  // a provider that sends fewer fields must not produce a row of dashes
+  const sparse = await page.evaluate(async () => {
+    document.querySelectorAll("[data-wx-day]")[1].click();
+    await new Promise((r) => setTimeout(r, 150));
+    document.querySelectorAll("[data-wx-day]")[2].click();
+    await new Promise((r) => setTimeout(r, 250));
+    const det = document.querySelector(".wxd-day-detail");
+    return { facts: Array.from(det.querySelectorAll(".wxd-fact")).map((f) => f.textContent),
+      dashes: det.textContent.split("—").length - 1 };
+  });
+  ok("un giorno con meno dati mostra meno voci, non trattini",
+     sparse.facts.length === 2 && sparse.dashes === 0, JSON.stringify(sparse));
+  const closed = await page.evaluate(async () => {
+    document.querySelectorAll("[data-wx-day]")[2].click();
+    await new Promise((r) => setTimeout(r, 250));
+    return document.querySelectorAll(".wxd-day-wrap.open").length;
+  });
+  ok("e si richiudono", closed === 0, String(closed));
 
   console.log("\n== CONTROLLO TEMPERATURA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
@@ -986,6 +1067,54 @@ const DEFAULT_DASH = {
   ok("e quello accettato esce dai suggerimenti", !accepted.stillOffered);
   ok("l'altro non è mai entrato",
      !accepted.manual.includes("input_boolean.scale_override_manuale"), accepted.manual.join());
+
+  // The editor's search results must use the shared row markup: an invented
+  // class name has no CSS at all, and the rows lose their layout entirely —
+  // name and entity_id running together on one centred line.
+  const results = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._entityQuery = "in";
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 250));
+    const rows = Array.from(document.querySelectorAll("[data-thermo-man-add].entity-result-row"));
+    if (!rows.length) return { rows: 0 };
+    const r0 = rows[0].getBoundingClientRect();
+    const strong = rows[0].querySelector(".err-text strong");
+    const small = rows[0].querySelector(".err-text small");
+    return { rows: rows.length, h: Math.round(r0.h || r0.height),
+      align: getComputedStyle(rows[0]).textAlign,
+      stacked: strong && small
+        ? Math.round(small.getBoundingClientRect().top) > Math.round(strong.getBoundingClientRect().top)
+        : false,
+      strongDisplay: strong ? getComputedStyle(strong).display : null };
+  });
+  ok("i risultati della ricerca usano le righe standard", results.rows > 0, JSON.stringify(results));
+  ok("nome e id sono incolonnati, non appiccicati", results.stacked, JSON.stringify(results));
+  ok("le righe non sono centrate", results.align !== "center", results.align);
+  ok("e non sono alte il doppio del necessario", results.h > 0 && results.h <= 60, String(results.h));
+
+  // Order inside the card is the user's: moving a block must move it on screen.
+  const ordered = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._entityQuery = "";
+    const card = el._sections().flatMap((s2) => s2.items).find((i) => i.type === "thermostat");
+    card.manual = ["input_boolean.automazioni_cdz_disattivate"];
+    card.order = [];
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 200));
+    const before = Array.from(document.querySelectorAll(".th-block"))
+      .map((b) => b.classList.contains("manual") ? "manual" : "unit");
+    card.order = el._thermoBlocks(card).slice().reverse();
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 200));
+    const after = Array.from(document.querySelectorAll(".th-block"))
+      .map((b) => b.classList.contains("manual") ? "manual" : "unit");
+    return { before, after };
+  });
+  ok("di fabbrica la sospensione è il primo blocco",
+     ordered.before[0] === "manual", ordered.before.join(">"));
+  ok("spostandola finisce davvero in fondo",
+     ordered.after[ordered.after.length - 1] === "manual", ordered.after.join(">"));
 
   const phoneTh = await browser.newPage({ viewport: { width: 390, height: 844 },
     deviceScaleFactor: 3, isMobile: true, hasTouch: true });

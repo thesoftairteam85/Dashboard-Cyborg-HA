@@ -500,6 +500,18 @@ assert th2["show_manual"] is False
 assert len(schema.normalize_item({"type": "thermostat",
     "units": [f"climate.c{i}" for i in range(50)]}, 0)["units"]) == 20
 assert schema.normalize_item(th2, 0) == th2
+# the order inside the card belongs to the user
+assert schema.normalize_item({"type": "thermostat"}, 0)["order"] == []
+th3 = schema.normalize_item({"type": "thermostat",
+                             "order": ["manual", "climate.a", 5, ""]}, 0)
+assert th3["order"] == ["manual", "climate.a"], th3["order"]
+# an entity that is momentarily missing keeps its place rather than being pruned
+assert schema.normalize_item({"type": "thermostat",
+    "order": ["climate.sparito", "manual"]}, 0)["order"] == ["climate.sparito", "manual"]
+assert schema.normalize_item({"type": "thermostat"}, 0)["columns"] == "auto"
+assert schema.normalize_item({"type": "thermostat", "columns": "2"}, 0)["columns"] == "2"
+assert schema.normalize_item({"type": "thermostat", "columns": "9"}, 0)["columns"] == "auto"
+assert schema.normalize_item(th3, 0) == th3
 
 # --- v9: the room accordion is split into one section per room --------------
 old_rooms = {"version": 8, "revision": 3, "pages": [

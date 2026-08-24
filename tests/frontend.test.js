@@ -2892,8 +2892,8 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
 
   card.manual = ["input_boolean.automazioni_cdz_disattivate"];
   let body = el._thermostatBody(card);
-  ok("la sospensione automazioni è in cima e spiegata a parole",
-     body.indexOf("th-manual") < body.indexOf("th-grid")
+  ok("la sospensione automazioni è il primo blocco e spiegata a parole",
+     body.indexOf("th-block manual") < body.indexOf("data-thermo-power")
      && /automazioni sono attive/i.test(body));
   card.manual = [];
   ok("senza interruttori scelti la riga non c'è",
@@ -2988,6 +2988,43 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
      /data-thermo-step="climate\.termo\|1"(?![^>]*disabled)/.test(body)
      && /data-thermo-temp="climate\.termo"(?![^>]*disabled)/.test(body));
   ok("ma la card dice che l'unità è spenta", /unità spenta/.test(body));
+
+  // -- the order inside the card is the user's --
+  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
+  card.units = ["climate.termo", "climate.cdz_storm"];
+  card.order = [];
+  ok("senza ordine scelto vale quello naturale",
+     el._thermoBlocks(card).join(">") === "manual>climate.termo>climate.cdz_storm",
+     el._thermoBlocks(card).join(">"));
+  card.order = ["climate.cdz_storm", "manual", "climate.termo"];
+  ok("l'ordine scelto viene rispettato",
+     el._thermoBlocks(card).join(">") === "climate.cdz_storm>manual>climate.termo",
+     el._thermoBlocks(card).join(">"));
+  body = el._thermostatBody(card);
+  ok("e si vede nel disegno",
+     body.indexOf("climate.cdz_storm") < body.indexOf("th-block manual"), "");
+  // a unit added later must not require rewriting the order
+  card.units = ["climate.termo", "climate.cdz_storm", "climate.nuovo"];
+  states["climate.nuovo"] = S("off", { friendly_name: "Nuovo", supported_features: 385,
+    hvac_modes: ["off", "heat_cool"], min_temp: 5, max_temp: 30, target_temp_step: 0.5 });
+  ok("quello che arriva dopo entra in coda",
+     el._thermoBlocks(card).join(">") === "climate.cdz_storm>manual>climate.termo>climate.nuovo",
+     el._thermoBlocks(card).join(">"));
+  // an order naming things that are gone must not resurrect them
+  card.order = ["climate.sparito", "manual"];
+  ok("un ordine che cita blocchi spariti non li fa comparire",
+     !el._thermoBlocks(card).includes("climate.sparito"), el._thermoBlocks(card).join(">"));
+  delete states["climate.nuovo"];
+  card.order = []; card.units = [];
+
+  // a stopped unit reporting temperature: null must not claim a setpoint of 0
+  states["climate.termo"] = S("off", { friendly_name: "Termostato", supported_features: 385,
+    hvac_modes: ["off", "heat_cool"], min_temp: 1, max_temp: 7, target_temp_step: 0.5,
+    current_temperature: null, temperature: null });
+  const nullBody = el._thermostatBody(card);
+  ok("nessun «0 °C impostata» inventato da un valore nullo",
+     !/>0<\/strong>/.test(nullBody) && /Nessuna temperatura impostata/.test(nullBody), "");
+  ok("né un «ora null°»", !/null°/.test(nullBody), "");
 
   el._hass.callService = realSvc;
   for (const id of ["climate.cdz_storm","climate.termo","input_boolean.automazioni_cdz_disattivate",

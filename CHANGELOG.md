@@ -6,6 +6,76 @@ di aggiornare via HACS — non un changelog automatico.
 
 ## [0.32.0] - 2026-08-24
 
+Seguire una linea col cursore, un meteo che dice di dove parla, e
+l'ordine dentro le card deciso da te.
+
+### Grafici: la linea sotto il puntatore si stacca dalle altre
+Quattro linee che si incrociano su un piano solo diventano illeggibili nel
+momento esatto in cui ti serve un numero da una di esse.
+
+Passando il cursore: la linea più vicina **si ingrossa e mantiene il suo
+bagliore**, le altre **si attenuano** — attenuate, non nascoste, così gli
+incroci che stavi leggendo restano lì. Una **guida verticale** segna l'istante,
+un **punto** si posa su ogni curva, e sotto compare la **lettura** con l'ora e
+il valore di ogni grandezza, quella seguita in evidenza e nel suo colore. Si
+accende anche la voce di legenda corrispondente.
+
+I valori sono **campioni veri del recorder**, il più vicino nel tempo: non
+interpolo fra due misure, perché un numero inventato fra due letture su un
+grafico diagnostico è peggio che nessun numero. Il puntatore **non ridisegna la
+card**: un ridisegno per movimento ricostruirebbe l'SVG sotto il dito.
+
+### Meteo
+- **Il pannello dice di che posto parla.** Prima aveva per titolo il nome
+  dell'entità — «Forecast Casa Oscar» — che è un'etichetta scritta da qualcuno,
+  non un luogo. Ora sotto il titolo ci sono **nome della posizione e coordinate
+  reali** dalla configurazione di Home Assistant, più il **fornitore** ricavato
+  dall'attribuzione (met.no): quando due entità meteo non vanno d'accordo,
+  sapere quale servizio parla cambia tutto.
+- **La curva delle prossime ore ha una scala**: gradi sull'asse verticale, ore
+  su quello orizzontale, massimo e minimo etichettati. Prima era una sparkline
+  senza asse, stirata per riempire il riquadro — la pendenza dipendeva dalla
+  finestra, non dal tempo.
+- **Lo stesso indicatore al puntatore**, con ora, temperatura, condizione,
+  probabilità di pioggia e vento. Il punto si aggancia a un'ora reale della
+  previsione: fra due ore il fornitore non dice niente, e inventarlo sarebbe
+  finzione.
+- **I giorni si aprono.** Ogni riga mostra **solo i campi che quel giorno ha
+  davvero**: chi manda vento e nuvolosità li vede, chi manda solo massima e
+  minima vede due voci — non sei etichette mezze vuote.
+
+### L'ordine dentro la card
+Nella card Controllo temperatura decidi tu cosa viene prima, **la riga di
+sospensione compresa**: sopra le unità, in mezzo, o in fondo. Frecce su/giù
+nell'editor, più la scelta fra una e due colonne. Quello che aggiungi domani
+entra in coda senza che tu rifaccia l'ordine.
+
+### Correzioni
+- **«0 °C impostata» e «ora null°».** Un'unità spenta riporta `temperature:
+  null`, e `Number(null)` è **0** — finito, quindi passava ogni controllo. La
+  card annunciava con sicurezza un valore che non esiste. È la **terza volta**
+  che questa trappola produce un bug visibile in questo progetto (prima l'asse
+  di un grafico collassato a zero, poi una soglia), quindi ora c'è **una sola
+  funzione** `num()` usata ovunque uno stato diventi un numero, e non ci sarà
+  una quarta.
+- **I risultati della ricerca nell'editor erano deformati**: usavo un nome di
+  classe inventato, senza nessuna regola CSS, quindi le righe perdevano
+  l'impaginazione e nome ed entity_id finivano appiccicati su una riga
+  centrata. Ora usano le righe standard del resto dell'editor.
+
+### Verifiche
+862 asserzioni frontend, suite schema, suite notifiche e **245 misurate** in
+Chromium (35 nuove). Fra le nuove, col puntatore vero: che una sola linea vada
+a fuoco ed sia **misurabilmente** più spessa e più opaca, che i punti cadano
+tutti sullo stesso istante, che spostandosi in verticale cambi la linea
+seguita, e che uscendo torni tutto com'era. Sul meteo: che un numero più caldo
+stia **più in alto** (scala verificata per posizione, non perché le etichette
+sembrano ordinate) e che un giorno con meno dati mostri **meno voci, non
+trattini**.
+
+
+## [0.32.0] - 2026-08-24
+
 Seguire una linea col cursore, e un meteo che dice di dove parla.
 
 ### Grafici: la linea sotto il puntatore si stacca dalle altre
