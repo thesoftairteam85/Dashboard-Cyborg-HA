@@ -2867,18 +2867,39 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
   ok("in automatico prende tutte le unità clima",
      auto.includes("climate.cdz_storm") && auto.includes("climate.termo")
      && auto.every(id => id.startsWith("climate.")), auto.join());
+  // A name is not a declaration of what an entity does. "Scale - Override
+  // Manuale" is a staircase lighting override and was landing in a climate
+  // card purely because the word "Manuale" is in it.
+  states["input_boolean.scale_override_manuale"] = S("off",
+    { friendly_name: "Scale - Override Manuale" });
+  ok("nessun interruttore entra da solo nella card",
+     el._thermoManual(card).length === 0, el._thermoManual(card).join());
+  const hints = el._thermoManualHints(card);
+  ok("ma i candidati vengono proposti",
+     hints.includes("input_boolean.automazioni_cdz_disattivate"), hints.join());
+  ok("anche quelli sbagliati restano solo proposte",
+     hints.includes("input_boolean.scale_override_manuale"), hints.join());
+  // the domain name itself contains "automation", so testing the whole
+  // entity_id matched every automation in the house
+  ok("e nessuna automazione viene scambiata per un interruttore",
+     !hints.some(id => id.startsWith("automation.")), hints.join());
+  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
   const manual = el._thermoManual(card);
-  ok("riconosce da solo l'interruttore delle automazioni",
-     manual.includes("input_boolean.automazioni_cdz_disattivate"), manual.join());
-  // "automation.qualcosa" matched only because the DOMAIN name contains the
-  // word: every automation in the house was being offered as a bypass switch.
-  ok("ma non scambia ogni automazione per un interruttore di sospensione",
-     !manual.some(id => id.startsWith("automation.")), manual.join());
+  ok("una volta scelto, vale", manual.length === 1
+     && manual[0] === "input_boolean.automazioni_cdz_disattivate", manual.join());
+  ok("e sparisce dai suggerimenti",
+     !el._thermoManualHints(card).includes("input_boolean.automazioni_cdz_disattivate"));
 
+  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
   let body = el._thermostatBody(card);
   ok("la sospensione automazioni è in cima e spiegata a parole",
      body.indexOf("th-manual") < body.indexOf("th-grid")
      && /automazioni sono attive/i.test(body));
+  card.manual = [];
+  ok("senza interruttori scelti la riga non c'è",
+     !el._thermostatBody(card).includes("th-manual"));
+  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
+  body = el._thermostatBody(card);
   ok("ogni unità ha il suo tasto di accensione",
      body.includes('data-thermo-power="climate.cdz_storm"')
      && body.includes('data-thermo-power="climate.termo"'));
@@ -2949,9 +2970,6 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
      el._thermoUnits(card).join() === "climate.termo", el._thermoUnits(card).join());
   card.units = [];
 
-  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
-  ok("anche gli interruttori si possono scegliere a mano",
-     el._thermoManual(card).join() === "input_boolean.automazioni_cdz_disattivate");
   card.show_manual = false;
   ok("e la riga si può togliere",
      !el._thermostatBody(card).includes("th-manual"));
@@ -2972,7 +2990,8 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
   ok("ma la card dice che l'unità è spenta", /unità spenta/.test(body));
 
   el._hass.callService = realSvc;
-  for (const id of ["climate.cdz_storm","climate.termo","input_boolean.automazioni_cdz_disattivate"]) delete states[id];
+  for (const id of ["climate.cdz_storm","climate.termo","input_boolean.automazioni_cdz_disattivate",
+                    "input_boolean.scale_override_manuale"]) delete states[id];
   ok("stato ripristinato dopo la sezione 35", !states["climate.cdz_storm"]);
 }
 

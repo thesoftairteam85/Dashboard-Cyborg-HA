@@ -2070,7 +2070,54 @@ class CyborgDashboard extends HTMLElement {
    * only the new rooms are appended. That is the "future rooms" case, and it
    * has to work without the user rebuilding what he already arranged.
    */
+  /**
+   * Split a section that holds several room cards into one section per room.
+   *
+   * Mirrors the v9 migration in core/schema.py so the button fixes the layout
+   * immediately, without waiting for a reload. Returns how many sections were
+   * created, so the caller can tell "I converted your old layout" apart from
+   * "there was nothing to do".
+   */
+  _splitRoomSections() {
+    const page = this._page();
+    if (!Array.isArray(page.sections)) return 0;
+    const rebuilt = [];
+    let made = 0;
+    for (const section of page.sections) {
+      const cards = section.items || [];
+      const rooms = cards.filter((c) => c && c.type === "room");
+      // Entirely rooms, and more than one: that is an accordion. A section
+      // mixing a room with other cards is a layout somebody built on purpose.
+      if (rooms.length < 2 || rooms.length !== cards.length) { rebuilt.push(section); continue; }
+      rooms.forEach((card, i) => {
+        const app = card.appearance || {};
+        rebuilt.push({ id: uid("sec"),
+          title: String(card.name || "").trim() || ("Stanza " + (i + 1)),
+          icon: app.icon || section.icon || "mdi:home-outline",
+          accent: section.accent || null,
+          collapsed: i > 0,
+          items: [card] });
+        made += 1;
+      });
+    }
+    if (made) page.sections = rebuilt;
+    return made;
+  }
+
   async _addRoomSection() {
+    // An installation built by the previous version keeps every room inside one
+    // accordion. Converting it is the FIRST thing to try: without this the
+    // idempotence check below sees every area as already present and refuses to
+    // do anything at all, so the button looked broken to exactly the people who
+    // most needed it.
+    const split = this._splitRoomSections();
+    if (split) {
+      this._error = "";
+      this._selected = null;
+      this._touch();
+      return;
+    }
+
     // The registry is not loaded on a sections page, and making the user click
     // twice for no visible reason is the kind of thing that reads as broken.
     if (!this._registry) await this._loadRegistry();
@@ -4230,24 +4277,34 @@ class CyborgDashboard extends HTMLElement {
    * sentence, not to be buried among the switches in some room — which is
    * where it lives today, indistinguishable from a socket.
    */
+  /**
+   * The suspension switches ARE the ones the user chose. Nothing else.
+   *
+   * This used to fall back to a name search, and a name search is a guess about
+   * meaning made from a string. It put "Scale - Override Manuale" — a lighting
+   * override for the staircase — into a climate card, because the word
+   * "Manuale" appears in it. A domain is a fact; a name is an opinion. Guessing
+   * from a domain is fine, guessing from a name is not allowed to decide
+   * anything on its own: it may only SUGGEST, in the editor, where the user
+   * accepts it with one click.
+   */
   _thermoManual(item) {
-    // `.length` and not just Array.isArray: an empty array is still an array,
-    // so the automatic detection was never reached on a freshly created card —
-    // the row simply did not appear and nothing said why.
-    if (Array.isArray(item.manual) && item.manual.length) {
-      return item.manual.filter((id) => this._hass.states[id]);
-    }
+    const list = Array.isArray(item.manual) ? item.manual : [];
+    return list.filter((id) => this._hass.states[id]);
+  }
+
+  /** Candidates offered in the editor. Never applied without a click. */
+  _thermoManualHints(item) {
+    const already = new Set(this._thermoManual(item));
     return Object.keys(this._hass.states).filter((id) => {
       const d = domainOf(id);
       if (d !== "input_boolean" && d !== "switch") return false;
+      if (already.has(id)) return false;
       const st = this._hass.states[id];
-      // Match on the object_id and the friendly name, NOT the whole entity_id:
-      // testing the full id makes every automation.* entity match, because the
-      // domain name itself contains "automation". The `automation` domain is
-      // excluded outright for the same reason — a bypass is a switch the user
-      // flips, not each individual automation.
+      // The object_id, not the whole entity_id: testing the full id makes every
+      // automation.* entity match, because the domain name contains the word.
       return MANUAL_RE.test(id.split(".")[1] + " " + (st.attributes.friendly_name || ""));
-    }).slice(0, 4);
+    }).slice(0, 6);
   }
 
   _thermostatBody(item) {
@@ -6541,14 +6598,14 @@ class CyborgDashboard extends HTMLElement {
     if (card.type === "thermostat") {
       const allUnits = Object.keys(this._hass.states).filter((id) => domainOf(id) === "climate");
       const chosen = Array.isArray(card.units) && card.units.length ? card.units : null;
-      const manualChosen = Array.isArray(card.manual) && card.manual.length ? card.manual : null;
-      const detected = this._thermoManual({ show_manual: true });
+      const chosenManual = this._thermoManual(card);
+      const hints = this._thermoManualHints(card);
       const switchable = Object.keys(this._hass.states).filter((id) =>
         ["input_boolean", "switch"].includes(domainOf(id)));
       const name = (id) => (this._hass.states[id].attributes.friendly_name || id);
       const q3 = (this._entityQuery || "").trim().toLowerCase();
       const matches = switchable
-        .filter((id) => !(manualChosen || []).includes(id))
+        .filter((id) => !chosenManual.includes(id))
         .filter((id) => !q3 || (name(id) + " " + id).toLowerCase().includes(q3))
         .slice(0, 40);
 
@@ -6574,26 +6631,27 @@ class CyborgDashboard extends HTMLElement {
       </div>
       <div class="section">
         <strong>SOSPENSIONE DELLE AUTOMAZIONI</strong>
-        <span class="hint">Gli interruttori che fermano le automazioni non sono dispositivi, sono uno <strong>stato dell'impianto</strong>: qui stanno in cima alla card, con scritto per esteso cosa comportano, invece di confondersi con una presa in fondo a una stanza.</span>
+        <span class="hint">Gli interruttori che fermano le automazioni non sono dispositivi, sono uno <strong>stato dell'impianto</strong>: stanno in cima alla card, con scritto per esteso cosa comportano. <strong>Li scegli tu</strong>: qui sotto ci sono al massimo dei suggerimenti presi dal nome, e un nome non dice cosa fa davvero un'entità.</span>
         <label class="check"><input type="checkbox" data-prop="show_manual" ${card.show_manual !== false ? "checked" : ""}> Mostra la riga di sospensione</label>
         ${card.show_manual === false ? "" : `
-        <div class="seg">
-          <button class="${manualChosen ? "" : "active"}" data-thermo-man-sel="auto">Trovati da solo</button>
-          <button class="${manualChosen ? "active" : ""}" data-thermo-man-sel="manual">Scelti da me</button>
-        </div>
-        ${manualChosen ? `<div class="eco-dev-list">${manualChosen.map((id, i) => `<div class="eco-dev-edit">
+        ${chosenManual.length ? `<div class="eco-dev-list">${chosenManual.map((id, i) => `<div class="eco-dev-edit">
             <ha-icon icon="mdi:hand-back-right"></ha-icon>
             <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
             <button class="mini danger" data-thermo-man-drop="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
-          </div>`).join("")}</div>
-          <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca un interruttore..." autocomplete="off">
-          <div class="entity-results">${matches.map((id) => `<button class="entity-row" data-thermo-man-add="${esc(id)}">
-              <ha-icon icon="${esc(autoIcon(id, this._hass.states[id]))}"></ha-icon>
-              <span><strong>${esc(name(id))}</strong><small>${esc(id)}</small></span>
-            </button>`).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`
-          : `<span class="hint">${detected.length
-              ? `Trovati: ${detected.map((id) => esc(name(id))).join(", ")}.`
-              : "Nessun interruttore riconosciuto. Passa a «scelti da me» per indicarlo."}</span>`}`}
+          </div>`).join("")}</div>`
+          : `<span class="hint">Nessun interruttore indicato: la riga non compare finché non ne scegli uno.</span>`}
+        ${hints.length ? `<div class="th-hints">
+          <span class="hint">Possibili candidati, trovati dal nome. <strong>Nessuno è attivo</strong> finché non lo aggiungi tu — il nome di un'entità è un indizio, non una dichiarazione di cosa fa.</span>
+          ${hints.map((id) => `<button class="th-hint" data-thermo-man-add="${esc(id)}">
+            <ha-icon icon="mdi:plus"></ha-icon>
+            <span><strong>${esc(name(id))}</strong><small>${esc(id)}</small></span>
+          </button>`).join("")}
+        </div>` : ""}
+        <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca un interruttore..." autocomplete="off">
+        <div class="entity-results">${matches.map((id) => `<button class="entity-row" data-thermo-man-add="${esc(id)}">
+            <ha-icon icon="${esc(autoIcon(id, this._hass.states[id]))}"></ha-icon>
+            <span><strong>${esc(name(id))}</strong><small>${esc(id)}</small></span>
+          </button>`).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`}
       </div>
       <div class="section">
         <strong>DETTAGLI</strong>
@@ -7964,15 +8022,6 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => {
         if (!card || !Array.isArray(card.units)) return;
         card.units.splice(Number(el.getAttribute("data-thermo-drop")), 1);
-        this._touch();
-      };
-    });
-    all("[data-thermo-man-sel]").forEach((el) => {
-      el.onclick = () => {
-        if (!card) return;
-        card.manual = el.getAttribute("data-thermo-man-sel") === "manual"
-          ? this._thermoManual({ show_manual: true }).slice() : [];
-        this._entityQuery = "";
         this._touch();
       };
     });
@@ -9964,6 +10013,15 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .th-pick{font:8.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.75}
 .th-pick select{width:100%;margin-top:3px;font-size:11px;text-transform:none;letter-spacing:0}
 .th-na{margin-top:9px;font-size:11px;opacity:.45}
+/* Suggestions look like an offer, not like a setting that is already on. */
+.th-hints{margin-top:8px;padding:9px;border-radius:11px;border:1px dashed rgba(255,255,255,.12)}
+.th-hint{display:flex;align-items:center;gap:8px;width:100%;margin-top:6px;padding:7px 9px;border-radius:9px;
+  border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);text-align:left}
+.th-hint ha-icon{--mdc-icon-size:15px;opacity:.6;flex-shrink:0}
+.th-hint span{min-width:0;flex:1}
+.th-hint strong{display:block;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th-hint small{display:block;font:9px ui-monospace,monospace;opacity:.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th-hint:hover{border-color:var(--accent);color:var(--accent)}
 
 /* Centrale di allarme */
 .al-head{display:flex;align-items:center;gap:11px;margin-top:12px;padding:11px 12px;border-radius:13px;
@@ -10962,7 +11020,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.30.0";
+const CYBORG_BUILD = "0.31.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

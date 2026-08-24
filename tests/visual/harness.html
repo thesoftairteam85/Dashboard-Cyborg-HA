@@ -286,6 +286,8 @@ window.__mount=(dash,opts)=>{
           sec.items.unshift({id:"thcard",type:"thermostat",entity_id:"",name:"",size:"xl",
             appearance:{},states:{},actions:{},units:[],manual:[],
             show_manual:true,show_extras:true});
+          // chosen explicitly: nothing enters the card from a name guess
+          sec.items[0].manual=["input_boolean.automazioni_cdz_disattivate"];
           if(opts.manualOn){
             el._hass.states["input_boolean.automazioni_cdz_disattivate"].state="on";
           }

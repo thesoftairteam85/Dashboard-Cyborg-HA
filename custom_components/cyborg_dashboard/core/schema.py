@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -811,6 +811,48 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
     result["pages"] = normalized or [
         normalize_page(pg, i) for i, pg in enumerate(default_dashboard()["pages"])
     ]
+
+    # v9: explode a section that holds several rooms into one section per room.
+    #
+    # The one-section-per-room layout shipped with a builder that refused to
+    # touch anything already there — correct for "add the new rooms", useless
+    # for an installation built by the OLD builder, which put every room card
+    # inside a single "Stanze" accordion. Those users pressed the button, were
+    # told every room already had its section, and saw nothing change.
+    #
+    # So the split happens here, once, on the document itself: each room card
+    # becomes its own section titled after the room, in the same order, in the
+    # same page, at the same position. Nothing the user arranged is lost — the
+    # accordion is replaced in place by the sections it contained.
+    if stored_version and stored_version < 9:
+        for page in result["pages"]:
+            sections = page.get("sections")
+            if not isinstance(sections, list):
+                continue
+            rebuilt: list[dict[str, Any]] = []
+            for section in sections:
+                cards = section.get("items") or []
+                rooms = [c for c in cards if isinstance(c, dict) and c.get("type") == "room"]
+                # Only a section that is ENTIRELY rooms, and more than one, is a
+                # room accordion. A section mixing a room card with other cards
+                # is a layout the user built on purpose and must be left alone.
+                if len(rooms) < 2 or len(rooms) != len(cards):
+                    rebuilt.append(section)
+                    continue
+                for i, card in enumerate(rooms):
+                    appearance = card.get("appearance") if isinstance(card.get("appearance"), dict) else {}
+                    title = str(card.get("name") or "").strip() or f"Stanza {i + 1}"
+                    rebuilt.append({
+                        "id": f"{section.get('id', 'sec')}-r{i}",
+                        "title": title,
+                        "icon": appearance.get("icon") or section.get("icon") or "mdi:home-outline",
+                        "accent": section.get("accent"),
+                        # Only the first stays open: a page that greets you with
+                        # the whole house expanded is the problem being fixed.
+                        "collapsed": i > 0,
+                        "items": [card],
+                    })
+            page["sections"] = rebuilt
 
     # v8: the Illuminazione card advertised an "azione al tocco" setting that
     # its rows never read. Whatever is stored there was written by a build that

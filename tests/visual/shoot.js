@@ -822,6 +822,48 @@ const DEFAULT_DASH = {
      manOn.on && manOn.border === "solid", JSON.stringify(manOn).slice(0, 120));
   ok("e lo dice senza ambiguità", /NON intervengono/.test(manOn.text), manOn.text.slice(0, 90));
 
+  // Nothing may enter the card from a name guess. "Scale - Override Manuale" is
+  // a staircase lighting override; it belongs in the suggestions, never in the
+  // card, and a suggestion must be one click away from being accepted.
+  const hints = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._hass.states["input_boolean.scale_override_manuale"] =
+      { entity_id: "input_boolean.scale_override_manuale", state: "off",
+        attributes: { friendly_name: "Scale - Override Manuale" } };
+    const card = el._sections().flatMap((s2) => s2.items).find((i) => i.type === "thermostat");
+    card.manual = [];
+    el._editing = true;
+    el._selected = { kind: "card", sectionId: el._sections()[0].id, itemId: card.id };
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 250));
+    const rows = Array.from(document.querySelectorAll(".th-man-row"))
+      .map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    const offered = Array.from(document.querySelectorAll("[data-thermo-man-add]"))
+      .map((b) => b.getAttribute("data-thermo-man-add"));
+    return { rows, offered, card: card.id };
+  });
+  ok("nessun interruttore entra nella card da solo", hints.rows.length === 0,
+     JSON.stringify(hints.rows));
+  ok("ma i candidati sono offerti, quello sbagliato compreso",
+     hints.offered.includes("input_boolean.automazioni_cdz_disattivate")
+     && hints.offered.includes("input_boolean.scale_override_manuale"),
+     hints.offered.join());
+
+  const accepted = await page.evaluate(async () => {
+    document.querySelector('[data-thermo-man-add="input_boolean.automazioni_cdz_disattivate"]').click();
+    await new Promise((r) => setTimeout(r, 250));
+    const el = window.__EL__;
+    const card = el._sections().flatMap((s2) => s2.items).find((i) => i.type === "thermostat");
+    return { manual: card.manual.slice(),
+      rows: document.querySelectorAll(".th-man-row").length,
+      stillOffered: !!document.querySelector('[data-thermo-man-add="input_boolean.automazioni_cdz_disattivate"]') };
+  });
+  ok("accettare un suggerimento basta un clic",
+     accepted.manual.length === 1 && accepted.rows === 1, JSON.stringify(accepted));
+  ok("e quello accettato esce dai suggerimenti", !accepted.stillOffered);
+  ok("l'altro non è mai entrato",
+     !accepted.manual.includes("input_boolean.scale_override_manuale"), accepted.manual.join());
+
   const phoneTh = await browser.newPage({ viewport: { width: 390, height: 844 },
     deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   phoneTh.on("pageerror", (e) => errors.push("PHONE-THERMO: " + e.message));

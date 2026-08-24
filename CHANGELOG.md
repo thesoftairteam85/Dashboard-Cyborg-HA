@@ -4,6 +4,49 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.31.0] - 2026-08-24
+
+Due difetti dell'ultima versione, entrambi della stessa famiglia: il
+sistema che decide al posto tuo. Schema alla versione 9.
+
+### Le stanze non si erano divise
+La 0.30 creava una sezione per stanza, ma **solo su una dashboard nuova**. Il
+controllo che evita i doppioni vedeva le aree già presenti dentro la vecchia
+fisarmonica «Stanze» e si rifiutava di fare qualsiasi cosa: chi aveva già la
+dashboard — cioè esattamente chi ne aveva bisogno — premeva il pulsante,
+leggeva «ogni stanza ha già la sua sezione» e non vedeva cambiare niente.
+Mancava la migrazione.
+
+**Ora la divisione avviene sul documento**, alla versione 9: una sezione fatta
+*solo* di card stanza, e più d'una, viene sostituita **sul posto** dalle
+sezioni che conteneva — stessa pagina, stessa posizione, stesso ordine, ogni
+stanza col suo nome e la sua icona, solo la prima aperta. Una sezione che
+mescola una stanza con altre card è un layout costruito apposta e non viene
+toccata. Il pulsante STANZE fa la stessa conversione subito, senza aspettare
+un riavvio.
+
+### «Scale - Override Manuale» non c'entra niente col clima
+La card Clima si popolava da sola cercando parole come «manuale» nei nomi. Così
+un override delle luci delle scale è finito fra i comandi del condizionatore,
+perché nel nome c'è scritto «Manuale».
+
+**Un dominio è un fatto, un nome è un'opinione.** Dedurre da un dominio va
+bene: `climate.*` *è* un termostato. Dedurre da un nome no: il nome è una
+stringa che qualcuno ha scritto, non una dichiarazione di cosa fa l'entità.
+
+Quindi ora **nessun interruttore entra nella card da solo**. I candidati
+trovati dal nome compaiono nell'editor come **suggerimenti**, con scritto che
+sono indizi, e si accettano con un clic. La riga di sospensione non compare
+finché non ne scegli almeno uno. Vale lo stesso principio già applicato ai
+comandi che non comandano: il sistema può proporre, non decidere.
+
+### Verifiche
+855 asserzioni frontend, suite schema (con la migrazione v9: sostituzione sul
+posto, ordine conservato, sezioni miste non toccate, id unici, idempotenza) e
+**210 misurate** in Chromium — fra cui che «Scale - Override Manuale» resti nei
+suggerimenti e non entri mai nella card, e che accettarne uno costi un clic.
+
+
 ## [0.30.0] - 2026-08-24
 
 Una sezione per stanza, e il controllo del clima dove serve.

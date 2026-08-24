@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 8 and len(d["pages"][1]["sections"]) == 6
+assert d["version"] == 9 and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -13,7 +13,7 @@ v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c4", "entity_id": "event.backup"}]}]}
 m = schema.normalize_dashboard(v2)
 secs = m["pages"][0]["sections"]
-assert m["version"] == 8 and m["revision"] == 7
+assert m["version"] == 9 and m["revision"] == 7
 assert len(secs) == 3 and len(secs[1]["items"]) == 2, "case-insensitive merge"
 assert secs[2]["title"] == "Generale"
 assert "items" not in m["pages"][0], "legacy items must be dropped"
@@ -25,7 +25,7 @@ print("schema: all tests passed")
 
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
-assert d["version"] == 8
+assert d["version"] == 9
 assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
 assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
 assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
@@ -35,7 +35,7 @@ assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
     {"id": "s", "title": "X", "items": [{"id": "c", "entity_id": "light.a"}]}]}]}
 r = schema.normalize_dashboard(v3)
-assert r["version"] == 8
+assert r["version"] == 9
 assert r["pages"][0]["type"] == "sections"
 assert r["pages"][0]["sections"][0]["items"][0]["entity_id"] == "light.a"
 assert "rooms" not in r["pages"][0] and "view" not in r["pages"][0]
@@ -231,7 +231,7 @@ stored = {"version": 4, "revision": 12, "pages": [
                 "area_id": "salotto", "entities": None}]}]}
 mig = schema.normalize_dashboard(stored)
 room = mig["pages"][0]["rooms"][0]
-assert mig["version"] == 8 and mig["revision"] == 12
+assert mig["version"] == 9 and mig["revision"] == 12
 assert room["title"] == "Salotto" and room["area_id"] == "salotto" and room["w"] == 230
 assert room["level"] == 0 and room["points"] is None and room["spots"] == {}
 assert mig["pages"][0]["view"]["level_gap"] == 150
@@ -379,7 +379,7 @@ assert [v["id"] for v in d6["vehicles"]] == ["ev1", "ev1-2"], [v["id"] for v in 
 assert d6["vehicles"][0]["capacity"] == 60.0
 assert d6["vehicles"][0]["charging"] == "binary_sensor.ch"
 assert d6["vehicles"][0]["range"] is None
-assert d6["version"] == 8
+assert d6["version"] == 9
 # a vehicle with no entity at all would be a name and nothing else
 assert all(v["name"] != "Senza entita" for v in d6["vehicles"])
 assert all(v["name"] != "" for v in d6["vehicles"])
@@ -417,7 +417,7 @@ old5 = {"version": 5, "revision": 3, "pages": [
         {"id": "s", "title": "Energia", "icon": "mdi:flash", "accent": "#ffd166",
          "items": [{"id": "c", "type": "energyflow", "entity_id": "", "flow": {"grid": "sensor.g"}}]}]}]}
 m6 = schema.normalize_dashboard(old5)
-assert m6["version"] == 8 and m6["revision"] == 3 and m6["vehicles"] == []
+assert m6["version"] == 9 and m6["revision"] == 3 and m6["vehicles"] == []
 assert m6["pages"][0]["sections"][0]["items"][0]["flow"]["grid"] == "sensor.g"
 assert schema.normalize_dashboard(m6) == m6
 
@@ -470,7 +470,7 @@ old_doc = {"version": 7, "revision": 4, "pages": [
 mig8 = schema.normalize_dashboard(old_doc)
 lights_card = mig8["pages"][0]["sections"][0]["items"][0]
 room_card = mig8["pages"][0]["sections"][0]["items"][1]
-assert mig8["version"] == 8
+assert mig8["version"] == 9
 assert lights_card["row_action"] == "more-info", lights_card
 # the room card's setting DID work, so it must be left exactly as chosen
 assert room_card["row_action"] == "toggle", room_card
@@ -500,5 +500,51 @@ assert th2["show_manual"] is False
 assert len(schema.normalize_item({"type": "thermostat",
     "units": [f"climate.c{i}" for i in range(50)]}, 0)["units"]) == 20
 assert schema.normalize_item(th2, 0) == th2
+
+# --- v9: the room accordion is split into one section per room --------------
+old_rooms = {"version": 8, "revision": 3, "pages": [
+    {"id": "p", "type": "sections", "title": "Stanze", "sections": [
+        {"id": "before", "title": "Meteo", "icon": "mdi:weather-sunny",
+         "items": [{"id": "w", "type": "weather", "entity_id": "weather.casa"}]},
+        {"id": "rooms", "title": "Stanze", "icon": "mdi:home-group", "accent": "#06d6a0",
+         "items": [
+             {"id": "c1", "type": "room", "name": "Soggiorno", "area": "sog",
+              "appearance": {"icon": "mdi:sofa"}},
+             {"id": "c2", "type": "room", "name": "Cucina", "area": "cuc",
+              "appearance": {"icon": "mdi:silverware-fork-knife"}},
+             {"id": "c3", "type": "room", "name": "Bagno", "area": "bag", "appearance": {}},
+         ]},
+        {"id": "mixed", "title": "Misto", "icon": "mdi:shape",
+         "items": [{"id": "c4", "type": "room", "name": "Studio", "area": "stu"},
+                   {"id": "c5", "type": "room", "name": "Garage", "area": "gar"},
+                   {"id": "g", "type": "gauge", "entity_id": "sensor.x"}]},
+    ]}]}
+mig9 = schema.normalize_dashboard(old_rooms)
+secs9 = mig9["pages"][0]["sections"]
+assert mig9["version"] == 9
+titles9 = [s["title"] for s in secs9]
+# the accordion is replaced IN PLACE by the sections it contained
+assert titles9 == ["Meteo", "Soggiorno", "Cucina", "Bagno", "Misto"], titles9
+assert [len(s["items"]) for s in secs9] == [1, 1, 1, 1, 3], [len(s["items"]) for s in secs9]
+# each room keeps its own card, untouched
+assert secs9[1]["items"][0]["id"] == "c1" and secs9[1]["items"][0]["area"] == "sog"
+# only the first room stays open
+assert secs9[1]["collapsed"] is False
+assert secs9[2]["collapsed"] is True and secs9[3]["collapsed"] is True
+# the card's icon wins, the section's icon is the fallback
+assert secs9[1]["icon"] == "mdi:sofa", secs9[1]["icon"]
+assert secs9[3]["icon"] == "mdi:home-group", secs9[3]["icon"]
+# a section mixing rooms with other cards is a layout somebody built: leave it
+assert [c["id"] for c in secs9[4]["items"]] == ["c4", "c5", "g"]
+# ids are unique, or two sections would fight over selection and drag
+assert len({s["id"] for s in secs9}) == len(secs9)
+# and running it again changes nothing
+again9 = schema.normalize_dashboard(mig9)
+assert [s["title"] for s in again9["pages"][0]["sections"]] == titles9
+# a single room in its own section is already the target shape
+one = schema.normalize_dashboard({"version": 8, "pages": [{"id": "p", "type": "sections",
+    "sections": [{"id": "s", "title": "Soggiorno",
+                  "items": [{"id": "c", "type": "room", "name": "Soggiorno", "area": "sog"}]}]}]})
+assert len(one["pages"][0]["sections"]) == 1
 
 print("schema: rotazione, azione di riga ed esclusioni ok")
