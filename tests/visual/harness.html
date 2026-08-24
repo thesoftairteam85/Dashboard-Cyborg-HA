@@ -24,13 +24,13 @@ const S=(state,attrs)=>({state,attributes:attrs||{}});
 const states={
  "light.soggiorno_faretti":S("on",{friendly_name:"Faretti Soggiorno"}),
  "light.soggiorno_piantana":S("off",{friendly_name:"Piantana"}),
- "climate.cdz_storm":S("dry",{friendly_name:"CDZ Storm",current_temperature:26.1,temperature:24}),
+ "climate.cdz_storm":S("dry",{friendly_name:"CDZ Storm",supported_features:953,hvac_modes:["auto","cool","dry","fan_only","heat","off"],min_temp:8,max_temp:30,target_temp_step:1,fan_modes:["auto","low","medium","high"],fan_mode:"low",preset_modes:["eco","away","boost","none","sleep"],preset_mode:"none",swing_modes:["default","full_swing"],swing_mode:"default",current_temperature:26.1,temperature:24}),
  "sensor.soggiorno_temp":S("26.3",{friendly_name:"Soggiorno Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.soggiorno_hum":S("47",{friendly_name:"Soggiorno Umidità",device_class:"humidity",unit_of_measurement:"%"}),
  "switch.interruttore_fem_luci":S("on",{friendly_name:"FEM + LUCI"}),
  "sensor.fem_potenza":S("760",{friendly_name:"Potenza Totale",device_class:"power",unit_of_measurement:"W"}),
  "binary_sensor.porta_ingresso":S("on",{friendly_name:"Porta ingresso",device_class:"door"}),
- "climate.thermostat":S("heat_cool",{friendly_name:"Termostato",current_temperature:22.4,temperature:21}),
+ "climate.thermostat":S("heat_cool",{friendly_name:"Termostato salotto",supported_features:385,hvac_modes:["off","heat_cool"],min_temp:5,max_temp:35,target_temp_step:0.5,current_temperature:22.4,temperature:21}),
  "sensor.camera_temp":S("21.8",{friendly_name:"Camera Temperatura",device_class:"temperature",unit_of_measurement:"°C"}),
  "light.camera_abat":S("off",{friendly_name:"Abat-jour"}),
  "cover.camera_tapparella":S("open",{friendly_name:"Tapparella",current_position:47}),
@@ -54,6 +54,8 @@ const states={
  "sensor.v_l3":S("229.8",{friendly_name:"Tensione L3",device_class:"voltage",unit_of_measurement:"V"}),
  "sensor.i_l1":S("4.85",{friendly_name:"Corrente L1",device_class:"current",unit_of_measurement:"A"}),
  "sensor.i_l2":S("2.14",{friendly_name:"Corrente L2",device_class:"current",unit_of_measurement:"A"}),
+ "climate.termo_test":S("off",{friendly_name:"Termostato",supported_features:385,hvac_modes:["off","heat_cool"],min_temp:1,max_temp:7,target_temp_step:0.5,current_temperature:21,temperature:4}),
+ "input_boolean.automazioni_cdz_disattivate":S("off",{friendly_name:"Automazioni CDZ Disattivate"}),
  "sensor.temperatura_esterna":S("24.0",{friendly_name:"Temperatura esterna",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_cpu":S("52.1",{friendly_name:"Raspberry CPU",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_inv":S("91.3",{friendly_name:"Inverter",device_class:"temperature",unit_of_measurement:"°C"}),
@@ -278,6 +280,16 @@ window.__mount=(dash,opts)=>{
             appearance:{},states:{},actions:{},source:"manual",device_class:"voltage",
             max_series:8,series:[],hours:24,y_min:null,y_max:null});
           el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"tfcard"};
+        }
+        if(opts&&opts.thermostat){
+          const sec=el._sections()[0]||{items:[]};
+          sec.items.unshift({id:"thcard",type:"thermostat",entity_id:"",name:"",size:"xl",
+            appearance:{},states:{},actions:{},units:[],manual:[],
+            show_manual:true,show_extras:true});
+          if(opts.manualOn){
+            el._hass.states["input_boolean.automazioni_cdz_disattivate"].state="on";
+          }
+          if(opts.selectThermo){el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"thcard"};}
         }
         if(opts&&opts.alarm){
           const sec=el._sections()[0]||{items:[]};

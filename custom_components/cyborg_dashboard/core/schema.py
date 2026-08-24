@@ -494,6 +494,16 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                 result[key] = float(result[key]) if result.get(key) not in (None, "") else None
             except (TypeError, ValueError):
                 result[key] = None
+    if result.get("type") == "thermostat":
+        # Empty list means "every climate entity there is", which is what makes
+        # a unit installed next month appear without editing the card. A
+        # snapshot of today's units would quietly go stale.
+        for key in ("units", "manual"):
+            raw = result.get(key)
+            result[key] = ([x for x in raw if isinstance(x, str) and "." in x][:20]
+                           if isinstance(raw, list) else [])
+        result["show_manual"] = bool(result.get("show_manual", True))
+        result["show_extras"] = bool(result.get("show_extras", True))
     if result.get("type") == "lights":
         lights = result.get("lights")
         result["lights"] = [x for x in lights if isinstance(x, str) and x] if isinstance(lights, list) else []

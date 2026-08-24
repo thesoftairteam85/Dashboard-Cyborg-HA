@@ -825,6 +825,7 @@ const CARD_TYPES = [
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
   { k: "irrigation", l: "Irrigazione", solo: true, d: "Zone di irrigazione: avvio a tempo garantito da Home Assistant, umidità del terreno, programmi." },
   { k: "alarm", l: "Centrale allarme", d: "Stato reale della centrale e un pulsante per ogni modalità che la centrale dichiara di avere." },
+  { k: "thermostat", l: "Controllo temperatura", solo: true, d: "Termostati e condizionatori: acceso/spento, temperatura impostata, modalità, ventola. Più gli interruttori che sospendono le automazioni." },
 ];
 
 function cardTypeInfo(key) {
@@ -1150,7 +1151,8 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev", "comfort"]);
+  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev", "comfort",
+  "thermostat"]);
 
 const COMPOSITE_META = {
   comfort:       ["Temperature", "Sensori stanza per stanza", "mdi:home-thermometer", "xl"],
@@ -1165,6 +1167,7 @@ const COMPOSITE_META = {
   people:        ["Presenze", "Chi è in casa", "mdi:account-group", "sm"],
   monitor:       ["Monitoraggio", "Diagnostica impianto", "mdi:gauge-full", "lg"],
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
+  thermostat:    ["Controllo temperatura", "Termostati e clima", "mdi:thermostat-box", "lg"],
   economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
 };
 
@@ -1222,6 +1225,40 @@ const BINARY_WORDS = {
  * alarm_arm_night 4, alarm_trigger 8, alarm_arm_custom_bypass 16,
  * alarm_arm_vacation 32. Only the modes a panel really has get a button.
  * ======================================================================== */
+
+/* ==========================================================================
+ * CONTROLLO TEMPERATURA
+ *
+ * Feature bits from ClimateEntityFeature, checked against the two units in
+ * this house: the air conditioner reports 953 =
+ *   1 TARGET_TEMPERATURE + 8 FAN_MODE + 16 PRESET_MODE + 32 SWING_MODE
+ *   + 128 TURN_OFF + 256 TURN_ON + 512 SWING_HORIZONTAL_MODE
+ * and the thermostat reports 385 = 1 + 128 + 256. Every control is drawn only
+ * when its bit is present, so a unit without a fan never shows a fan selector
+ * that would do nothing.
+ *
+ * The setpoint bounds are NOT assumed: min_temp/max_temp/target_temp_step come
+ * from the entity. One of these two units runs 8-30 °C in steps of 1 and the
+ * other 1-7 in steps of 0.5 — hardcoding "16-28, half a degree" would make the
+ * second one uncontrollable.
+ * ======================================================================== */
+
+const CLIMATE_F = { TARGET_TEMP: 1, TARGET_RANGE: 2, TARGET_HUM: 4, FAN: 8,
+                    PRESET: 16, SWING: 32, TURN_OFF: 128, TURN_ON: 256,
+                    SWING_H: 512 };
+
+const HVAC_WORDS = { off: "Spento", heat: "Caldo", cool: "Freddo",
+  heat_cool: "Automatico", auto: "Auto", dry: "Deumidifica", fan_only: "Ventola" };
+const HVAC_ICONS = { off: "mdi:power", heat: "mdi:fire", cool: "mdi:snowflake",
+  heat_cool: "mdi:sun-snowflake-variant", auto: "mdi:autorenew",
+  dry: "mdi:water-percent", fan_only: "mdi:fan" };
+const HVAC_COLORS = { off: "#8ea3b8", heat: "#ff924c", cool: "#4cc9f0",
+  heat_cool: "#06d6a0", auto: "#06d6a0", dry: "#ffd166", fan_only: "#8ecae6" };
+
+function hvacWords(mode) { return HVAC_WORDS[mode] || String(mode).replace(/_/g, " "); }
+
+/** A switch that suspends the automations, spotted by name. */
+const MANUAL_RE = /(automazion|automation|manual|bypass|vacanz|holiday)/i;
 
 const ALARM_MODES = [
   { bit: 1,  state: "armed_home",          service: "alarm_arm_home",          l: "In casa",   icon: "mdi:shield-home",         hint: "Perimetro attivo, dentro ti muovi" },
@@ -1603,6 +1640,19 @@ class CyborgDashboard extends HTMLElement {
             + ":" + Object.keys(this._hass.states).filter((id) =>
                 id.startsWith("update.") && this._hass.states[id].state === "on").length);
         }
+        if (it.type === "thermostat") {
+          // Composite: the card's own entity_id is empty, so without this the
+          // setpoint and mode would never repaint when they change.
+          for (const id of this._thermoUnits(it)) {
+            const u = this._hass.states[id];
+            parts.push("th:" + id + "@" + u.state + ":" + u.attributes.temperature
+              + ":" + u.attributes.current_temperature + ":" + u.attributes.fan_mode
+              + ":" + u.attributes.preset_mode + ":" + u.attributes.swing_mode);
+          }
+          for (const id of this._thermoManual(it)) {
+            parts.push("tm:" + id + "@" + this._hass.states[id].state);
+          }
+        }
         if (it.type === "comfort") {
           parts.push("cf:" + (it.filter || ""));
           for (const r of this._comfortRooms(it)) {
@@ -1825,6 +1875,37 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /**
+   * The climate control section.
+   *
+   * Deliberately a SECTION and not a fixed place in Panoramica. Analysis and
+   * action belong together — reading "balcone 28.9°" and then having to
+   * navigate somewhere else to switch the air conditioner on is the split that
+   * makes a dashboard annoying — so it is created right where the Temperature
+   * cards are. And because sections can be dragged anywhere (and moved to a
+   * page of their own), putting it here costs nothing if the user later wants
+   * it in Panoramica: it is one drag, not a rebuild.
+   */
+  _addThermostatSection() {
+    const existing = this._sections().find((sec) =>
+      (sec.items || []).some((it) => it.type === "thermostat"));
+    if (existing) {
+      this._selected = { kind: "section", sectionId: existing.id };
+      this._error = "La sezione Clima esiste già";
+      this._touch(true);
+      return;
+    }
+    const section = { id: uid("sec"), title: "Controllo temperatura",
+      icon: "mdi:thermostat-box", accent: "#ff924c", collapsed: false,
+      items: [{ id: uid("card"), type: "thermostat", entity_id: "", name: "", size: "xl",
+        appearance: { icon: "mdi:thermostat-box" }, states: {}, actions: {},
+        units: [], manual: [], show_manual: true, show_extras: true }] };
+    this._page().sections.push(section);
+    this._selected = { kind: "section", sectionId: section.id };
+    this._error = "";
+    this._touch();
+  }
+
   /** The Illuminazione section, in one click, already pointed at every light. */
   _addLightSection() {
     if (!this._registry) this._loadRegistry();
@@ -1973,6 +2054,22 @@ class CyborgDashboard extends HTMLElement {
    * flat, and every one of them is the same three choices. The areas are
    * already maintained in Home Assistant; this just projects them.
    */
+  /**
+   * One section per room, not one section holding every room.
+   *
+   * The old shape was a single "Stanze" accordion: opening it dumped the whole
+   * house on screen at once, and collapsing it hid the house entirely. There
+   * was no way to say "show me the bathroom and nothing else", which is the
+   * only thing anybody actually wants from a room list.
+   *
+   * One section per area gives each room its own header, its own collapse, its
+   * own colour, its own position in the order, and its own entry in the
+   * "sposta in una pagina" menu — so a room can even become a page of its own.
+   *
+   * Idempotent by area: run it again after adding a room in Home Assistant and
+   * only the new rooms are appended. That is the "future rooms" case, and it
+   * has to work without the user rebuilding what he already arranged.
+   */
   async _addRoomSection() {
     // The registry is not loaded on a sections page, and making the user click
     // twice for no visible reason is the kind of thing that reads as broken.
@@ -1983,17 +2080,47 @@ class CyborgDashboard extends HTMLElement {
       this._touch(true);
       return;
     }
-    const section = { id: uid("sec"), title: "Stanze", icon: "mdi:home-group",
-      accent: "#06d6a0", collapsed: false,
-      items: areas.map((a) => ({
-        id: uid("card"), type: "room", entity_id: "",
-        name: a.name || a.area_id, size: "md",
-        appearance: { icon: a.icon || roomIconFor(a.name || a.area_id) },
-        states: {}, actions: {},
-        area: a.area_id, hidden: [], max_readings: 4, show_others: true,
-      })) };
-    this._page().sections.push(section);
-    this._selected = { kind: "section", sectionId: section.id };
+
+    // Which areas already have a room section ANYWHERE in the dashboard, not
+    // just on this page: a bathroom that was moved to its own page must not
+    // come back as a duplicate here.
+    const taken = new Set();
+    for (const page of this._dashboard.pages) {
+      for (const sec of page.sections || []) {
+        for (const it of sec.items || []) {
+          if (it.type === "room" && it.area) taken.add(it.area);
+        }
+      }
+    }
+
+    const fresh = areas.filter((a) => !taken.has(a.area_id));
+    if (!fresh.length) {
+      this._error = "Ogni stanza ha già la sua sezione";
+      this._touch(true);
+      return;
+    }
+
+    let first = null;
+    for (const a of fresh) {
+      const name = a.name || a.area_id;
+      const section = { id: uid("sec"), title: name,
+        icon: a.icon || roomIconFor(name), accent: "#06d6a0",
+        // Collapsed from the second room on: opening the page on a wall of
+        // eight expanded rooms is the problem this change exists to solve.
+        collapsed: first !== null,
+        items: [{
+          id: uid("card"), type: "room", entity_id: "",
+          name, size: "xl",
+          appearance: { icon: a.icon || roomIconFor(name) },
+          states: {}, actions: {},
+          area: a.area_id, hidden: [], max_readings: 4, show_others: true,
+          row_action: "toggle",
+        }] };
+      this._page().sections.push(section);
+      if (first === null) first = section.id;
+    }
+    this._selected = { kind: "section", sectionId: first };
+    this._error = "";
     this._touch();
   }
 
@@ -4085,6 +4212,174 @@ class CyborgDashboard extends HTMLElement {
       .catch(() => this._refetchNotifications());
   }
 
+  // ----------------------------------------------- controllo temperatura ---
+
+  /** Climate entities of this card: the chosen ones, or every one there is. */
+  _thermoUnits(item) {
+    const chosen = Array.isArray(item.units) && item.units.length ? item.units : null;
+    const all = Object.keys(this._hass.states).filter((id) => domainOf(id) === "climate");
+    return (chosen || all).filter((id) => this._hass.states[id]);
+  }
+
+  /**
+   * The switches that suspend the automations.
+   *
+   * These are not devices, they are a MODE of the installation: with
+   * "automazioni disattivate" on, everything else in the house stops deciding
+   * for you. That deserves its own row at the top of the card with a plain
+   * sentence, not to be buried among the switches in some room — which is
+   * where it lives today, indistinguishable from a socket.
+   */
+  _thermoManual(item) {
+    // `.length` and not just Array.isArray: an empty array is still an array,
+    // so the automatic detection was never reached on a freshly created card —
+    // the row simply did not appear and nothing said why.
+    if (Array.isArray(item.manual) && item.manual.length) {
+      return item.manual.filter((id) => this._hass.states[id]);
+    }
+    return Object.keys(this._hass.states).filter((id) => {
+      const d = domainOf(id);
+      if (d !== "input_boolean" && d !== "switch") return false;
+      const st = this._hass.states[id];
+      // Match on the object_id and the friendly name, NOT the whole entity_id:
+      // testing the full id makes every automation.* entity match, because the
+      // domain name itself contains "automation". The `automation` domain is
+      // excluded outright for the same reason — a bypass is a switch the user
+      // flips, not each individual automation.
+      return MANUAL_RE.test(id.split(".")[1] + " " + (st.attributes.friendly_name || ""));
+    }).slice(0, 4);
+  }
+
+  _thermostatBody(item) {
+    const units = this._thermoUnits(item);
+    const manual = item.show_manual === false ? [] : this._thermoManual(item);
+
+    if (!units.length && !manual.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:thermostat-box"></ha-icon>
+        <span>Nessun termostato o condizionatore in Home Assistant.</span></div>`;
+    }
+
+    const manualOn = manual.filter((id) => ON_STATES.has(this._hass.states[id].state));
+    const manualRows = manual.length ? `<div class="th-manual ${manualOn.length ? "on" : ""}">
+        ${manual.map((id) => {
+          const st = this._hass.states[id];
+          const on = ON_STATES.has(st.state);
+          return `<button class="th-man-row ${on ? "on" : ""}" data-toggle-entity="${esc(id)}">
+            <ha-icon icon="${esc(on ? "mdi:hand-back-right" : "mdi:robot")}"></ha-icon>
+            <span><strong>${esc(st.attributes.friendly_name || id)}</strong>
+              <small>${esc(on ? "le automazioni NON intervengono" : "le automazioni sono attive")}</small></span>
+            <i class="th-sw ${on ? "on" : ""}"></i>
+          </button>`;
+        }).join("")}
+      </div>` : "";
+
+    const cards = units.map((id) => this._thermoUnit(id, item)).join("");
+    return `<div class="th">${manualRows}<div class="th-grid">${cards}</div></div>`;
+  }
+
+  /** One unit: state, current reading, setpoint, and only the controls it has. */
+  _thermoUnit(id, item) {
+    const st = this._hass.states[id];
+    const a = st.attributes || {};
+    const f = Number(a.supported_features) || 0;
+    const has = (bit) => (f & bit) === bit;
+    const mode = st.state;
+    const on = mode !== "off" && mode !== "unavailable";
+    const color = HVAC_COLORS[mode] || "#8ea3b8";
+
+    if (st.state === "unavailable") {
+      return `<div class="th-unit off"><div class="th-head">
+        <ha-icon icon="mdi:thermostat-box"></ha-icon>
+        <strong>${esc(a.friendly_name || id)}</strong></div>
+        <div class="th-na">Non raggiungibile</div></div>`;
+    }
+
+    const cur = a.current_temperature;
+    const target = a.temperature;
+    // Bounds and step come from the entity. One unit here runs 8-30 in whole
+    // degrees, the other 1-7 in halves: any hardcoded range breaks one of them.
+    const step = Number(a.target_temp_step) || 0.5;
+    const lo = Number(a.min_temp);
+    const hi = Number(a.max_temp);
+    // Adjustable even while the unit is off. Locking the setpoint on a stopped
+    // unit was an invention of this card: `supported_features` declares
+    // TARGET_TEMPERATURE, and says nothing about "only while running". Setting
+    // the target first and then switching on is a normal way to use a
+    // thermostat, and forbidding it is the same class of mistake as offering a
+    // control that does nothing — just in the opposite direction.
+    const canSet = has(CLIMATE_F.TARGET_TEMP) && target !== undefined;
+    const decimals = step < 1 ? 1 : 0;
+
+    const modes = (a.hvac_modes || []).filter((m) => m !== "off");
+    const fanModes = has(CLIMATE_F.FAN) ? (a.fan_modes || []) : [];
+    const presets = has(CLIMATE_F.PRESET) ? (a.preset_modes || []) : [];
+    const swings = has(CLIMATE_F.SWING) ? (a.swing_modes || []) : [];
+
+    const picker = (label, key, list, value) => list.length ? `<label class="th-pick">${esc(label)}
+        <select data-thermo-set="${esc(id)}|${esc(key)}">
+          ${list.map((v) => `<option value="${esc(v)}" ${v === value ? "selected" : ""}>${esc(String(v).replace(/_/g, " "))}</option>`).join("")}
+        </select></label>` : "";
+
+    return `<div class="th-unit ${on ? "on" : "off"}" style="--th:${esc(color)}">
+      <div class="th-head">
+        <ha-icon icon="${esc(HVAC_ICONS[mode] || "mdi:thermostat-box")}"></ha-icon>
+        <div class="th-name"><strong>${esc(a.friendly_name || id)}</strong>
+          <small>${esc(hvacWords(mode))}${cur !== undefined ? " · ora " + esc(String(cur)) + "°" : ""}</small></div>
+        ${has(CLIMATE_F.TURN_ON) || has(CLIMATE_F.TURN_OFF)
+          ? `<button class="th-power ${on ? "on" : ""}" data-thermo-power="${esc(id)}"
+               title="${on ? "Spegni" : "Accendi"}"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+      </div>
+      ${canSet ? `<div class="th-set">
+        <button class="th-step" data-thermo-step="${esc(id)}|-1"><ha-icon icon="mdi:minus"></ha-icon></button>
+        <div class="th-val"><strong>${esc(Number(target).toFixed(decimals))}</strong><i>°C</i>
+          <small>${esc(on ? "impostata" : "impostata · unità spenta")}</small></div>
+        <button class="th-step" data-thermo-step="${esc(id)}|1"><ha-icon icon="mdi:plus"></ha-icon></button>
+      </div>
+      <input class="th-range" type="range" min="${Number.isFinite(lo) ? lo : 5}" max="${Number.isFinite(hi) ? hi : 35}"
+        step="${step}" value="${esc(String(target))}" data-thermo-temp="${esc(id)}">` : ""}
+      ${modes.length ? `<div class="th-modes">
+        ${modes.map((m) => `<button class="th-mode ${m === mode ? "on" : ""}" data-thermo-mode="${esc(id)}|${esc(m)}"
+            style="--tm:${esc(HVAC_COLORS[m] || "#8ea3b8")}" title="${esc(hvacWords(m))}">
+          <ha-icon icon="${esc(HVAC_ICONS[m] || "mdi:tune")}"></ha-icon><span>${esc(hvacWords(m))}</span>
+        </button>`).join("")}
+      </div>` : ""}
+      ${item.show_extras === false ? "" : `<div class="th-extras">
+        ${picker("Ventola", "fan_mode", fanModes, a.fan_mode)}
+        ${picker("Programma", "preset_mode", presets, a.preset_mode)}
+        ${picker("Flusso", "swing_mode", swings, a.swing_mode)}
+      </div>`}
+    </div>`;
+  }
+
+  /**
+   * Setpoint changes are debounced.
+   *
+   * Dragging the slider fires an event per pixel. Sending each one to an air
+   * conditioner over the network floods it and, on several units, makes it
+   * ignore the whole burst — the temperature then snaps back and it reads as
+   * "the dashboard does not work". Only the value the finger stopped on is
+   * sent.
+   */
+  _thermoTemp(id, value) {
+    const st = this._hass.states[id];
+    if (!st) return;
+    const a = st.attributes || {};
+    const lo = Number.isFinite(Number(a.min_temp)) ? Number(a.min_temp) : 5;
+    const hi = Number.isFinite(Number(a.max_temp)) ? Number(a.max_temp) : 35;
+    const step = Number(a.target_temp_step) || 0.5;
+    const clamped = Math.max(lo, Math.min(hi, Math.round(value / step) * step));
+    // Optimistic paint so the number follows the thumb, corrected by the next
+    // state update from Home Assistant.
+    a.temperature = clamped;
+    this._signature = "";
+    this.render();
+    clearTimeout(this._thermoTimer);
+    this._thermoTimer = setTimeout(() => {
+      this._hass.callService("climate", "set_temperature",
+        { entity_id: id, temperature: clamped });
+    }, 320);
+  }
+
   // ------------------------------------------------------------ allarme ---
 
   /**
@@ -5836,6 +6131,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
     if (type === "comfort") return this._comfortBody(item);
+    if (type === "thermostat") return this._thermostatBody(item);
     if (type === "ev") return this._evBody(item);
     if (type === "room") return this._roomCardBody(item);
     if (type === "trend") return this._trendBody(item);
@@ -6240,6 +6536,68 @@ class CyborgDashboard extends HTMLElement {
         <label class="check"><input type="checkbox" data-prop="show_updates" ${card.show_updates !== false ? "checked" : ""}> Includi aggiornamenti disponibili</label>
         <label>MASSIMO IN ELENCO<input type="number" min="3" max="60" data-prop="max" value="${card.max || 8}"></label>
         <button class="secondary wide" data-notif-clear><ha-icon icon="mdi:notification-clear-all"></ha-icon> SVUOTA L'ARCHIVIO AVVISI</button>
+      </div>`;
+    }
+    if (card.type === "thermostat") {
+      const allUnits = Object.keys(this._hass.states).filter((id) => domainOf(id) === "climate");
+      const chosen = Array.isArray(card.units) && card.units.length ? card.units : null;
+      const manualChosen = Array.isArray(card.manual) && card.manual.length ? card.manual : null;
+      const detected = this._thermoManual({ show_manual: true });
+      const switchable = Object.keys(this._hass.states).filter((id) =>
+        ["input_boolean", "switch"].includes(domainOf(id)));
+      const name = (id) => (this._hass.states[id].attributes.friendly_name || id);
+      const q3 = (this._entityQuery || "").trim().toLowerCase();
+      const matches = switchable
+        .filter((id) => !(manualChosen || []).includes(id))
+        .filter((id) => !q3 || (name(id) + " " + id).toLowerCase().includes(q3))
+        .slice(0, 40);
+
+      return `<div class="section">
+        <strong>UNITÀ</strong>
+        <span class="hint">${allUnits.length
+          ? `${allUnits.length} fra termostati e condizionatori. I comandi compaiono da soli in base a cosa ogni unità dichiara di saper fare: ventola, programma e flusso appaiono solo su chi li ha, e i limiti della temperatura impostabile li detta l'unità, non la card.`
+          : "Nessuna entità <code>climate</code> in Home Assistant."}</span>
+        <div class="seg">
+          <button class="${chosen ? "" : "active"}" data-thermo-mode-sel="auto">Tutte</button>
+          <button class="${chosen ? "active" : ""}" data-thermo-mode-sel="manual">Scelte da me</button>
+        </div>
+        ${chosen ? `<div class="eco-dev-list">${chosen.map((id, i) => `<div class="eco-dev-edit">
+            <ha-icon icon="mdi:thermostat-box"></ha-icon>
+            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
+            <button class="mini danger" data-thermo-drop="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>`).join("")}</div>
+          <label>AGGIUNGI UN'UNITÀ<select data-thermo-pick>
+            <option value="">— scegli —</option>
+            ${allUnits.filter((id) => !chosen.includes(id)).map((id) =>
+              `<option value="${esc(id)}">${esc(name(id))}</option>`).join("")}
+          </select></label>` : ""}
+      </div>
+      <div class="section">
+        <strong>SOSPENSIONE DELLE AUTOMAZIONI</strong>
+        <span class="hint">Gli interruttori che fermano le automazioni non sono dispositivi, sono uno <strong>stato dell'impianto</strong>: qui stanno in cima alla card, con scritto per esteso cosa comportano, invece di confondersi con una presa in fondo a una stanza.</span>
+        <label class="check"><input type="checkbox" data-prop="show_manual" ${card.show_manual !== false ? "checked" : ""}> Mostra la riga di sospensione</label>
+        ${card.show_manual === false ? "" : `
+        <div class="seg">
+          <button class="${manualChosen ? "" : "active"}" data-thermo-man-sel="auto">Trovati da solo</button>
+          <button class="${manualChosen ? "active" : ""}" data-thermo-man-sel="manual">Scelti da me</button>
+        </div>
+        ${manualChosen ? `<div class="eco-dev-list">${manualChosen.map((id, i) => `<div class="eco-dev-edit">
+            <ha-icon icon="mdi:hand-back-right"></ha-icon>
+            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
+            <button class="mini danger" data-thermo-man-drop="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>`).join("")}</div>
+          <input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca un interruttore..." autocomplete="off">
+          <div class="entity-results">${matches.map((id) => `<button class="entity-row" data-thermo-man-add="${esc(id)}">
+              <ha-icon icon="${esc(autoIcon(id, this._hass.states[id]))}"></ha-icon>
+              <span><strong>${esc(name(id))}</strong><small>${esc(id)}</small></span>
+            </button>`).join("") || '<div class="entity-result-empty">Nessun risultato.</div>'}</div>`
+          : `<span class="hint">${detected.length
+              ? `Trovati: ${detected.map((id) => esc(name(id))).join(", ")}.`
+              : "Nessun interruttore riconosciuto. Passa a «scelti da me» per indicarlo."}</span>`}`}
+      </div>
+      <div class="section">
+        <strong>DETTAGLI</strong>
+        <label class="check"><input type="checkbox" data-prop="show_extras" ${card.show_extras !== false ? "checked" : ""}> Mostra ventola, programma e flusso</label>
       </div>`;
     }
     if (card.type === "comfort") {
@@ -7193,6 +7551,7 @@ class CyborgDashboard extends HTMLElement {
                  : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
                     <button class="secondary" data-add-lights title="Tutte le luci della casa, per stanza"><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
                     <button class="secondary" data-add-comfort title="Temperatura e umidità stanza per stanza"><ha-icon icon="mdi:home-thermometer"></ha-icon> TEMPERATURE</button>
+                    <button class="secondary" data-add-thermostat title="Termostati e condizionatori, con i comandi"><ha-icon icon="mdi:thermostat-box"></ha-icon> CLIMA</button>
                     <button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>`}
                <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
@@ -7255,6 +7614,8 @@ class CyborgDashboard extends HTMLElement {
 
     const addComfort = q("[data-add-comfort]");
     if (addComfort) addComfort.onclick = () => this._addComfortSection();
+    const addThermo = q("[data-add-thermostat]");
+    if (addThermo) addThermo.onclick = () => this._addThermostatSection();
     const addLights = q("[data-add-lights]");
     if (addLights) addLights.onclick = () => this._addLightSection();
     const addRooms = q("[data-add-rooms]");
@@ -7582,6 +7943,100 @@ class CyborgDashboard extends HTMLElement {
         .then(() => { this._sentNotifs = []; this._touch(true); })
         .catch(() => { this._error = "Archivio avvisi non disponibile"; this._touch(true); });
     };
+    all("[data-thermo-mode-sel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        // "Tutte" is an EMPTY list, not a snapshot: the point of automatic is
+        // that a unit installed next month joins on its own.
+        card.units = el.getAttribute("data-thermo-mode-sel") === "manual"
+          ? this._thermoUnits(card).slice() : [];
+        this._touch();
+      };
+    });
+    const thermoPick = q("[data-thermo-pick]");
+    if (thermoPick && card) thermoPick.onchange = () => {
+      if (!thermoPick.value) return;
+      card.units = Array.isArray(card.units) ? card.units : [];
+      if (!card.units.includes(thermoPick.value)) card.units.push(thermoPick.value);
+      this._touch();
+    };
+    all("[data-thermo-drop]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.units)) return;
+        card.units.splice(Number(el.getAttribute("data-thermo-drop")), 1);
+        this._touch();
+      };
+    });
+    all("[data-thermo-man-sel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.manual = el.getAttribute("data-thermo-man-sel") === "manual"
+          ? this._thermoManual({ show_manual: true }).slice() : [];
+        this._entityQuery = "";
+        this._touch();
+      };
+    });
+    all("[data-thermo-man-add]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.manual = Array.isArray(card.manual) ? card.manual : [];
+        const id = el.getAttribute("data-thermo-man-add");
+        if (!card.manual.includes(id)) card.manual.push(id);
+        this._touch();
+      };
+    });
+    all("[data-thermo-man-drop]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.manual)) return;
+        card.manual.splice(Number(el.getAttribute("data-thermo-man-drop")), 1);
+        this._touch();
+      };
+    });
+    all("[data-thermo-power]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const id = el.getAttribute("data-thermo-power");
+        const st = this._hass.states[id];
+        if (!st) return;
+        // climate.turn_on / turn_off exist and are the right call: toggling via
+        // set_hvac_mode would need us to guess which mode "on" means.
+        this._hass.callService("climate", st.state === "off" ? "turn_on" : "turn_off",
+          { entity_id: id });
+      };
+    });
+    all("[data-thermo-mode]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, mode] = el.getAttribute("data-thermo-mode").split("|");
+        this._hass.callService("climate", "set_hvac_mode", { entity_id: id, hvac_mode: mode });
+      };
+    });
+    all("[data-thermo-step]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, dir] = el.getAttribute("data-thermo-step").split("|");
+        const st = this._hass.states[id];
+        if (!st) return;
+        const step = Number(st.attributes.target_temp_step) || 0.5;
+        const cur = Number(st.attributes.temperature);
+        if (!Number.isFinite(cur)) return;
+        this._thermoTemp(id, cur + step * Number(dir));
+      };
+    });
+    all("[data-thermo-temp]").forEach((el) => {
+      el.oninput = () => this._thermoTemp(el.getAttribute("data-thermo-temp"), Number(el.value));
+      el.onclick = (ev) => ev.stopPropagation();
+    });
+    all("[data-thermo-set]").forEach((el) => {
+      el.onchange = () => {
+        const [id, key] = el.getAttribute("data-thermo-set").split("|");
+        const service = { fan_mode: "set_fan_mode", preset_mode: "set_preset_mode",
+                          swing_mode: "set_swing_mode" }[key];
+        if (!service) return;
+        this._hass.callService("climate", service, { entity_id: id, [key]: el.value });
+      };
+      el.onclick = (ev) => ev.stopPropagation();
+    });
     all("[data-alarm-code]").forEach((el) => {
       el.oninput = () => {
         // Kept on the component, never in the document: see _alarmAct.
@@ -9457,6 +9912,59 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 @keyframes cyPulse{0%,100%{opacity:1}50%{opacity:.6}}
 .act-more{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.4;padding-left:4px}
 
+/* Controllo temperatura */
+.th{margin-top:12px}
+/* The automation bypass is a MODE of the house, not a device: it gets the top
+   of the card and a full sentence, never a nameless toggle in a list. */
+.th-manual{display:flex;flex-direction:column;gap:6px;margin-bottom:11px;padding:9px;border-radius:12px;
+  border:1px dashed rgba(255,255,255,.12)}
+.th-manual.on{border-style:solid;border-color:rgba(255,146,76,.5);background:rgba(255,146,76,.1)}
+.th-man-row{display:flex;align-items:center;gap:9px;width:100%;padding:7px 8px;border-radius:9px;
+  border:1px solid transparent;background:transparent;color:var(--primary-text-color);text-align:left}
+.th-man-row>ha-icon{--mdc-icon-size:18px;color:#8ea3b8;flex-shrink:0}
+.th-man-row.on>ha-icon{color:#ff924c}
+.th-man-row span{flex:1;min-width:0}
+.th-man-row strong{display:block;font-size:11.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th-man-row small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.7px;text-transform:uppercase;opacity:.5}
+.th-man-row.on small{color:#ffb37a;opacity:.9}
+.th-sw{width:32px;height:18px;border-radius:9px;background:rgba(255,255,255,.12);position:relative;flex-shrink:0;transition:background .18s}
+.th-sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .18s}
+.th-sw.on{background:#ff924c}
+.th-sw.on::after{transform:translateX(14px)}
+.th-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.th-unit{padding:12px;border-radius:14px;border:1px solid var(--divider-color);background:rgba(255,255,255,.02)}
+.th-unit.on{border-color:color-mix(in srgb,var(--th) 42%,transparent);background:color-mix(in srgb,var(--th) 8%,transparent)}
+.th-head{display:flex;align-items:center;gap:9px}
+.th-head>ha-icon{--mdc-icon-size:21px;color:var(--th,#8ea3b8);flex-shrink:0}
+.th-name{flex:1;min-width:0}
+.th-name strong{display:block;font-size:12.5px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th-name small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.8px;text-transform:uppercase;opacity:.5}
+.th-power{width:32px;height:32px;padding:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  border-radius:9px;border:1px solid var(--divider-color);background:transparent;color:#8ea3b8}
+.th-power ha-icon{--mdc-icon-size:17px}
+.th-power.on{color:var(--th);border-color:color-mix(in srgb,var(--th) 55%,transparent);background:color-mix(in srgb,var(--th) 14%,transparent)}
+.th-set{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:11px}
+.th-step{width:38px;height:38px;padding:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  border-radius:11px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color)}
+.th-step ha-icon{--mdc-icon-size:19px}
+.th-step:hover:not(:disabled){border-color:var(--th);color:var(--th)}
+.th-step:disabled{opacity:.25}
+.th-val{text-align:center;line-height:1}
+.th-val strong{font-size:31px;font-weight:750;letter-spacing:-1px}
+.th-val i{font-style:normal;font-size:14px;opacity:.5;margin-left:1px}
+.th-val small{display:block;margin-top:4px;font:8.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.4}
+.th-range{width:100%;margin-top:8px;accent-color:var(--th)}
+.th-modes{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
+.th-mode{display:flex;align-items:center;gap:5px;padding:6px 9px;border-radius:9px;font-size:10px;
+  border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);opacity:.6}
+.th-mode ha-icon{--mdc-icon-size:14px}
+.th-mode:hover{opacity:1}
+.th-mode.on{opacity:1;color:var(--tm);border-color:color-mix(in srgb,var(--tm) 55%,transparent);background:color-mix(in srgb,var(--tm) 13%,transparent)}
+.th-extras{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:7px;margin-top:10px}
+.th-pick{font:8.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.75}
+.th-pick select{width:100%;margin-top:3px;font-size:11px;text-transform:none;letter-spacing:0}
+.th-na{margin-top:9px;font-size:11px;opacity:.45}
+
 /* Centrale di allarme */
 .al-head{display:flex;align-items:center;gap:11px;margin-top:12px;padding:11px 12px;border-radius:13px;
   background:color-mix(in srgb,var(--al) 11%,transparent);border:1px solid color-mix(in srgb,var(--al) 34%,transparent)}
@@ -10454,7 +10962,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.29.0";
+const CYBORG_BUILD = "0.30.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

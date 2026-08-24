@@ -487,4 +487,18 @@ assert view["tap_action"] == "toggle"
 assert schema.normalize_view({"tap_action": "more-info"})["tap_action"] == "more-info"
 assert schema.normalize_view({"tap_action": "boh"})["tap_action"] == "toggle"
 
+# --- controllo temperatura --------------------------------------------------
+th = schema.normalize_item({"type": "thermostat"}, 0)
+# empty means "everything there is", so a unit installed next month appears
+assert th["units"] == [] and th["manual"] == []
+assert th["show_manual"] is True and th["show_extras"] is True
+th2 = schema.normalize_item({"type": "thermostat", "units": ["climate.a", "nonvalido", 7],
+                             "manual": ["input_boolean.x"], "show_manual": 0}, 0)
+assert th2["units"] == ["climate.a"], th2["units"]
+assert th2["manual"] == ["input_boolean.x"]
+assert th2["show_manual"] is False
+assert len(schema.normalize_item({"type": "thermostat",
+    "units": [f"climate.c{i}" for i in range(50)]}, 0)["units"]) == 20
+assert schema.normalize_item(th2, 0) == th2
+
 print("schema: rotazione, azione di riga ed esclusioni ok")

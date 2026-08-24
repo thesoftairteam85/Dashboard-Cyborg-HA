@@ -2785,6 +2785,197 @@ console.log("\n== 33. IL CONFRONTO NON È SOLO TEMPERATURE ==");
   ok("stato ripristinato dopo la sezione 33", el._registry === null);
 }
 
+console.log("\n== 34. UNA SEZIONE PER STANZA ==");
+{
+  el._registry = { areas: [
+      { area_id: "sog", name: "Soggiorno", icon: null },
+      { area_id: "bag", name: "Bagno", icon: "mdi:toilet" },
+      { area_id: "cam", name: "Camera", icon: null }],
+    byArea: {}, entityArea: {}, category: {}, entityDevice: {}, deviceName: {} };
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0; el._editing = true; el._selected = null; el._error = "";
+
+  el._addRoomSection();
+  let secs = el._dashboard.pages[0].sections;
+  ok("una sezione per stanza, non una sola per tutte", secs.length === 3, String(secs.length));
+  ok("ogni sezione porta il nome della stanza",
+     secs.map(s2 => s2.title).join(">") === "Soggiorno>Bagno>Camera", secs.map(s2 => s2.title).join(">"));
+  ok("ogni sezione contiene la sua stanza e basta",
+     secs.every(s2 => s2.items.length === 1 && s2.items[0].type === "room"));
+  ok("ognuna punta all'area giusta",
+     secs.map(s2 => s2.items[0].area).join() === "sog,bag,cam");
+  // opening the page on a wall of expanded rooms is the problem being solved
+  ok("solo la prima è aperta", secs[0].collapsed === false
+     && secs.slice(1).every(s2 => s2.collapsed === true),
+     secs.map(s2 => s2.collapsed).join());
+  ok("l'icona dell'area è rispettata quando c'è",
+     secs[1].icon === "mdi:toilet", secs[1].icon);
+
+  // future rooms: run it again and only what is new is added
+  el._registry.areas.push({ area_id: "sop", name: "Soppalco", icon: null });
+  el._addRoomSection();
+  secs = el._dashboard.pages[0].sections;
+  ok("rilanciando aggiunge solo le stanze nuove", secs.length === 4, String(secs.length));
+  ok("e la nuova è quella giusta", secs[3].title === "Soppalco");
+  ok("niente doppioni delle vecchie",
+     new Set(secs.map(s2 => s2.items[0].area)).size === 4);
+
+  el._addRoomSection();
+  ok("senza stanze nuove non fa niente e lo dice",
+     el._dashboard.pages[0].sections.length === 4 && /già/i.test(el._error), el._error);
+
+  // a room moved to its own page must not be re-created here
+  el._error = "";
+  const moved = el._dashboard.pages[0].sections.pop();
+  el._dashboard.pages.push({ id: "p2", type: "sections", title: "Soppalco",
+    icon: "mdi:x", sections: [moved] });
+  el._pageIndex = 0;
+  el._addRoomSection();
+  ok("una stanza spostata in un'altra pagina non torna come doppione",
+     el._dashboard.pages[0].sections.length === 3, String(el._dashboard.pages[0].sections.length));
+
+  el._registry = null; el._editing = false; el._error = "";
+  el._dashboard = { version: 8, revision: 0, theme: { accent: "#00e5ff" }, vehicles: [], pages: [
+    { id: "home", type: "sections", title: "Cyborg", icon: "mdi:x", sections: [] }]};
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 34", el._registry === null);
+}
+
+console.log("\n== 35. CONTROLLO TEMPERATURA ==");
+{
+  // The two real units: an air conditioner (953 = target temp + fan + preset +
+  // swing + on/off + horizontal swing) and a thermostat (385 = target temp +
+  // on/off) whose range is 1-7 in halves, not 16-28 in whole degrees.
+  states["climate.cdz_storm"] = S("cool", { friendly_name: "CDZ Storm",
+    supported_features: 953, hvac_modes: ["auto","cool","dry","fan_only","heat","off"],
+    min_temp: 8, max_temp: 30, target_temp_step: 1, current_temperature: 26, temperature: 24,
+    fan_modes: ["auto","low","high"], fan_mode: "low",
+    preset_modes: ["eco","boost","none"], preset_mode: "none",
+    swing_modes: ["default","full_swing"], swing_mode: "default" });
+  states["climate.termo"] = S("heat_cool", { friendly_name: "Termostato",
+    supported_features: 385, hvac_modes: ["off","heat_cool"],
+    min_temp: 1, max_temp: 7, target_temp_step: 0.5, current_temperature: 46, temperature: 4 });
+  states["input_boolean.automazioni_cdz_disattivate"] = S("off",
+    { friendly_name: "Automazioni CDZ Disattivate" });
+
+  const card = { id: "th", type: "thermostat", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, units: [], manual: [],
+    show_manual: true, show_extras: true };
+
+  const auto = el._thermoUnits(card);
+  ok("in automatico prende tutte le unità clima",
+     auto.includes("climate.cdz_storm") && auto.includes("climate.termo")
+     && auto.every(id => id.startsWith("climate.")), auto.join());
+  const manual = el._thermoManual(card);
+  ok("riconosce da solo l'interruttore delle automazioni",
+     manual.includes("input_boolean.automazioni_cdz_disattivate"), manual.join());
+  // "automation.qualcosa" matched only because the DOMAIN name contains the
+  // word: every automation in the house was being offered as a bypass switch.
+  ok("ma non scambia ogni automazione per un interruttore di sospensione",
+     !manual.some(id => id.startsWith("automation.")), manual.join());
+
+  let body = el._thermostatBody(card);
+  ok("la sospensione automazioni è in cima e spiegata a parole",
+     body.indexOf("th-manual") < body.indexOf("th-grid")
+     && /automazioni sono attive/i.test(body));
+  ok("ogni unità ha il suo tasto di accensione",
+     body.includes('data-thermo-power="climate.cdz_storm"')
+     && body.includes('data-thermo-power="climate.termo"'));
+  ok("la temperatura impostata si regola",
+     body.includes('data-thermo-step="climate.cdz_storm|1"')
+     && body.includes('data-thermo-temp="climate.cdz_storm"'));
+
+  // the bounds must come from the entity, never from a hardcoded range
+  ok("i limiti li detta l'unità, non la card",
+     /data-thermo-temp="climate\.termo"/.test(body)
+     && /min="1" max="7"\s+step="0.5"/.test(body.replace(/\n\s*/g, " ")),
+     (body.match(/min="[^"]*" max="[^"]*"[^>]*data-thermo-temp="climate\.termo"/) || [""])[0]);
+
+  // controls appear only where the feature bit is present
+  ok("il condizionatore mostra la ventola",
+     body.includes('data-thermo-set="climate.cdz_storm|fan_mode"'));
+  ok("il termostato non mostra una ventola che non ha",
+     !body.includes('data-thermo-set="climate.termo|fan_mode"'));
+  ok("il condizionatore mostra programma e flusso",
+     body.includes("|preset_mode") && body.includes("|swing_mode"));
+  ok("le modalità offerte sono quelle dichiarate, «off» escluso",
+     body.includes('data-thermo-mode="climate.cdz_storm|cool"')
+     && body.includes('data-thermo-mode="climate.cdz_storm|dry"')
+     && !body.includes('data-thermo-mode="climate.cdz_storm|off"'));
+  ok("il termostato offre solo le sue due",
+     body.includes('data-thermo-mode="climate.termo|heat_cool"')
+     && !body.includes('data-thermo-mode="climate.termo|cool"'));
+
+  // manual mode banner
+  states["input_boolean.automazioni_cdz_disattivate"] = S("on",
+    { friendly_name: "Automazioni CDZ Disattivate" });
+  body = el._thermostatBody(card);
+  ok("con le automazioni sospese si vede",
+     body.includes("th-manual on") && /NON intervengono/.test(body));
+
+  // an unavailable unit says so instead of drawing dead controls
+  states["climate.termo"] = S("unavailable", { friendly_name: "Termostato" });
+  body = el._thermostatBody(card);
+  ok("un'unità non raggiungibile non disegna comandi finti",
+     body.includes("Non raggiungibile") && !body.includes('data-thermo-step="climate.termo|1"'));
+  states["climate.termo"] = S("off", { friendly_name: "Termostato",
+    supported_features: 385, hvac_modes: ["off","heat_cool"],
+    min_temp: 1, max_temp: 7, target_temp_step: 0.5, current_temperature: 46, temperature: 4 });
+
+  // -- commands --
+  const calls = [];
+  const realSvc = el._hass.callService;
+  el._hass.callService = (d, sv, data) => calls.push({ d, sv, data });
+
+  el._thermoTemp("climate.cdz_storm", 24.4);
+  ok("la temperatura è arrotondata al passo dell'unità",
+     states["climate.cdz_storm"].attributes.temperature === 24,
+     String(states["climate.cdz_storm"].attributes.temperature));
+  el._thermoTemp("climate.cdz_storm", 99);
+  ok("e non supera il massimo dichiarato",
+     states["climate.cdz_storm"].attributes.temperature === 30,
+     String(states["climate.cdz_storm"].attributes.temperature));
+  el._thermoTemp("climate.termo", -5);
+  ok("né scende sotto il minimo",
+     states["climate.termo"].attributes.temperature === 1,
+     String(states["climate.termo"].attributes.temperature));
+  // trascinare il cursore non deve inondare il condizionatore di chiamate
+  ok("trascinare non manda una chiamata per pixel", calls.length === 0, JSON.stringify(calls));
+
+  // chosen units freeze the list
+  card.units = ["climate.termo"];
+  ok("scegliendo le unità a mano vale l'elenco",
+     el._thermoUnits(card).join() === "climate.termo", el._thermoUnits(card).join());
+  card.units = [];
+
+  card.manual = ["input_boolean.automazioni_cdz_disattivate"];
+  ok("anche gli interruttori si possono scegliere a mano",
+     el._thermoManual(card).join() === "input_boolean.automazioni_cdz_disattivate");
+  card.show_manual = false;
+  ok("e la riga si può togliere",
+     !el._thermostatBody(card).includes("th-manual"));
+  card.show_manual = true;
+
+  card.show_extras = false;
+  ok("ventola e programma si possono nascondere",
+     !el._thermostatBody(card).includes("data-thermo-set"));
+  card.show_extras = true;
+
+  // A stopped unit still takes a setpoint: TARGET_TEMPERATURE is declared, and
+  // nothing in it says "only while running". Setting the target and then
+  // switching on is how a thermostat is normally used.
+  body = el._thermostatBody(card);
+  ok("la temperatura si regola anche a unità spenta",
+     /data-thermo-step="climate\.termo\|1"(?![^>]*disabled)/.test(body)
+     && /data-thermo-temp="climate\.termo"(?![^>]*disabled)/.test(body));
+  ok("ma la card dice che l'unità è spenta", /unità spenta/.test(body));
+
+  el._hass.callService = realSvc;
+  for (const id of ["climate.cdz_storm","climate.termo","input_boolean.automazioni_cdz_disattivate"]) delete states[id];
+  ok("stato ripristinato dopo la sezione 35", !states["climate.cdz_storm"]);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

@@ -4,6 +4,74 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.30.0] - 2026-08-24
+
+Una sezione per stanza, e il controllo del clima dove serve.
+
+### Stanze: una sezione ciascuna
+Prima era **una sola** sezione «Stanze»: aprirla rovesciava tutta la casa sullo
+schermo in un colpo, chiuderla nascondeva la casa intera. Non c'era modo di
+dire «fammi vedere il bagno e basta», che è l'unica cosa che si chiede a un
+elenco di stanze.
+
+Ora **ogni stanza è una sezione propria**: intestazione, colore, apertura,
+posizione nell'ordine e voce nel menù «sposta in una pagina» — quindi una
+stanza può anche diventare una pagina a sé. Solo la prima nasce aperta.
+
+**Idempotente sull'area**: rilancia STANZE dopo aver creato una stanza nuova in
+Home Assistant e vengono aggiunte *solo* quelle nuove. Una stanza che avevi
+spostato in un'altra pagina non ritorna come doppione. È il caso «stanze
+future», e deve funzionare senza rifare quello che avevi già sistemato.
+
+### Controllo temperatura (pulsante CLIMA)
+Sulla domanda «panoramica o sezione temperature»: **sezione temperature**, e
+non è un compromesso. L'analisi e l'azione vanno insieme — leggere «balcone
+28,9°» e poi dover navigare altrove per accendere il condizionatore è la
+frattura che rende scomoda una dashboard. E siccome dalla 0.23 le sezioni si
+trascinano ovunque e si spostano in pagine proprie, metterla qui non ti
+vincola: se domani la vuoi in panoramica è **un trascinamento, non un
+rifacimento**. Una sola card, collocabile ovunque — così la scelta non è più
+una forchetta fra due implementazioni.
+
+- **Una card per unità**: acceso/spento, temperatura impostata con −/+ e
+  cursore, modalità, e ventola / programma / flusso **solo su chi li dichiara**.
+  Verificato sulle tue due: il CDZ Storm espone 953 (temperatura, ventola,
+  programma, flusso, on/off, flusso orizzontale), il termostato 385
+  (temperatura, on/off) — e infatti il secondo non mostra una ventola che non
+  ha.
+- **I limiti li detta l'unità.** Uno dei tuoi va 8-30 °C a passi di 1, l'altro
+  1-7 a passi di 0,5: qualunque intervallo scritto nel codice ne avrebbe reso
+  uno incontrollabile.
+- **La sospensione delle automazioni sta in cima, con una frase intera.**
+  `input_boolean.automazioni_cdz_disattivate` non è un dispositivo, è uno
+  **stato dell'impianto**: con quello attivo il resto della casa smette di
+  decidere per te. Merita la prima riga della card e la scritta «le automazioni
+  NON intervengono», non di confondersi con una presa in fondo a una stanza.
+  Viene riconosciuto da solo, o lo scegli tu.
+- **Trascinare il cursore non manda una chiamata per pixel.** Solo il valore su
+  cui si ferma il dito parte, dopo 320 ms: molti condizionatori ignorano una
+  raffica di comandi, la temperatura torna indietro e si legge come «la
+  dashboard non funziona».
+
+### Correzioni
+- **Ogni automazione veniva scambiata per un interruttore di sospensione**: il
+  riconoscimento cercava «automation» dentro l'entity_id, e il nome del dominio
+  contiene già quella parola. Ora si guarda solo il nome vero.
+- **La riga di sospensione non compariva mai su una card appena creata**:
+  `Array.isArray([])` è vero, quindi la lista vuota non ricadeva sul
+  rilevamento automatico.
+- **La temperatura non si poteva regolare a unità spenta.** Era una
+  restrizione inventata dalla card: `supported_features` dichiara
+  TARGET_TEMPERATURE e non dice «solo mentre gira». Impostare il valore e poi
+  accendere è il modo normale di usare un termostato.
+
+### Verifiche
+851 asserzioni frontend (37 nuove), suite schema, suite notifiche e **205
+misurate** in Chromium (22 nuove) — fra cui che rilanciare STANZE aggiunga solo
+le stanze nuove, che i limiti del cursore vengano dall'unità e non dal codice,
+e che premere «+» produca **una sola** chiamata a Home Assistant.
+
+
 ## [0.29.0] - 2026-08-23
 
 Niente comandi che non comandano, e il confronto smette di essere

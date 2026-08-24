@@ -279,7 +279,30 @@ const DEFAULT_DASH = {
     { pageIndex: 0, rooms: true });
   await page.waitForTimeout(900);
   await page.screenshot({ path: path.resolve(__dirname, "24-rooms.png") });
-  const rc = await page.evaluate(() => {
+  // Each room is now its OWN section, collapsed after the first: the previous
+  // shape dumped the whole house on screen at once. So the structure is
+  // measured per section, and the cards are counted after expanding them.
+  const rcStruct = await page.evaluate(() => {
+    const el = window.__EL__;
+    const secs = el._sections();
+    return { sections: secs.length, titles: secs.map((s2) => s2.title),
+      oneCardEach: secs.every((s2) => s2.items.length === 1 && s2.items[0].type === "room"),
+      collapsed: secs.map((s2) => !!s2.collapsed),
+      visibleCards: document.querySelectorAll(".rc").length };
+  });
+  ok("una sezione per ogni area", rcStruct.sections === 5, String(rcStruct.sections));
+  ok("ogni sezione contiene solo la sua stanza", rcStruct.oneCardEach);
+  ok("solo la prima stanza è aperta",
+     rcStruct.collapsed[0] === false && rcStruct.collapsed.slice(1).every(Boolean),
+     rcStruct.collapsed.join());
+  ok("e a pagina aperta si vede una stanza sola", rcStruct.visibleCards === 1,
+     String(rcStruct.visibleCards));
+
+  const rc = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._sections().forEach((s2) => { s2.collapsed = false; });
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 250));
     const cards = Array.from(document.querySelectorAll(".rc"));
     return {
       count: cards.length,
@@ -290,7 +313,7 @@ const DEFAULT_DASH = {
       overflow: cards.some((c) => c.scrollWidth > c.clientWidth + 1),
     };
   });
-  ok("una card per ogni area", rc.count === 5, String(rc.count));
+  ok("aprendole tutte c'è una card per ogni area", rc.count === 5, String(rc.count));
   ok("ogni stanza con luci ha lo spegnimento di gruppo", rc.areas.length >= 4, rc.areas.join());
   ok("le letture salgono in testa alla card", rc.withReadings >= 3, String(rc.withReadings));
   ok("le tapparelle hanno i tre comandi giusti",
@@ -699,6 +722,133 @@ const DEFAULT_DASH = {
      list.rows.every((r, i) => i === 0 || r.t >= list.rows[i - 1].t + list.rows[i - 1].h - 1));
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
+
+  console.log("\n== CONTROLLO TEMPERATURA ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, thermostat: true });
+  await page.waitForTimeout(700);
+
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    window.__svc = [];
+    el._hass.callService = (d, s2, data) => { window.__svc.push({ d, s: s2, data }); };
+  });
+
+  const th = await page.evaluate(() => {
+    const wrap = document.querySelector(".th");
+    const man = document.querySelector(".th-manual");
+    const units = Array.from(document.querySelectorAll(".th-unit")).map((u) => {
+      const r = u.getBoundingClientRect();
+      const val = u.querySelector(".th-val strong");
+      const range = u.querySelector("[data-thermo-temp]");
+      return { top: Math.round(r.top), right: Math.round(r.right), h: Math.round(r.height),
+        id: range ? range.getAttribute("data-thermo-temp") : null,
+        min: range ? range.min : null, max: range ? range.max : null, step: range ? range.step : null,
+        val: val ? val.textContent : null,
+        modes: u.querySelectorAll("[data-thermo-mode]").length,
+        extras: u.querySelectorAll("[data-thermo-set]").length,
+        steppers: Array.from(u.querySelectorAll(".th-step")).map((b) => {
+          const bb = b.getBoundingClientRect();
+          return Math.min(Math.round(bb.width), Math.round(bb.height));
+        }) };
+    });
+    return { hasWrap: !!wrap, units, winW: window.innerWidth,
+      manTop: man ? Math.round(man.getBoundingClientRect().top) : null,
+      manText: man ? man.textContent.replace(/\s+/g, " ").trim() : "",
+      manOn: man ? man.classList.contains("on") : null,
+      scrollW: document.documentElement.scrollWidth };
+  });
+  ok("la card di controllo esiste con le sue unità", th.hasWrap && th.units.length >= 2,
+     String(th.units.length));
+  ok("la sospensione automazioni sta sopra le unità",
+     th.manTop !== null && th.units.every((u) => u.top >= th.manTop), th.manTop + " vs " + JSON.stringify(th.units.map((u) => u.top)));
+  ok("e dice a parole cosa comporta", /automazioni sono attive/i.test(th.manText), th.manText.slice(0, 80));
+  ok("con le automazioni attive non è in allarme", th.manOn === false);
+  ok("i comandi +/- sono toccabili",
+     th.units.every((u) => u.steppers.every((z) => z >= 36)),
+     JSON.stringify(th.units.map((u) => u.steppers)));
+  ok("niente deborda", th.units.every((u) => u.right <= th.winW + 1) && th.scrollW <= th.winW + 1);
+
+  // the thermostat's own bounds, not a hardcoded range
+  const termo = th.units.find((u) => u.id === "climate.termo_test");
+  ok("i limiti del termostato vengono dall'unità",
+     termo && termo.min === "1" && termo.max === "7" && termo.step === "0.5",
+     JSON.stringify(termo));
+  const cdz = th.units.find((u) => u.id === "climate.cdz_storm");
+  ok("e quelli del condizionatore sono i suoi",
+     !!cdz && cdz.min === "8" && cdz.max === "30" && cdz.step === "1", JSON.stringify(cdz));
+  // the air conditioner declares fan + preset + swing; the thermostat declares
+  // none of them, and must not be given selectors that would do nothing
+  ok("il condizionatore mostra i controlli che ha, il termostato no",
+     cdz.extras >= 3 && termo.extras === 0, cdz.extras + " vs " + termo.extras);
+  ok("e più modalità, perché ne dichiara di più",
+     cdz.modes > termo.modes, cdz.modes + " vs " + termo.modes);
+
+  // pressing + must move the number on screen and send exactly one call
+  const stepped = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const before = el._hass.states["climate.termo_test"].attributes.temperature;
+    document.querySelector('[data-thermo-step="climate.termo_test|1"]').click();
+    await new Promise((r) => setTimeout(r, 120));
+    const shown = document.querySelector('[data-thermo-temp="climate.termo_test"]');
+    const mid = el._hass.states["climate.termo_test"].attributes.temperature;
+    await new Promise((r) => setTimeout(r, 500));
+    return { before, mid, shown: shown ? shown.value : null, calls: window.__svc.slice() };
+  });
+  ok("premere + alza la temperatura del passo dell'unità",
+     stepped.mid === stepped.before + 0.5, stepped.before + " -> " + stepped.mid);
+  ok("e il cursore segue subito", Number(stepped.shown) === stepped.mid, stepped.shown);
+  ok("una sola chiamata a Home Assistant, non una per pixel",
+     stepped.calls.length === 1 && stepped.calls[0].s === "set_temperature"
+     && stepped.calls[0].data.temperature === stepped.mid, JSON.stringify(stepped.calls));
+
+  // manual mode makes itself unmistakable
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, thermostat: true, manualOn: true });
+  await page.waitForTimeout(600);
+  const manOn = await page.evaluate(() => {
+    const man = document.querySelector(".th-manual");
+    return { on: man ? man.classList.contains("on") : false,
+      text: man ? man.textContent.replace(/\s+/g, " ").trim() : "",
+      border: man ? getComputedStyle(man).borderStyle : "" };
+  });
+  ok("con le automazioni sospese la riga cambia faccia",
+     manOn.on && manOn.border === "solid", JSON.stringify(manOn).slice(0, 120));
+  ok("e lo dice senza ambiguità", /NON intervengono/.test(manOn.text), manOn.text.slice(0, 90));
+
+  const phoneTh = await browser.newPage({ viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneTh.on("pageerror", (e) => errors.push("PHONE-THERMO: " + e.message));
+  await phoneTh.goto("http://127.0.0.1:8899/harness.html");
+  await phoneTh.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneTh.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneTh.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, thermostat: true });
+  await phoneTh.waitForTimeout(700);
+  const pth = await phoneTh.evaluate(() => {
+    const units = Array.from(document.querySelectorAll(".th-unit")).map((u) => {
+      const r = u.getBoundingClientRect();
+      return { right: Math.round(r.right), w: Math.round(r.width) };
+    });
+    const steps = Array.from(document.querySelectorAll(".th-step")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return Math.min(Math.round(r.width), Math.round(r.height));
+    });
+    return { units, steps, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: le unità restano nello schermo",
+     pth.units.length >= 2 && pth.units.every((u) => u.right <= pth.winW + 1),
+     JSON.stringify(pth.units));
+  ok("telefono: i +/- restano toccabili", pth.steps.every((z) => z >= 36), pth.steps.join());
+  ok("telefono: nessuno scorrimento orizzontale", pth.scrollW <= pth.winW + 1,
+     pth.scrollW + " vs " + pth.winW);
+  await phoneTh.close();
 
   console.log("\n== CONFRONTO DI QUALSIASI GRANDEZZA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
