@@ -167,7 +167,17 @@ const hass={states,
   },
   callService:(d,s,data)=>{window.__CALLS__=(window.__CALLS__||[]).concat([d+"."+s+" "+JSON.stringify(data)])},
   connection:{subscribeMessage:(cb,msg)=>{
-    if(msg.type==="weather/subscribe_forecast"){
+    if(msg.type==="weather/subscribe_forecast"&&msg.forecast_type==="hourly"){
+      // deterministic hours: no Math.random, so the screenshots stay stable
+      const base=Date.parse("2026-08-24T10:00:00+02:00");
+      const conds=["sunny","partlycloudy","partlycloudy","cloudy","rainy"];
+      setTimeout(()=>cb({type:"hourly",forecast:Array.from({length:12},(_,i)=>({
+        datetime:new Date(base+i*3600000).toISOString(),
+        condition:conds[i%conds.length],
+        temperature:Math.round((24+Math.sin(i/2.4)*3.4)*10)/10,
+        precipitation_probability:(i*7)%60}))}),60);
+    }
+    if(msg.type==="weather/subscribe_forecast"&&msg.forecast_type!=="hourly"){
       setTimeout(()=>cb({type:"daily",forecast:[
         {datetime:"2026-08-22T12:00:00+02:00",condition:"sunny",temperature:29,templow:19},
         {datetime:"2026-08-23T12:00:00+02:00",condition:"partlycloudy",temperature:27,templow:18},

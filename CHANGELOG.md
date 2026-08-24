@@ -4,6 +4,57 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.32.0] - 2026-08-24
+
+Seguire una linea col cursore, e un meteo che dice di dove parla.
+
+### Grafici: la linea sotto il puntatore si stacca dalle altre
+Quattro linee che si incrociano su un piano solo diventano illeggibili nel
+momento esatto in cui ti serve un numero da una di esse.
+
+Ora passando il cursore sul grafico: la linea più vicina **si ingrossa e
+mantiene il suo bagliore**, le altre **si attenuano** — attenuate, non
+nascoste, così gli incroci che stavi leggendo restano lì. Una **guida
+verticale** segna l'istante sotto il puntatore, un **punto** si posa su ogni
+curva a quell'istante, e sotto compare la **lettura**: l'ora e il valore di
+ogni grandezza, con quella seguita in evidenza e nel suo colore. Anche la voce
+di legenda corrispondente si accende.
+
+I valori mostrati sono **campioni veri del recorder**, il più vicino nel tempo
+al punto in cui sei: non interpolo fra due misure, perché un numero inventato
+fra due letture su un grafico diagnostico è peggio che nessun numero.
+
+Il puntatore **non ridisegna la card**: tocca direttamente i nodi già a
+schermo. Un ridisegno per ogni movimento del mouse ricostruirebbe l'SVG sotto
+il dito, e il grafico combatterebbe col cursore invece di seguirlo.
+
+### Meteo: luogo e scala
+- **Il pannello dice di che posto parla.** Prima aveva per titolo il nome
+  dell'entità — «Forecast Casa Oscar» — che è un'etichetta scritta da qualcuno,
+  non un luogo. Ora sotto il titolo compaiono il **nome della posizione e le
+  coordinate reali** prese dalla configurazione di Home Assistant, più il
+  **fornitore** ricavato dall'attribuzione dell'entità (met.no, nel tuo caso):
+  quando due entità meteo non vanno d'accordo, sapere quale servizio parla
+  cambia tutto.
+- **La curva delle prossime ore ha una scala.** Prima era una sparkline senza
+  asse: una linea che sale dice che qualcosa cresce, e nient'altro. Su un
+  pannello meteo la domanda è «quanto farà caldo alle quattro», e una curva
+  senza numeri non può rispondere. Ora ci sono i gradi sull'asse verticale, le
+  ore su quello orizzontale, e **massimo e minimo etichettati** sul punto.
+  Niente più `preserveAspectRatio="none"`: la vecchia curva si stirava per
+  riempire il riquadro, quindi la pendenza che mostrava dipendeva dalla
+  finestra, non dal tempo.
+
+### Verifiche
+855 asserzioni frontend, suite schema, suite notifiche e **230 misurate** in
+Chromium (20 nuove). Le nuove usano il puntatore vero: che una sola linea vada
+a fuoco, che sia **misurabilmente** più spessa e più opaca delle altre, che i
+punti di riferimento cadano tutti sullo stesso istante, che spostandosi in
+verticale cambi la linea seguita, e che uscendo dal grafico torni tutto com'era.
+Sul meteo: che un numero più caldo stia **più in alto** — la scala verificata
+per posizione, non perché le etichette sembrano ordinate.
+
+
 ## [0.31.0] - 2026-08-24
 
 Due difetti dell'ultima versione, entrambi della stessa famiglia: il

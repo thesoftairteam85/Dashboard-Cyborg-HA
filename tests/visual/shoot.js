@@ -723,6 +723,129 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== SEGUIRE UNA LINEA COL CURSORE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trend: true });
+  await page.waitForTimeout(1100);
+
+  const plot = await page.evaluate(() => {
+    const svg = document.querySelector("[data-trend-svg]");
+    if (!svg) return null;
+    const b = svg.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width * 0.55), y: Math.round(b.top + b.height * 0.5),
+      left: Math.round(b.left), top: Math.round(b.top),
+      w: Math.round(b.width), h: Math.round(b.height),
+      lines: svg.querySelectorAll(".tr-line").length,
+      hoverHidden: getComputedStyle(svg.querySelector(".tr-hover")).opacity };
+  });
+  ok("il grafico è pronto con le sue linee", plot && plot.lines >= 4, JSON.stringify(plot));
+  ok("a riposo non c'è nessun indicatore", Number(plot.hoverHidden) === 0, plot.hoverHidden);
+
+  await page.mouse.move(plot.x, plot.y);
+  await page.waitForTimeout(200);
+  const hov = await page.evaluate(() => {
+    const svg = document.querySelector("[data-trend-svg]");
+    const lines = Array.from(svg.querySelectorAll(".tr-line")).map((l) => ({
+      id: l.getAttribute("data-series"),
+      focus: l.classList.contains("focus"), dim: l.classList.contains("dim"),
+      w: getComputedStyle(l).strokeWidth, op: Number(getComputedStyle(l).opacity) }));
+    const read = document.querySelector("[data-trend-read]");
+    const dots = Array.from(svg.querySelectorAll(".tr-pt")).map((c) => ({
+      cx: Number(c.getAttribute("cx")), cy: Number(c.getAttribute("cy")) }));
+    const cur = svg.querySelector(".tr-cursor");
+    const legFocus = Array.from(document.querySelectorAll(".tr-leg.focus")).length;
+    return { lines, dots, legFocus,
+      cursorX: Number(cur.getAttribute("x1")),
+      hoverOpacity: Number(getComputedStyle(svg.querySelector(".tr-hover")).opacity),
+      readHidden: read.hidden,
+      readText: read.textContent.replace(/\s+/g, " ").trim() };
+  });
+  ok("una linea sola viene messa a fuoco",
+     hov.lines.filter((l) => l.focus).length === 1, JSON.stringify(hov.lines.map((l) => l.focus)));
+  ok("le altre si attenuano",
+     hov.lines.filter((l) => l.dim).length === hov.lines.length - 1,
+     JSON.stringify(hov.lines.map((l) => l.dim)));
+  // "un colore più calcato": measurably thicker and measurably more opaque
+  const foc = hov.lines.find((l) => l.focus);
+  const others = hov.lines.filter((l) => !l.focus);
+  ok("quella a fuoco è più marcata delle altre",
+     parseFloat(foc.w) > parseFloat(others[0].w) && foc.op > others[0].op,
+     foc.w + "/" + foc.op + " vs " + others[0].w + "/" + others[0].op);
+  ok("compare la guida verticale sotto il puntatore",
+     hov.hoverOpacity === 1 && hov.cursorX > 0, JSON.stringify({ o: hov.hoverOpacity, x: hov.cursorX }));
+  ok("c'è un punto di riferimento su ogni linea",
+     hov.dots.length >= 4 && hov.dots.every((d) => d.cy > 0), JSON.stringify(hov.dots));
+  ok("tutti i punti stanno sullo stesso istante",
+     new Set(hov.dots.map((d) => d.cx)).size === 1, JSON.stringify(hov.dots.map((d) => d.cx)));
+  ok("la lettura mostra l'ora e i valori",
+     !hov.readHidden && /\d{1,2}:\d{2}/.test(hov.readText) && /°C/.test(hov.readText),
+     hov.readText.slice(0, 90));
+  ok("e la voce di legenda corrispondente si accende", hov.legFocus === 1, String(hov.legFocus));
+
+  // moving to a different height must pick a different line
+  const other = await page.evaluate(() => {
+    const svg = document.querySelector("[data-trend-svg]");
+    return svg.querySelector(".tr-line.focus").getAttribute("data-series");
+  });
+  await page.mouse.move(plot.x, plot.top + Math.round(plot.h * 0.15));
+  await page.waitForTimeout(180);
+  const moved = await page.evaluate(() => {
+    const f = document.querySelector("[data-trend-svg] .tr-line.focus");
+    return { id: f ? f.getAttribute("data-series") : null,
+      read: document.querySelector("[data-trend-read]").textContent.replace(/\s+/g, " ").trim() };
+  });
+  ok("spostandosi in verticale cambia la linea seguita", moved.id && moved.id !== other,
+     other + " -> " + moved.id);
+  ok("e la lettura si aggiorna", /°C/.test(moved.read), moved.read.slice(0, 60));
+
+  await page.mouse.move(plot.left - 40, plot.top - 40);
+  await page.waitForTimeout(200);
+  const away = await page.evaluate(() => {
+    const svg = document.querySelector("[data-trend-svg]");
+    return { focus: svg.querySelectorAll(".tr-line.focus").length,
+      dim: svg.querySelectorAll(".tr-line.dim").length,
+      hidden: document.querySelector("[data-trend-read]").hidden,
+      o: Number(getComputedStyle(svg.querySelector(".tr-hover")).opacity) };
+  });
+  ok("uscendo dal grafico tutto torna com'era",
+     away.focus === 0 && away.dim === 0 && away.hidden && away.o === 0, JSON.stringify(away));
+
+  console.log("\n== METEO: LUOGO E SCALA ==");
+  const wx = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._hass.config = { location_name: "Casa Oscar", latitude: 45.568022, longitude: 9.765472 };
+    el._openOverlay("weather", "weather.casa_oscar");
+    await new Promise((r) => setTimeout(r, 400));
+    const head = document.querySelector(".ovl-title");
+    const svg = document.querySelector(".wxc");
+    // value AND vertical position: "the scale is right" means a warmer number
+    // sits higher on the chart, not that the labels happen to be sorted.
+    const labs = svg ? Array.from(svg.querySelectorAll(".wxc-lab:not(.x)"))
+      .map((t) => ({ txt: t.textContent, v: parseFloat(t.textContent), y: Number(t.getAttribute("y")) })) : [];
+    const xlabs = svg ? Array.from(svg.querySelectorAll(".wxc-lab.x")).map((t) => t.textContent) : [];
+    return { sub: head ? (head.querySelector("small") || {}).textContent : null,
+      hasChart: !!svg, labs, xlabs,
+      marks: svg ? svg.querySelectorAll(".wxc-mark").length : 0,
+      unit: svg ? (svg.querySelector(".wxc-unit") || {}).textContent : null };
+  });
+  ok("il pannello meteo dice di che luogo parla", /Casa Oscar/.test(wx.sub || ""), wx.sub);
+  ok("e mostra le coordinate reali di Home Assistant",
+     /45\.568/.test(wx.sub || "") && /9\.765/.test(wx.sub || ""), wx.sub);
+  ok("la curva delle prossime ore ha una scala verticale",
+     wx.hasChart && wx.labs.length >= 4 && wx.labs.every((l) => /°$/.test(l.txt)),
+     wx.labs.map((l) => l.txt).join(" "));
+  ok("più caldo sta più in alto",
+     wx.labs.length >= 2
+     && wx.labs.every((l, i) => i === 0 || (l.v > wx.labs[i - 1].v) === (l.y < wx.labs[i - 1].y)),
+     wx.labs.map((l) => l.txt + "@" + l.y).join(" "));
+  ok("l'unità è dichiarata", /°/.test(wx.unit || ""), wx.unit);
+  ok("ci sono le ore sull'asse orizzontale",
+     wx.xlabs.length >= 3 && wx.xlabs.every((l) => /\d{1,2}:\d{2}/.test(l)), wx.xlabs.join(" "));
+  ok("massimo e minimo sono etichettati", wx.marks >= 2, String(wx.marks));
+
   console.log("\n== CONTROLLO TEMPERATURA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

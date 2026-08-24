@@ -1478,6 +1478,66 @@ function sparkline(points, w, h) {
     </svg>`;
 }
 
+/**
+ * The next-hours temperature curve, WITH a vertical scale.
+ *
+ * The sparkline it replaces had no axis at all: a line that rises tells you
+ * something is going up, and nothing else. On a weather panel the question is
+ * "how warm will it be at four", and a curve without numbers cannot answer it.
+ *
+ * `preserveAspectRatio` is left at its default here, unlike the sparkline: the
+ * old chart stretched to fit and the slope it showed was a function of the box,
+ * not of the weather.
+ */
+/** "14:30" from an ISO timestamp, or an em dash when it is not one. */
+function hhmm2(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "\u2014"
+    : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function hourlyChart(points, labels, unit) {
+  if (!points || points.length < 2) return "";
+  const W = 520, H = 132, PAD_L = 34, PAD_R = 8, PAD_T = 10, PAD_B = 18;
+  let min = Math.min(...points), max = Math.max(...points);
+  if (max - min < 2) { const mid = (max + min) / 2; min = mid - 1; max = mid + 1; }
+  const pad = (max - min) * 0.15;
+  min -= pad; max += pad;
+  const x = (i) => PAD_L + (i / (points.length - 1)) * (W - PAD_L - PAD_R);
+  const y = (v) => PAD_T + (1 - (v - min) / (max - min)) * (H - PAD_T - PAD_B);
+
+  const ticks = 4;
+  const grid = Array.from({ length: ticks + 1 }, (_, i) => {
+    const v = min + ((max - min) * i) / ticks;
+    const yy = y(v);
+    return `<line class="wxc-grid" x1="${PAD_L}" y1="${yy.toFixed(1)}" x2="${W - PAD_R}" y2="${yy.toFixed(1)}"/>
+      <text class="wxc-lab" x="${PAD_L - 5}" y="${(yy + 3).toFixed(1)}">${Math.round(v)}°</text>`;
+  }).join("");
+
+  const line = points.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(points.length - 1).toFixed(1)},${H - PAD_B} L${PAD_L},${H - PAD_B} Z`;
+
+  // Only a few hour labels: one under every point turns the axis into a smear.
+  const every = Math.max(1, Math.round(points.length / 5));
+  const xlabs = (labels || []).map((l, i) => (i % every === 0 || i === points.length - 1)
+    ? `<text class="wxc-lab x" x="${x(i).toFixed(1)}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"}">${esc(l)}</text>`
+    : "").join("");
+
+  const hi = points.indexOf(Math.max(...points));
+  const lo = points.indexOf(Math.min(...points));
+  const mark = (i, cls) => `<circle class="wxc-dot ${cls}" cx="${x(i).toFixed(1)}" cy="${y(points[i]).toFixed(1)}" r="3"/>
+    <text class="wxc-mark ${cls}" x="${x(i).toFixed(1)}" y="${(y(points[i]) - 7).toFixed(1)}" text-anchor="middle">${Math.round(points[i])}°</text>`;
+
+  return `<svg class="wxc" viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperatura delle prossime ore">
+      ${grid}
+      <path class="wxc-area" d="${area}"/>
+      <path class="wxc-line" d="${line}"/>
+      ${mark(hi, "hi")}${hi === lo ? "" : mark(lo, "lo")}
+      ${xlabs}
+      <text class="wxc-unit" x="${PAD_L - 5}" y="${PAD_T - 2}" text-anchor="end">${esc(unit)}</text>
+    </svg>`;
+}
+
 class CyborgDashboard extends HTMLElement {
   constructor() {
     super();
@@ -5241,8 +5301,32 @@ class CyborgDashboard extends HTMLElement {
       if (pts.length < 2) return "";
       const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
       const d = pts.map((pt, j) => (j ? "L" : "M") + x(pt[0]).toFixed(1) + "," + y(pt[1]).toFixed(1)).join(" ");
-      return `<path class="tr-line" d="${d}" style="stroke:${esc(color)}"/>`;
+      return `<path class="tr-line" data-series="${esc(row.entity)}" d="${d}" style="stroke:${esc(color)}"/>`;
     }).join("");
+
+    // Geometry kept for the pointer handler. Hovering must not re-render: a
+    // full repaint per mousemove would fight the pointer and lose.
+    this._trendGeom = this._trendGeom || {};
+    this._trendGeom[item.id] = {
+      W, H, PAD_L, PAD_R, PAD_T, PAD_B, lo, hi,
+      start: data.start, end: data.end,
+      hours,
+      series: series.map((row, i) => ({
+        entity: row.entity,
+        color: row.color || SERIES_COLORS[i % SERIES_COLORS.length],
+        name: row.name || (this._hass.states[row.entity].attributes.friendly_name) || row.entity,
+        unit: this._hass.states[row.entity].attributes.unit_of_measurement || "",
+        pts: data.data[row.entity] || [],
+      })).filter((r) => r.pts.length > 1),
+    };
+
+    // Drawn empty and filled in by the handler, so the markup does not change
+    // shape between hovering and not hovering.
+    const hoverLayer = `<g class="tr-hover" data-trend-hover>
+        <line class="tr-cursor" x1="0" y1="${PAD_T}" x2="0" y2="${H - PAD_B}"/>
+        ${series.map((row, i) => `<circle class="tr-pt" data-pt="${esc(row.entity)}" r="3.5"
+          style="fill:${esc(row.color || SERIES_COLORS[i % SERIES_COLORS.length])}"/>`).join("")}
+      </g>`;
 
     const legend = series.map((row, i) => {
       const st = this._hass.states[row.entity];
@@ -5264,9 +5348,13 @@ class CyborgDashboard extends HTMLElement {
     return `<div class="tr">
       <div class="tr-tabs">${TREND_RANGES.map((r) =>
         `<button class="eco-tab ${r.h === hours ? "on" : ""}" data-trend-hours="${r.h}">${esc(r.l)}</button>`).join("")}</div>
-      <svg class="tr-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-        ${grid}${xLabels}${paths}
-      </svg>
+      <div class="tr-plot">
+        <svg class="tr-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+             data-trend-svg="${esc(item.id)}">
+          ${grid}${xLabels}${paths}${hoverLayer}
+        </svg>
+        <div class="tr-read" data-trend-read hidden></div>
+      </div>
       <div class="tr-legend">${legend}</div>
     </div>`;
   }
@@ -5824,7 +5912,8 @@ class CyborgDashboard extends HTMLElement {
         <div class="ovl-panel" data-overlay-stop>
           <div class="ovl-head">
             <ha-icon icon="${esc(o.kind === "camera" ? "mdi:cctv" : "mdi:weather-partly-cloudy")}"></ha-icon>
-            <strong>${esc(st.attributes.friendly_name || o.entity)}</strong>
+            <div class="ovl-title"><strong>${esc(st.attributes.friendly_name || o.entity)}</strong>
+              ${o.kind === "camera" ? "" : `<small>${esc(this._weatherPlace(st))}</small>`}</div>
             <button class="icon" data-overlay-close><ha-icon icon="mdi:close"></ha-icon></button>
           </div>
           ${body}
@@ -5845,6 +5934,35 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  /**
+   * Where the forecast is FOR, and who it comes from.
+   *
+   * The panel was titled with the entity's friendly name — "Forecast Casa
+   * Oscar" — which is a label somebody typed, not a place. On a weather panel
+   * the first question is "of where", and nothing on screen answered it.
+   *
+   * The coordinates come from Home Assistant's own configuration, so they are
+   * the real position the forecast was requested for, not a guess from a name.
+   * The provider comes from the entity's `attribution`, trimmed of its polite
+   * wording: knowing it is met.no rather than a generic "weather" matters when
+   * two entities disagree.
+   */
+  _weatherPlace(st) {
+    const cfg = (this._hass && this._hass.config) || {};
+    const bits = [];
+    if (cfg.location_name) bits.push(cfg.location_name);
+    if (Number.isFinite(cfg.latitude) && Number.isFinite(cfg.longitude)) {
+      bits.push(cfg.latitude.toFixed(3) + ", " + cfg.longitude.toFixed(3));
+    }
+    const attribution = String((st.attributes && st.attributes.attribution) || "");
+    const source = attribution
+      .replace(/^.*?\bfrom\b\s*/i, "")
+      .replace(/,.*$/, "")
+      .trim();
+    if (source) bits.push(source);
+    return bits.join(" \u00b7 ") || "posizione non configurata";
+  }
+
   _weatherDetail(id, st) {
     const a = st.attributes;
     const [icon, label] = WEATHER_CONDITIONS[st.state] || ["mdi:weather-cloudy", String(st.state)];
@@ -5860,11 +5978,11 @@ class CyborgDashboard extends HTMLElement {
     const daily = ((this._forecast || {})[id] || []).slice(0, 7);
 
     const temps = hourly.map((h) => h.temperature).filter((n) => Number.isFinite(n));
-    const spark = temps.length > 1 ? sparkline(temps, 320, 60) : "";
+    const spark = temps.length > 1
+      ? hourlyChart(temps, hourly.map((h) => hhmm2(h.datetime)), unit) : "";
 
     const sun = this._hass.states["sun.sun"];
-    const hhmm = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "—"
-      : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+    const hhmm = hhmm2;
 
     const facts = [
       a.temperature !== undefined ? ["mdi:thermometer", "Temperatura", Math.round(a.temperature * 10) / 10 + unit] : null,
@@ -8424,6 +8542,103 @@ class CyborgDashboard extends HTMLElement {
     const limReset = q("[data-limits-reset]");
     if (limReset && card) limReset.onclick = () => { card.limits = {}; this._touch(); };
 
+    /**
+     * Following a line with the pointer.
+     *
+     * Four lines crossing on one plane are unreadable the moment you need a
+     * number off one of them. So: the nearest series is thickened and the
+     * others fade, a vertical guide marks the instant under the pointer, a dot
+     * sits on every curve at that instant, and the readout lists the values —
+     * the focused one first and in its own colour.
+     *
+     * The DOM is touched directly, never re-rendered: repainting the card on
+     * every pointermove would rebuild the SVG under the finger and the chart
+     * would fight the cursor instead of following it.
+     */
+    all("[data-trend-svg]").forEach((svg) => {
+      const geom = (this._trendGeom || {})[svg.getAttribute("data-trend-svg")];
+      if (!geom || !geom.series.length) return;
+      const plot = svg.closest(".tr-plot");
+      const layer = plot && plot.querySelector("[data-trend-hover]");
+      const cursor = layer && layer.querySelector(".tr-cursor");
+      const read = plot && plot.querySelector("[data-trend-read]");
+      if (!layer || !cursor || !read) return;
+
+      const legendOf = (entity) => plot.parentElement
+        && plot.parentElement.querySelector(`.tr-leg[data-more-info="${entity}"]`);
+      const yOf = (v) => geom.PAD_T + (1 - (v - geom.lo) / (geom.hi - geom.lo))
+        * (geom.H - geom.PAD_T - geom.PAD_B);
+      const fmt = (v, unit) => (Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(1)) + unit;
+
+      const clear = () => {
+        plot.classList.remove("hovering");
+        read.hidden = true;
+        svg.querySelectorAll(".tr-line").forEach((l) => l.classList.remove("focus", "dim"));
+        plot.parentElement.querySelectorAll(".tr-leg").forEach((l) => l.classList.remove("focus"));
+      };
+
+      const move = (ev) => {
+        const box = svg.getBoundingClientRect();
+        if (!box.width) return;
+        // preserveAspectRatio="none" means the viewBox maps linearly onto the
+        // box on each axis independently, so this is a plain rescale.
+        const vx = ((ev.clientX - box.left) / box.width) * geom.W;
+        const vy = ((ev.clientY - box.top) / box.height) * geom.H;
+        const inner = Math.max(1, geom.W - geom.PAD_L - geom.PAD_R);
+        const frac = Math.max(0, Math.min(1, (vx - geom.PAD_L) / inner));
+        const t = geom.start + (geom.end - geom.start) * frac;
+
+        let best = null;
+        const rows = geom.series.map((row) => {
+          // Nearest sample in time, not interpolation: the readout must show a
+          // value the recorder actually stored, not one invented between two.
+          let pick = row.pts[0];
+          let dist = Math.abs(pick[0] - t);
+          for (const pt of row.pts) {
+            const d2 = Math.abs(pt[0] - t);
+            if (d2 < dist) { dist = d2; pick = pt; }
+          }
+          const py = yOf(pick[1]);
+          const dy = Math.abs(py - vy);
+          if (!best || dy < best.dy) best = { entity: row.entity, dy };
+          return { row, value: pick[1], time: pick[0], py };
+        });
+
+        const px = geom.PAD_L + frac * inner;
+        cursor.setAttribute("x1", px.toFixed(1));
+        cursor.setAttribute("x2", px.toFixed(1));
+        for (const r of rows) {
+          const dot = layer.querySelector(`[data-pt="${r.row.entity}"]`);
+          if (dot) { dot.setAttribute("cx", px.toFixed(1)); dot.setAttribute("cy", r.py.toFixed(1)); }
+        }
+
+        svg.querySelectorAll(".tr-line").forEach((l) => {
+          const on = l.getAttribute("data-series") === best.entity;
+          l.classList.toggle("focus", on);
+          l.classList.toggle("dim", !on);
+        });
+        plot.parentElement.querySelectorAll(".tr-leg").forEach((l) => l.classList.remove("focus"));
+        const leg = legendOf(best.entity);
+        if (leg) leg.classList.add("focus");
+
+        const when = new Date(rows[0] ? rows[0].time : t);
+        const stamp = geom.hours > 72
+          ? `${when.getDate()}/${when.getMonth() + 1} ${String(when.getHours()).padStart(2, "0")}:00`
+          : String(when.getHours()).padStart(2, "0") + ":" + String(when.getMinutes()).padStart(2, "0");
+        const ordered = rows.slice().sort((a, b) =>
+          (b.row.entity === best.entity) - (a.row.entity === best.entity) || b.value - a.value);
+        read.innerHTML = `<span class="tr-read-t">${esc(stamp)}</span>`
+          + ordered.map((r) => `<span class="tr-read-v ${r.row.entity === best.entity ? "on" : ""}"
+              style="--sc:${esc(r.row.color)}"><i></i>${esc(r.row.name)} <b>${esc(fmt(r.value, r.row.unit))}</b></span>`).join("");
+        read.hidden = false;
+        plot.classList.add("hovering");
+      };
+
+      svg.onpointermove = move;
+      svg.onpointerdown = move;
+      svg.onpointerleave = clear;
+      svg.onpointercancel = clear;
+    });
     all("[data-trend-source]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -10866,6 +11081,45 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .tr-xlab{fill:currentColor;opacity:.3;font:9px ui-monospace,monospace}
 .tr-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;
   filter:drop-shadow(0 0 5px color-mix(in srgb,currentColor 40%,transparent))}
+.tr-plot{position:relative}
+.tr-svg{touch-action:pan-y}
+/* Following one line among four: the one under the pointer gets thicker and
+   keeps its glow, the others step back. Dimming rather than hiding, so the
+   crossings you were reading are still there. */
+.tr-line{transition:opacity .12s,stroke-width .12s}
+.tr-line.dim{opacity:.22;filter:none}
+.tr-line.focus{stroke-width:3.2}
+.tr-hover{opacity:0;transition:opacity .12s;pointer-events:none}
+.tr-plot.hovering .tr-hover{opacity:1}
+.tr-cursor{stroke:currentColor;opacity:.35;stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
+.tr-pt{stroke:var(--card-background-color,#111a24);stroke-width:2;vector-effect:non-scaling-stroke}
+.tr-read{display:flex;flex-wrap:wrap;align-items:center;gap:5px 12px;margin-top:6px;padding:7px 9px;
+  border-radius:10px;background:color-mix(in srgb,var(--card-background-color) 82%,transparent);
+  border:1px solid var(--divider-color)}
+.tr-read-t{font:10px ui-monospace,monospace;letter-spacing:1px;opacity:.5}
+.tr-read-v{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;opacity:.55}
+.tr-read-v i{width:9px;height:3px;border-radius:99px;background:var(--sc);flex-shrink:0}
+.tr-read-v b{font:11px ui-monospace,monospace;font-weight:700;color:var(--sc)}
+.tr-read-v.on{opacity:1;font-weight:600}
+.tr-leg.focus{border-color:color-mix(in srgb,var(--sc) 60%,transparent);background:color-mix(in srgb,var(--sc) 13%,transparent)}
+/* Weather: the hourly curve, with its scale */
+.wxc{width:100%;height:auto;display:block;max-height:150px}
+.wxc-grid{stroke:rgba(255,255,255,.07);stroke-width:1}
+.wxc-lab{fill:currentColor;opacity:.35;font:9px ui-monospace,monospace;text-anchor:end}
+.wxc-lab.x{text-anchor:middle;opacity:.3}
+.wxc-unit{fill:var(--accent);opacity:.55;font:8px ui-monospace,monospace}
+.wxc-area{fill:color-mix(in srgb,var(--accent) 15%,transparent)}
+.wxc-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.wxc-dot{stroke:var(--card-background-color,#111a24);stroke-width:2;vector-effect:non-scaling-stroke}
+.wxc-dot.hi{fill:#ff924c}
+.wxc-dot.lo{fill:#4cc9f0}
+.wxc-mark{font:9px ui-monospace,monospace;font-weight:700}
+.wxc-mark.hi{fill:#ff924c}
+.wxc-mark.lo{fill:#4cc9f0}
+.ovl-title{flex:1;min-width:0}
+.ovl-title strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ovl-title small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.7px;opacity:.45;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px}
 .tr-leg{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;text-align:left;
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
@@ -11020,7 +11274,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.31.0";
+const CYBORG_BUILD = "0.32.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
