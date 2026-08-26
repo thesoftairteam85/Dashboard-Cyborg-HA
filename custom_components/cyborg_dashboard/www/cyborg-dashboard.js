@@ -3991,18 +3991,60 @@ class CyborgDashboard extends HTMLElement {
    * three sockets you happen to have metered. It is only shown when the gap is
    * big enough to be real rather than rounding noise.
    */
+  /**
+   * A power reading of exactly zero that is not true.
+   *
+   * Measured on the real installation: the dryer's Tuya plug drops its power
+   * report to 0.0 for about forty seconds at a time while the machine is
+   * running - 11:18:59 zero, 11:19:41 back to 172 W; 11:56:09 zero, 11:56:51
+   * back to 165 W - and the energy counter keeps climbing straight through.
+   * The value is fresh, so no staleness check catches it; it is simply wrong.
+   *
+   * So a zero is bridged with the last real reading for at most two minutes,
+   * and ONLY while the plug that feeds the load is still switched on. That
+   * bound matters: without it a machine that really finished would keep
+   * showing its last watts. With it, switching off is instant and a reporting
+   * gap is invisible - which is the right way round.
+   */
+  _bridge(entity, watts) {
+    this._lastGood = this._lastGood || {};
+    const now = Date.now();
+    if (watts > 0) { this._lastGood[entity] = { w: watts, t: now }; return { watts, bridged: false }; }
+    const good = this._lastGood[entity];
+    if (!good || now - good.t > 120000) return { watts, bridged: false };
+    if (!this._feedIsOn(entity)) return { watts, bridged: false };
+    return { watts: good.w, bridged: true, since: now - good.t };
+  }
+
+  /** Is the switch of this meter's own device still on? */
+  _feedIsOn(entity) {
+    const reg = this._registry;
+    if (!reg || !reg.entityDevice || !reg.deviceEntities) return false;
+    const dev = reg.entityDevice[entity];
+    if (!dev) return false;
+    for (const sib of reg.deviceEntities[dev] || []) {
+      if (domainOf(sib) !== "switch") continue;
+      const st = this._hass.states[sib];
+      if (st && st.state === "on") return true;
+    }
+    return false;
+  }
+
   _flowLoads(flow, homeWatts) {
     const all = [];
     for (const d of (flow.devices || [])) {
       const st = this._hass.states[d.entity];
       if (!st) continue;
-      const n = powerWatts(st);
-      if (n === null || n < 1) continue;
+      const raw = powerWatts(st);
+      if (raw === null) continue;
+      const b = this._bridge(d.entity, raw);
+      if (b.watts < 1) continue;
       all.push({
         entity: d.entity,
         name: d.name || st.attributes.friendly_name || d.entity,
         icon: d.icon || autoIcon(d.entity, st),
-        watts: n,
+        watts: b.watts,
+        bridged: b.bridged,
         parent: this._parentOf(d.entity, d.parent),
         children: [],
       });
@@ -4162,6 +4204,33 @@ class CyborgDashboard extends HTMLElement {
       || cands[0];
   }
 
+  /** A card anywhere on the dashboard, by id. */
+  _findCard(id) {
+    for (const page of (this._dashboard && this._dashboard.pages) || []) {
+      for (const sec of page.sections || []) {
+        for (const it of sec.items || []) if (it.id === id) return it;
+      }
+    }
+    return null;
+  }
+
+  /** Switch one line of a chart on or off, and remember it. */
+  _toggleSeries(cardId, entity) {
+    const card = this._findCard(cardId);
+    if (!card) return;
+    const off = new Set(Array.isArray(card.hidden_series) ? card.hidden_series : []);
+    if (off.has(entity)) off.delete(entity);
+    else {
+      // Never leave the chart with nothing on it.
+      const all = this._trendAllSeries(card).map((r) => r.entity);
+      if (all.filter((e) => !off.has(e)).length <= 1) return;
+      off.add(entity);
+    }
+    card.hidden_series = Array.from(off);
+    this._dirty = true;
+    this._touch();
+  }
+
   /** Record a parent for everybody, not just for the card being edited. */
   _setParent(entity, parent) {
     if (!this._dashboard) return;
@@ -4221,7 +4290,8 @@ class CyborgDashboard extends HTMLElement {
         // one that decides whether you can leave.
         l.vehicle && l.soc !== null ? Math.round(l.soc) + "%" + (l.charging ? " ⚡" : "") : null,
         { vb, radius: r, outside: true, slot: spacing,
-          cls: "leaf" + (l.other ? " other" : "") + (l.vehicle ? " ev" + (l.charging ? " charging" : "") : ""),
+          cls: "leaf" + (l.other ? " other" : "") + (l.bridged ? " bridged" : "")
+            + (l.vehicle ? " ev" + (l.charging ? " charging" : "") : ""),
           attrs: l.entity ? `data-fp-badge="${esc(l.entity)}"` : "" }));
 
       const cn = l.children.length;
@@ -4308,10 +4378,13 @@ class CyborgDashboard extends HTMLElement {
 
     const devices = (flow.devices || []).map((d) => {
       const st = this._hass.states[d.entity];
-      const n = powerWatts(st);
+      const raw = powerWatts(st);
+      const b = raw === null ? { watts: null, bridged: false } : this._bridge(d.entity, raw);
+      const n = b.watts;
       const f = fmtPower(n);
       const share = v.home > 0 && n !== null ? Math.min(100, (n / v.home) * 100) : 0;
-      return `<div class="ef-dev" data-fp-badge="${esc(d.entity)}">
+      return `<div class="ef-dev${b.bridged ? " bridged" : ""}" data-fp-badge="${esc(d.entity)}"${
+          b.bridged ? ' title="La presa ha riportato 0 W per un istante mentre il carico era acceso: mostrato l\'ultimo valore reale."' : ""}>
           <ha-icon icon="${esc(d.icon || autoIcon(d.entity, st || { attributes: {} }))}"></ha-icon>
           <div class="ef-dev-text">
             <span>${esc(d.name || (st && st.attributes.friendly_name) || d.entity)}</span>
@@ -5753,7 +5826,58 @@ class CyborgDashboard extends HTMLElement {
    * because the discovery itself is stable (outdoor first, then areas in
    * registry order).
    */
+  /**
+   * Which lines to draw, chosen on the chart itself.
+   *
+   * Five series on one set of axes is right for a glance and wrong for a
+   * comparison: "sono queste due che divergono" needs the other three out of
+   * the way. Putting the choice in the editor would mean leaving the page,
+   * changing a list and coming back - so it lives under a long press on the
+   * chart, and it is stored on the card, not in the session: a choice made on
+   * the tablet in the kitchen is still there tomorrow.
+   */
+  _trendPicker(item) {
+    const all = this._trendAllSeries(item);
+    const off = new Set(Array.isArray(item.hidden_series) ? item.hidden_series : []);
+    const shown = all.filter((r) => !off.has(r.entity)).length;
+    return `<div class="tr-pick">
+      <header><ha-icon icon="mdi:tune-variant"></ha-icon>
+        <strong>Quali linee vedere</strong><em>${shown}/${all.length}</em>
+        <button class="mini" data-trend-pick-close="${esc(item.id)}" title="Chiudi"><ha-icon icon="mdi:close"></ha-icon></button>
+      </header>
+      <div class="tr-pick-rows">${all.map((row, i) => {
+        const st = this._hass.states[row.entity];
+        const on = !off.has(row.entity);
+        const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
+        return `<button class="tr-pick-row ${on ? "on" : ""}" style="--sc:${esc(color)}"
+            data-trend-pick="${esc(item.id)}|${esc(row.entity)}">
+          <i class="tr-dot"></i>
+          <span>${esc(row.name || (st && st.attributes.friendly_name) || row.entity)}</span>
+          <ha-icon icon="${on ? "mdi:eye" : "mdi:eye-off-outline"}"></ha-icon>
+        </button>`;
+      }).join("")}</div>
+      <div class="tr-pick-all">
+        <button class="mini" data-trend-pick-set="${esc(item.id)}|all">Tutte</button>
+        <button class="mini" data-trend-pick-set="${esc(item.id)}|none">Nessuna</button>
+      </div>
+    </div>`;
+  }
+
+  /** Every line the card could draw, before the user's own on/off choice. */
+  _trendAllSeries(item) {
+    return this._trendSeriesRaw(item);
+  }
+
   _trendSeries(item) {
+    const off = new Set(Array.isArray(item.hidden_series) ? item.hidden_series : []);
+    const all = this._trendSeriesRaw(item);
+    const shown = all.filter((r) => !off.has(r.entity));
+    // Switching every line off would leave an empty pair of axes and no way
+    // back except the editor: the last one stays on.
+    return shown.length ? shown : all;
+  }
+
+  _trendSeriesRaw(item) {
     const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
     const source = item.source || "manual";
     const live = (id) => this._hass.states[id];
@@ -5979,6 +6103,7 @@ class CyborgDashboard extends HTMLElement {
         </svg>
         <div class="tr-read" data-trend-read hidden></div>
       </div>
+      ${this._seriesPicker === item.id ? this._trendPicker(item) : ""}
       <div class="tr-legend">${legend}</div>
     </div>`;
   }
@@ -7153,7 +7278,7 @@ class CyborgDashboard extends HTMLElement {
           <span class="sec-rule"></span>
           ${tools}
         </header>
-        ${section.collapsed ? "" : (count ? `<div class="grid">${cards}</div>` : empty)}
+        ${section.collapsed ? "" : (count ? `<div class="grid${(this._dashboard.theme || {}).pack === false ? "" : " packed"}">${cards}</div>` : empty)}
       </section>`;
   }
 
@@ -8492,6 +8617,7 @@ class CyborgDashboard extends HTMLElement {
     }
 
     this._bind();
+    this._packGrid();
     if (focusKey) {
       const sel = focusKey === "__search" ? "[data-entity-search]"
         : `[data-prop="${focusKey}"],[data-sec-prop="${focusKey}"],[data-page-prop="${focusKey}"]`;
@@ -8501,6 +8627,52 @@ class CyborgDashboard extends HTMLElement {
   }
 
   // ---------------------------------------------------------------- bind ---
+
+  /**
+   * Make the cards interlock instead of leaving holes.
+   *
+   * The grid places cards in twelve columns and lets each one be as tall as
+   * its content. With `align-items:start` a short card next to a tall one
+   * leaves a rectangle of empty background under it, and the next row starts
+   * below the taller of the two: exactly the ragged look being complained
+   * about. Giving every card an explicit row span over a fine (6px) row track
+   * turns that dead space back into placeable grid area, and `dense` lets a
+   * later small card drop into it.
+   *
+   * The height has to be MEASURED, not guessed: a room card with nine devices
+   * and a weather card with five days have no fixed relationship. And it has
+   * to be re-measured, because cards change height on their own - a camera
+   * frame arrives, a chart gets its history, a section is expanded. Hence the
+   * ResizeObserver: packing that is right once and wrong for the rest of the
+   * session would be worse than not packing at all.
+   */
+  _packGrid() {
+    if (this._packRO) { this._packRO.disconnect(); this._packRO = null; }
+    const grids = Array.from(this.querySelectorAll(".grid.packed"));
+    if (!grids.length) return;
+    const gap = Number((this._dashboard.theme || {}).gap) || 16;
+    const UNIT = 6;
+    const measure = () => {
+      for (const g of grids) {
+        for (const it of Array.from(g.children)) {
+          // align-self:start keeps the card at its content height whatever the
+          // span already is, so this measurement does not depend on the
+          // previous pass and cannot drift.
+          const h = it.getBoundingClientRect().height;
+          if (!h) { it.style.gridRowEnd = ""; continue; }
+          it.style.gridRowEnd = "span " + Math.max(1, Math.ceil((h + gap) / UNIT));
+        }
+      }
+    };
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    this._packRO = new ResizeObserver(() => {
+      if (this._packQueued) return;
+      this._packQueued = true;
+      requestAnimationFrame(() => { this._packQueued = false; measure(); });
+    });
+    for (const g of grids) for (const it of Array.from(g.children)) this._packRO.observe(it);
+  }
 
   _bind() {
     const q = (s) => this.querySelector(s);
@@ -9384,6 +9556,63 @@ class CyborgDashboard extends HTMLElement {
       svg.onpointercancel = clear;
     });
 
+    // Long press on the chart: choose which lines to draw. 500 ms is the
+    // threshold Home Assistant's own cards use, so the gesture is already in
+    // the user's hands, and the pointer may wander 10 px because a finger
+    // never holds perfectly still. The hover readout keeps working: the picker
+    // opens on hold, not on move.
+    all("[data-trend-svg]").forEach((svg) => {
+      const cardId = svg.getAttribute("data-trend-svg");
+      let timer = null, sx = 0, sy = 0;
+      const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      svg.addEventListener("pointerdown", (ev) => {
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        sx = ev.clientX; sy = ev.clientY;
+        cancel();
+        timer = setTimeout(() => {
+          timer = null;
+          this._seriesPicker = this._seriesPicker === cardId ? null : cardId;
+          this._touch();
+        }, 500);
+      });
+      svg.addEventListener("pointermove", (ev) => {
+        if (timer && (Math.abs(ev.clientX - sx) > 10 || Math.abs(ev.clientY - sy) > 10)) cancel();
+      });
+      svg.addEventListener("pointerup", cancel);
+      svg.addEventListener("pointercancel", cancel);
+      svg.addEventListener("pointerleave", cancel);
+      svg.addEventListener("contextmenu", (ev) => {
+        // A right click is the mouse equivalent of the same intent, and the
+        // browser menu over a chart is never what anybody wanted.
+        ev.preventDefault();
+        this._seriesPicker = this._seriesPicker === cardId ? null : cardId;
+        this._touch();
+      });
+    });
+    all("[data-trend-pick]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [cardId, entity] = el.getAttribute("data-trend-pick").split("|");
+        this._toggleSeries(cardId, entity);
+      };
+    });
+    all("[data-trend-pick-set]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [cardId, what] = el.getAttribute("data-trend-pick-set").split("|");
+        const card = this._findCard(cardId);
+        if (!card) return;
+        // "Nessuna" hides all but the first: an empty pair of axes with the
+        // picker closed would be a dead end with no way back except the editor.
+        const all2 = this._trendAllSeries(card).map((r) => r.entity);
+        card.hidden_series = what === "all" ? [] : all2.slice(1);
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-trend-pick-close]").forEach((el) => {
+      el.onclick = (ev) => { ev.stopPropagation(); this._seriesPicker = null; this._touch(); };
+    });
     all("[data-trend-svg]").forEach((svg) => {
       const geom = (this._trendGeom || {})[svg.getAttribute("data-trend-svg")];
       if (!geom || !geom.series.length) return;
@@ -10876,6 +11105,13 @@ button.mini.danger{color:#ff8091;border-color:rgba(255,61,113,.4);background:rgb
 button.mini.grow{flex:1;justify-content:center}
 
 .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:${theme.gap || 16}px;align-items:start}
+/* Interlocking cards. The row track is 6px and every card declares how many
+   of those it needs, so a short card no longer reserves the height of the
+   tallest one beside it and the next card slides up into the hole. row-gap is
+   zero and the spacing comes from the card's own bottom margin, which keeps
+   the span arithmetic honest: one card, one height, no gap term. */
+.grid.packed{grid-auto-rows:6px;grid-auto-flow:row dense;row-gap:0}
+.grid.packed>.item{align-self:start;margin-bottom:${theme.gap || 16}px}
 .item{--accent:#00e5ff;position:relative;display:flex;flex-direction:column;min-height:98px;padding:14px 16px;border-radius:${theme.radius || 16}px;background:linear-gradient(158deg,color-mix(in srgb,var(--accent) 7%,var(--card-background-color)),var(--card-background-color));border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);overflow:hidden;transition:transform .18s,border-color .18s}
 .item::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);opacity:.85}
 .item[data-tap]{cursor:pointer}
@@ -12054,6 +12290,29 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .ovl-title strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ovl-title small{display:block;margin-top:2px;font:9px ui-monospace,monospace;letter-spacing:.7px;opacity:.45;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-pick{margin-top:10px;border-radius:11px;padding:9px 10px;
+  background:color-mix(in srgb,var(--accent) 7%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 26%,transparent)}
+.tr-pick>header{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.tr-pick>header ha-icon{--mdc-icon-size:16px;color:var(--accent)}
+.tr-pick>header strong{font-size:12px;font-weight:650}
+.tr-pick>header em{font:10px ui-monospace,monospace;opacity:.55;font-style:normal}
+.tr-pick>header .mini{margin-left:auto}
+.tr-pick-rows{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px}
+.tr-pick-row{display:flex;align-items:center;gap:8px;min-height:38px;padding:5px 9px;border-radius:9px;
+  text-align:left;background:rgba(255,255,255,.03);border:1px solid transparent;
+  color:var(--primary-text-color);cursor:pointer;opacity:.5}
+.tr-pick-row.on{opacity:1;border-color:color-mix(in srgb,var(--sc) 40%,transparent);
+  background:color-mix(in srgb,var(--sc) 11%,transparent)}
+.tr-pick-row span{flex:1;min-width:0;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-pick-row ha-icon{--mdc-icon-size:16px;opacity:.6;flex-shrink:0}
+.tr-pick-row .tr-dot{width:9px;height:9px;border-radius:50%;background:var(--sc);flex-shrink:0}
+.tr-pick-all{display:flex;gap:6px;margin-top:7px}
+/* A reading bridged over a momentary zero is still a reading, but it is not
+   live: the dotted outline is the difference, and the tooltip says why. */
+.ef-dev.bridged strong{opacity:.75;font-style:italic}
+.ef-dev.bridged{border-left:2px dotted color-mix(in srgb,var(--accent) 60%,transparent)}
+.ef-n.bridged .ef-n-disc{border-style:dotted}
 .tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px}
 .tr-leg{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;text-align:left;
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
@@ -12208,7 +12467,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.38.0";
+const CYBORG_BUILD = "0.39.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

@@ -3545,6 +3545,125 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
           delete states["switch.asciug"]; delete states["switch.cantin"];
           ok("stato ripristinato dopo la sezione 40", !states["switch.asciug"]);
 
+          console.log("\n== 41. ZERO CHE NON E' UNO ZERO ==");
+          {
+            // Misurato sull'impianto: la presa dell'asciugatrice riporta 0.0 W
+            // per una quarantina di secondi mentre la macchina gira - 11:18:59
+            // zero, 11:19:41 di nuovo 172 W - e il contatore di energia sale
+            // dritto per tutto il tempo. Il dato e' fresco, quindi nessun
+            // controllo di obsolescenza lo prende: e' semplicemente falso.
+            const savedReg = el._registry;
+            states["sensor.asc_potenza"] = S("172", { friendly_name: "Asciugatrice Potenza", device_class: "power", unit_of_measurement: "W" });
+            states["switch.asc_presa"] = S("on", { friendly_name: "Asciugatrice Presa" });
+            el._registry = { areas: [], byArea: {}, entityArea: {}, category: {}, orphans: [], deviceName: {},
+              entityDevice: { "sensor.asc_potenza": "d_asc", "switch.asc_presa": "d_asc" },
+              deviceEntities: { d_asc: ["sensor.asc_potenza", "switch.asc_presa"] } };
+            el._lastGood = {};
+
+            ok("una lettura buona passa cosi' com'e'",
+               el._bridge("sensor.asc_potenza", 172).watts === 172
+               && el._bridge("sensor.asc_potenza", 172).bridged === false);
+            const zero = el._bridge("sensor.asc_potenza", 0);
+            ok("uno zero con la presa accesa mostra l'ultimo valore vero",
+               zero.watts === 172 && zero.bridged === true, JSON.stringify(zero));
+            ok("e la lettura successiva torna a comandare",
+               el._bridge("sensor.asc_potenza", 165).watts === 165);
+
+            // il limite che rende il ponte onesto: la presa spenta
+            states["switch.asc_presa"] = S("off", { friendly_name: "Asciugatrice Presa" });
+            const offNow = el._bridge("sensor.asc_potenza", 0);
+            ok("a presa spenta lo zero e' vero e resta zero",
+               offNow.watts === 0 && offNow.bridged === false, JSON.stringify(offNow));
+            states["switch.asc_presa"] = S("on", { friendly_name: "Asciugatrice Presa" });
+
+            // e il limite di tempo: un buco di due minuti non si copre
+            el._lastGood["sensor.asc_potenza"] = { w: 172, t: Date.now() - 130000 };
+            const old = el._bridge("sensor.asc_potenza", 0);
+            ok("dopo due minuti non si inventa piu' niente",
+               old.watts === 0 && old.bridged === false, JSON.stringify(old));
+
+            // senza apparecchio non si sa se e' acceso: nessun ponte
+            el._lastGood["sensor.solo.potenza"] = { w: 50, t: Date.now() };
+            ok("senza un interruttore sullo stesso apparecchio non si copre niente",
+               el._bridge("sensor.solo.potenza", 0).bridged === false);
+
+            el._registry = savedReg; el._lastGood = {};
+            delete states["sensor.asc_potenza"]; delete states["switch.asc_presa"];
+            ok("stato ripristinato dopo la sezione 41", !states["sensor.asc_potenza"]);
+          }
+
+          console.log("\n== 42. QUALI LINEE VEDERE ==");
+          {
+            const savedDash = el._dashboard;
+            for (const n of ["a", "b", "c", "d", "e"]) {
+              states["sensor.t_" + n] = S("21", { friendly_name: "T " + n.toUpperCase(),
+                device_class: "temperature", unit_of_measurement: "°C" });
+            }
+            const card = { id: "trc", type: "trend", entity_id: "", name: "Confronto", size: "xl",
+              appearance: {}, states: {}, actions: {}, source: "manual", hours: 24, max_series: 8,
+              hidden_series: [],
+              series: ["a", "b", "c", "d", "e"].map((n) => ({ entity: "sensor.t_" + n, name: "T " + n, color: "" })) };
+            el._dashboard = { pages: [{ id: "p", sections: [{ id: "s", items: [card] }] }] };
+
+            ok("di default il grafico disegna tutte e cinque le linee",
+               el._trendSeries(card).length === 5, String(el._trendSeries(card).length));
+            ok("la card si ritrova dall'id", el._findCard("trc") === card);
+
+            el._toggleSeries("trc", "sensor.t_b");
+            el._toggleSeries("trc", "sensor.t_d");
+            ok("spegnendone due ne restano tre",
+               el._trendSeries(card).length === 3, String(el._trendSeries(card).length));
+            ok("e sono proprio quelle giuste",
+               el._trendSeries(card).map((r) => r.entity).join() === "sensor.t_a,sensor.t_c,sensor.t_e",
+               el._trendSeries(card).map((r) => r.entity).join());
+            ok("il selettore continua a elencarle tutte",
+               el._trendAllSeries(card).length === 5);
+            ok("la scelta viene salvata sulla card, non nella sessione",
+               JSON.stringify(card.hidden_series) === JSON.stringify(["sensor.t_b", "sensor.t_d"]),
+               JSON.stringify(card.hidden_series));
+            ok("e la dashboard risulta da salvare", el._dirty === true);
+
+            el._toggleSeries("trc", "sensor.t_b");
+            ok("riaccenderla la riporta nel grafico",
+               el._trendSeries(card).length === 4);
+
+            // non si puo' restare senza niente sullo schermo
+            card.hidden_series = ["sensor.t_b", "sensor.t_c", "sensor.t_d", "sensor.t_e"];
+            el._toggleSeries("trc", "sensor.t_a");
+            ok("l'ultima linea accesa non si puo' spegnere",
+               el._trendSeries(card).length === 1
+               && el._trendSeries(card)[0].entity === "sensor.t_a",
+               JSON.stringify(card.hidden_series));
+
+            // e una card con tutto spento da fuori non resta comunque vuota
+            card.hidden_series = el._trendAllSeries(card).map((r) => r.entity);
+            ok("con tutte spente il grafico non resta vuoto",
+               el._trendSeries(card).length === 5);
+            card.hidden_series = [];
+
+            // il pannello di scelta
+            el._seriesPicker = "trc";
+            const html = el._trendPicker(card);
+            ok("il pannello elenca tutte le linee",
+               (html.match(/data-trend-pick="/g) || []).length === 5,
+               String((html.match(/data-trend-pick="/g) || []).length));
+            ok("e dice quante ne sono accese", /<em>5\/5<\/em>/.test(html), html.slice(0, 200));
+            card.hidden_series = ["sensor.t_a"];
+            ok("il conteggio segue le scelte", /<em>4\/5<\/em>/.test(el._trendPicker(card)));
+            ok("la riga spenta si vede che e' spenta",
+               /data-trend-pick="trc\|sensor\.t_a"/.test(el._trendPicker(card))
+               && !/class="tr-pick-row on" style="--sc:[^"]*"\s*\n?\s*data-trend-pick="trc\|sensor\.t_a"/.test(el._trendPicker(card)));
+            ok("c'e' il modo di riaccenderle tutte",
+               /data-trend-pick-set="trc\|all"/.test(el._trendPicker(card)));
+            ok("pannello scelta linee: nessun undefined",
+               !/>undefined</.test(el._trendPicker(card)));
+            el._seriesPicker = null;
+
+            for (const n of ["a", "b", "c", "d", "e"]) delete states["sensor.t_" + n];
+            el._dashboard = savedDash; el._dirty = false;
+            ok("stato ripristinato dopo la sezione 42", !states["sensor.t_a"]);
+          }
+
           console.log("\n" + "=".repeat(46));
           console.log(pass + " passati, " + fail + " falliti");
           process.exit(fail ? 1 : 0);

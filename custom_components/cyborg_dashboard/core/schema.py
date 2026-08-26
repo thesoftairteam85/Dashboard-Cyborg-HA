@@ -8,6 +8,9 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v13 items[].hidden_series               lines switched off by hand on a trend
+                                        chart, and theme.pack for the
+                                        interlocking card layout.
 v12 hierarchy                           re-seeded from the cards once more: the
                                         v10 pass only ran for dashboards older
                                         than 10, so a parent declared AFTER
@@ -37,7 +40,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -490,6 +493,13 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         result["device_class"] = (
             str(device_class)[:32] if isinstance(device_class, str) and device_class else "temperature"
         )
+        # Lines the user switched off by hand from the chart itself. Stored
+        # per card and not per session: a choice made with a long press has to
+        # still be there tomorrow, and on the other tablet.
+        hidden_series = result.get("hidden_series")
+        result["hidden_series"] = ([h for h in hidden_series
+                                    if isinstance(h, str) and "." in h][:MAX_TREND_SERIES]
+                                   if isinstance(hidden_series, list) else [])
         try:
             result["max_series"] = max(1, min(MAX_TREND_SERIES, int(float(result.get("max_series", 8)))))
         except (TypeError, ValueError):

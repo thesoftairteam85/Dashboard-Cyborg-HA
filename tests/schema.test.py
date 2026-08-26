@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 12, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 13, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -655,7 +655,7 @@ d12 = schema.normalize_dashboard({"version": 11, "hierarchy": {}, "pages": [
             {"entity": "sensor.quadro_energia"},
             {"entity": "sensor.presa_energia", "parent": "sensor.quadro_energia"},
             {"entity": "sensor.frigg_energia", "parent": "sensor.presa_energia"}]}]}]}]})
-assert d12["version"] == 12, d12["version"]
+assert d12["version"] == schema.SCHEMA_VERSION, d12["version"]
 assert d12["hierarchy"] == {"sensor.presa_energia": "sensor.quadro_energia",
                             "sensor.frigg_energia": "sensor.presa_energia"}, d12["hierarchy"]
 
@@ -673,3 +673,26 @@ d12c = schema.normalize_dashboard({"version": 9, "pages": [{"id": "p", "title": 
 assert d12c["hierarchy"] == {"sensor.b_potenza": "sensor.a_potenza"}, d12c["hierarchy"]
 
 print("schema: risemina della gerarchia (v12) ok")
+
+# --- v13: le linee spente a mano su un grafico ------------------------------
+tr = schema.normalize_item({"id": "t", "type": "trend",
+                            "hidden_series": ["sensor.a", "nonvalido", 7, "sensor.b"]}, 0)
+assert tr["hidden_series"] == ["sensor.a", "sensor.b"], tr["hidden_series"]
+assert schema.normalize_item({"id": "t", "type": "trend"}, 0)["hidden_series"] == []
+assert schema.normalize_item({"id": "t", "type": "trend",
+                              "hidden_series": "sensor.a"}, 0)["hidden_series"] == []
+# non si possono nascondere piu' linee di quante il grafico ne possa disegnare
+many = schema.normalize_item({"id": "t", "type": "trend",
+    "hidden_series": ["sensor.s%d" % i for i in range(40)]}, 0)
+assert len(many["hidden_series"]) == schema.MAX_TREND_SERIES, len(many["hidden_series"])
+# la scelta sopravvive a un giro completo di salvataggio
+d13 = schema.normalize_dashboard({"version": 12, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "t", "type": "trend", "hidden_series": ["sensor.a"]}]}]}]})
+assert d13["version"] == 13
+assert d13["pages"][0]["sections"][0]["items"][0]["hidden_series"] == ["sensor.a"]
+assert schema.normalize_dashboard(d13)["pages"][0]["sections"][0]["items"][0]["hidden_series"] == ["sensor.a"]
+# una card di altro tipo non guadagna la chiave
+assert "hidden_series" not in schema.normalize_item({"id": "x", "type": "room"}, 0)
+
+print("schema: linee spente a mano (v13) ok")

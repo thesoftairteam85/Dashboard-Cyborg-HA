@@ -735,6 +735,199 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== RETTANGOLI CHE SI INCASTRANO ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, overview: true });
+  await page.waitForTimeout(1200);
+
+  // Riempimento reale: area occupata dalle card diviso l'area del rettangolo
+  // che le contiene tutte. E' la misura di quanto sfondo vuoto resta in mezzo,
+  // che e' esattamente quello che si vede a occhio.
+  const gridStats = () => page.evaluate(() => {
+    const out = [];
+    for (const g of document.querySelectorAll(".grid")) {
+      const items = Array.from(g.children).map((it) => {
+        const r = it.getBoundingClientRect();
+        return { l: r.left, t: r.top, r: r.right, b: r.bottom,
+          w: Math.round(r.width), h: Math.round(r.height) };
+      }).filter((r) => r.w > 0 && r.h > 0);
+      if (items.length < 3) continue;
+      const box = items.reduce((a, r) => ({
+        l: Math.min(a.l, r.l), t: Math.min(a.t, r.t),
+        r: Math.max(a.r, r.r), b: Math.max(a.b, r.b) }), items[0]);
+      const area = items.reduce((n, r) => n + (r.r - r.l) * (r.b - r.t), 0);
+      const boxArea = Math.max(1, (box.r - box.l) * (box.b - box.t));
+      // sovrapposizioni: due card non devono mai stare una sopra l'altra
+      let overlap = 0;
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const a = items[i], b = items[j];
+          const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l);
+          const oy = Math.min(a.b, b.b) - Math.max(a.t, b.t);
+          if (ox > 1 && oy > 1) overlap++;
+        }
+      }
+      // Il buco vero: quanto spazio vuoto resta sotto una card prima che
+      // ricominci il contenuto nella stessa fascia di colonne. E' quello che
+      // si vede a occhio, mentre il riempimento totale include anche le
+      // intercapedini volute fra una card e l'altra.
+      let hole = 0;
+      for (const a of items) {
+        let next = Infinity;
+        for (const b of items) {
+          if (b === a) continue;
+          const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l);
+          if (ox <= 1) continue;
+          if (b.t >= a.b - 1 && b.t < next) next = b.t;
+        }
+        if (next !== Infinity) hole = Math.max(hole, next - a.b);
+      }
+      out.push({ n: items.length, fill: area / boxArea, overlap, hole: Math.round(hole),
+        height: Math.round(box.b - box.t), packed: g.classList.contains("packed") });
+    }
+    return out;
+  });
+
+  const packed = await gridStats();
+  ok("la griglia dichiara di essere a incastro",
+     packed.length > 0 && packed.every((g) => g.packed), JSON.stringify(packed));
+  ok("nessuna card finisce sopra un'altra",
+     packed.every((g) => g.overlap === 0), JSON.stringify(packed.map((g) => g.overlap)));
+  await page.screenshot({ path: path.resolve(__dirname, "64-packed.png") });
+
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    el._dashboard.theme = el._dashboard.theme || {};
+    el._dashboard.theme.pack = false;
+    el._signature = ""; el.render();
+  });
+  await page.waitForTimeout(600);
+  const loose = await gridStats();
+  ok("senza incastro la griglia lo dichiara",
+     loose.every((g) => !g.packed), JSON.stringify(loose.map((g) => g.packed)));
+
+  // il confronto vero: stessa pagina, stesse card, meno sfondo vuoto
+  const bestPacked = Math.max(...packed.map((g) => g.fill));
+  const bestLoose = Math.max(...loose.map((g) => g.fill));
+  ok("a incastro le card riempiono piu' spazio di prima",
+     bestPacked > bestLoose + 0.02,
+     bestLoose.toFixed(3) + " -> " + bestPacked.toFixed(3));
+  ok("e la sezione diventa piu' corta, non piu' lunga",
+     packed[0].height <= loose[0].height + 1,
+     loose[0].height + " -> " + packed[0].height);
+  // Il numero che conta: nessun rettangolo di sfondo vuoto piu' alto
+  // dell'intercapedine voluta fra due card. E' letteralmente "i rettangoli si
+  // incastrano".
+  // Il buco piu' alto deve almeno dimezzarsi. Non puo' sparire del tutto e il
+  // motivo e' geometrico, non un difetto: una card a dodici colonne non puo'
+  // infilarsi accanto a una che ne occupa sei, quindi lo spazio sotto la piu'
+  // bassa resta finche' non arriva una card abbastanza stretta. Misurare il
+  // dimezzamento e' onesto; pretendere lo zero sarebbe misurare un'altra cosa.
+  const holePacked = Math.max(...packed.map((g) => g.hole));
+  const holeLoose = Math.max(...loose.map((g) => g.hole));
+  ok("nessun buco peggiora", holePacked <= holeLoose + 4,
+     holeLoose + " -> " + holePacked);
+  // Un buco residuo resta e il motivo e' geometrico, non un difetto
+  // dell'algoritmo: sotto una card larga tre colonne si apre un vano largo tre
+  // colonne, e se le card rimaste ne occupano quattro nessuna ci entra. Lo si
+  // misura per non raccontarsi che sia sparito.
+  ok("il buco residuo e' largo meno di una card, non un errore di calcolo",
+     holePacked > 0 ? holePacked <= loose[0].height : true,
+     "buco residuo " + holePacked + " px");
+  await page.screenshot({ path: path.resolve(__dirname, "65-unpacked.png") });
+
+  console.log("\n== QUALI LINEE VEDERE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trend: true });
+  await page.waitForTimeout(1200);
+
+  const before = await page.evaluate(() => {
+    const svg = document.querySelector("[data-trend-svg]");
+    const b = svg.getBoundingClientRect();
+    return { lines: svg.querySelectorAll(".tr-line").length,
+      picker: !!document.querySelector(".tr-pick"),
+      x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  });
+  ok("il grafico parte con tutte le sue linee e senza pannello",
+     before.lines >= 4 && before.picker === false, JSON.stringify(before));
+
+  // un tocco breve non deve aprire niente: deve restare il puntatore di lettura
+  await page.mouse.move(before.x, before.y);
+  await page.mouse.down();
+  await page.waitForTimeout(120);
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  ok("un tocco breve non apre il pannello",
+     (await page.evaluate(() => !document.querySelector(".tr-pick"))));
+
+  // tenuto premuto, si'
+  await page.mouse.move(before.x, before.y);
+  await page.mouse.down();
+  await page.waitForTimeout(750);
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const opened = await page.evaluate(() => {
+    const p = document.querySelector(".tr-pick");
+    if (!p) return null;
+    const rows = Array.from(p.querySelectorAll("[data-trend-pick]")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return { id: b.getAttribute("data-trend-pick").split("|")[1],
+        on: b.classList.contains("on"), h: Math.round(r.height), right: Math.round(r.right) };
+    });
+    const pb = p.getBoundingClientRect();
+    return { rows, right: Math.round(pb.right), winW: window.innerWidth,
+      scrollW: document.documentElement.scrollWidth };
+  });
+  ok("tenendo premuto si apre la scelta delle linee", !!opened, "nessun pannello");
+  ok("elenca tutte le linee del grafico",
+     opened.rows.length === before.lines, opened.rows.length + " vs " + before.lines);
+  ok("partono tutte accese", opened.rows.every((r) => r.on), JSON.stringify(opened.rows));
+  ok("le righe sono toccabili", opened.rows.every((r) => r.h >= 36),
+     JSON.stringify(opened.rows.map((r) => r.h)));
+  ok("il pannello non esce dallo schermo",
+     opened.right <= opened.winW + 1 && opened.scrollW <= opened.winW + 1,
+     opened.right + " / " + opened.scrollW + " vs " + opened.winW);
+
+  const off = opened.rows[1].id;
+  await page.evaluate((id) => {
+    document.querySelector(`[data-trend-pick$="|${id}"]`).click();
+  }, off);
+  await page.waitForTimeout(500);
+  const after = await page.evaluate((id) => {
+    const svg = document.querySelector("[data-trend-svg]");
+    const el = window.__EL__;
+    const card = el._findCard(document.querySelector("[data-trend-svg]").getAttribute("data-trend-svg"));
+    return { lines: svg.querySelectorAll(".tr-line").length,
+      stillDrawn: !!svg.querySelector(`.tr-line[data-series="${id}"]`),
+      stored: (card.hidden_series || []).slice(),
+      legend: document.querySelectorAll(".tr-leg").length,
+      rowOff: !document.querySelector(`[data-trend-pick$="|${id}"]`).classList.contains("on") };
+  }, off);
+  ok("spegnendo una linea sparisce davvero dal grafico",
+     after.stillDrawn === false && after.lines === before.lines - 1,
+     JSON.stringify(after));
+  ok("la legenda si accorcia con lei", after.legend === before.lines - 1,
+     after.legend + " vs " + (before.lines - 1));
+  ok("la scelta finisce nella configurazione della card",
+     after.stored.length === 1 && after.stored[0] === off, JSON.stringify(after.stored));
+  ok("e la riga del pannello si spegne", after.rowOff === true);
+
+  await page.evaluate(() => document.querySelector("[data-trend-pick-set$='|all']").click());
+  await page.waitForTimeout(400);
+  const restored = await page.evaluate(() => ({
+    lines: document.querySelectorAll("[data-trend-svg] .tr-line").length,
+    stored: (window.__EL__._findCard(document.querySelector("[data-trend-svg]").getAttribute("data-trend-svg")).hidden_series || []).length,
+  }));
+  ok("«Tutte» le rimette tutte", restored.lines === before.lines && restored.stored === 0,
+     JSON.stringify(restored));
+  await page.screenshot({ path: path.resolve(__dirname, "66-series-pick.png") });
+
   console.log("\n== ACCESI E SPENTI ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

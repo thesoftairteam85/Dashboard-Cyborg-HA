@@ -4,6 +4,55 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.39.0] - 2026-08-26
+
+Uno zero che non era uno zero, le card che si incastrano, le linee che scegli tu.
+
+### L'asciugatrice a 0 W mentre gira
+- **Il difetto sta nella presa, non nella dashboard** — ma la dashboard lo
+  raccontava come se fosse vero. Misurato sullo storico: la presa Tuya riporta
+  `0.0 W` per una quarantina di secondi mentre la macchina lavora (11:18:59
+  zero, 11:19:41 di nuovo 172 W; 11:56:09 zero, 11:56:51 di nuovo 165 W) e il
+  contatore di energia sale dritto per tutto il tempo. Il dato e' **fresco**,
+  quindi nessun controllo di obsolescenza lo prende: e' semplicemente falso.
+- Uno zero viene ora **coperto con l'ultima lettura reale**, per al massimo due
+  minuti, e **solo finche' l'interruttore che alimenta quel carico e' acceso**.
+  Quel limite e' cio' che rende il ponte onesto: senza, una macchina che ha
+  davvero finito continuerebbe a mostrare i suoi watt. Con, spegnere e'
+  istantaneo e un buco di trasmissione e' invisibile — che e' il verso giusto.
+- Un valore coperto si vede che lo e': contorno punteggiato e la spiegazione
+  passando sopra.
+
+### Le card si incastrano
+- La griglia ha ora una traccia di riga fine (6 px) e ogni card **dichiara
+  quante righe occupa**, misurata dal vero: una card bassa non prenota piu'
+  l'altezza della piu' alta che le sta accanto, e quella dopo scivola su.
+  Le altezze vengono **rimisurate** quando cambiano da sole — un fotogramma di
+  telecamera che arriva, un grafico che riceve lo storico, una sezione che si
+  apre.
+- **Quello che non fa, e perche'**: un vano largo tre colonne resta vuoto se
+  tutte le card rimaste ne occupano quattro. E' geometria, non un errore: per
+  chiudere anche quelli servono larghezze che si incastrino, ed e' una scelta
+  che spetta a te. Misurato: area riempita in aumento, sezione piu' corta,
+  nessun buco peggiorato.
+- Si puo' spegnere (`theme.pack`) se in qualche pagina l'ordine visivo non
+  convince.
+
+### Tenendo premuto un grafico scegli le linee
+- **Pressione prolungata** (500 ms, la stessa soglia delle card di Home
+  Assistant) sull'area del grafico: si apre l'elenco delle linee, una per una,
+  con occhio acceso/spento. Col mouse funziona anche il tasto destro.
+- La scelta e' **salvata sulla card**, non nella sessione: fatta sul tablet in
+  cucina, e' ancora li' domani e sull'altro tablet.
+- **Tutte** / **Nessuna** per ripartire, e l'ultima linea accesa non si puo'
+  spegnere: un paio di assi vuoto col pannello chiuso sarebbe un vicolo cieco.
+- Schema v13: `hidden_series` per card.
+
+### Verifiche
+- 977 asserzioni frontend, 317 misurate in Chromium (fra cui il riempimento
+  reale della griglia e le sovrapposizioni fra card), piu' schema, notifiche e
+  chiave di cache.
+
 ## [0.38.0] - 2026-08-26
 
 Quello che sta funzionando adesso, e da quanto davvero.
