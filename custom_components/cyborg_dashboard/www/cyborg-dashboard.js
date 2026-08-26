@@ -8321,11 +8321,40 @@ class CyborgDashboard extends HTMLElement {
     <div class="section">
       <strong>CARICHI MONITORATI</strong>
       <span class="hint">${devices.length} carichi mostrati sotto lo schema, con la quota sul consumo di casa.</span>
-      ${devices.map((d, i) => `<div class="room-ent">
-          <ha-icon icon="${esc(d.icon || autoIcon(d.entity, this._hass.states[d.entity] || { attributes: {} }))}"></ha-icon>
-          <span>${esc(d.name || (this._hass.states[d.entity] && this._hass.states[d.entity].attributes.friendly_name) || d.entity)}</span>
-          <button class="mini danger" data-flow-dev-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
-        </div>`).join("")}
+      <span class="hint">Se un carico e' misurato a valle di un altro — la friggitrice sulla presa della cucina, la cucina sul quadro FEM — dichiaralo con <em>compreso dentro</em>: viene disegnato sotto il suo padre invece che accanto. La stessa parentela vale anche nell'analisi economica: dichiararla qui o li' e' lo stesso.</span>
+      ${devices.map((d, i) => {
+        const nameOf = (id) => {
+          const dev = devices.find((x) => x.entity === id);
+          const est = this._hass.states[id];
+          return (dev && dev.name) || (est && est.attributes.friendly_name) || id;
+        };
+        const others = devices.filter((x, j) => j !== i && x.entity);
+        // Quello che la card disegnerebbe COMUNQUE, risolto attraverso
+        // l'apparecchio: e' il "doppio controllo" - la parentela dichiarata
+        // sull'altra card si vede gia' scelta qui invece di dover essere
+        // indovinata o riscritta.
+        const shared = this._parentOf(d.entity, null);
+        const inCard = shared && others.some((o) => o.entity === shared);
+        const chosen = d.parent || (inCard ? shared : "");
+        const inherited = !d.parent && !!chosen;
+        const outside = !d.parent && shared && !inCard;
+        const diverges = d.parent && shared && shared !== d.parent;
+        return `<div class="flow-dev">
+          <div class="room-ent">
+            <ha-icon icon="${esc(d.icon || autoIcon(d.entity, this._hass.states[d.entity] || { attributes: {} }))}"></ha-icon>
+            <span>${esc(nameOf(d.entity))}</span>
+            <button class="mini danger" data-flow-dev-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>
+          <label>COMPRESO DENTRO<select data-flow-dev-parent="${i}">
+            <option value="">— è un carico a sé —</option>
+            ${others.map((o) => `<option value="${esc(o.entity)}" ${chosen === o.entity ? "selected" : ""}>${esc(nameOf(o.entity))}</option>`).join("")}
+          </select></label>
+          ${inherited ? `<em class="wiz-tip">già dichiarato nell'analisi economica</em>` : ""}
+          ${outside ? `<em class="wiz-tip" style="background:#8d99ae">dipende da ${esc(nameOf(shared))}, che non è fra questi carichi: viene disegnato lo stesso come padre</em>` : ""}
+          ${diverges ? `<em class="wiz-tip" style="background:#ffb703">altrove risulta dentro ${esc(nameOf(shared))}</em>
+            <button class="mini" data-flow-dev-align="${i}">ALLINEA</button>` : ""}
+        </div>`;
+      }).join("")}
       <button class="mini ${this._flowSlot === "__dev" ? "accentbtn" : ""}" data-flow-pick="__dev"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI CARICO</button>
       ${this._flowSlot === "__dev" ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca sensore di potenza..." autocomplete="off">
         <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults("power")}</div>` : ""}
@@ -10650,6 +10679,42 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
+    all("[data-flow-dev-parent]").forEach((el) => {
+      el.onchange = () => {
+        const devices = (card && card.flow && card.flow.devices) || [];
+        const d = devices[parseInt(el.getAttribute("data-flow-dev-parent"), 10)];
+        if (!d) return;
+        d.parent = el.value || null;
+        // Una sola verita': la mappa condivisa. Scriverla qui e' il motivo per
+        // cui dichiarare la parentela in una card la fa comparire nell'altra.
+        this._setParent(d.entity, d.parent);
+        // Un anello renderebbe impossibile ogni totale e farebbe girare a
+        // vuoto chi risale l'albero: si spezza qui, subito, invece che in
+        // quattro punti che devono ricordarselo.
+        const seen = new Set([d.entity]);
+        let node = d, guard = 0;
+        while (node && node.parent && guard++ < 12) {
+          if (seen.has(node.parent)) { d.parent = null; this._setParent(d.entity, null); break; }
+          seen.add(node.parent);
+          node = devices.find((x) => x.entity === node.parent);
+        }
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-flow-dev-align]").forEach((el) => {
+      el.onclick = () => {
+        const devices = (card && card.flow && card.flow.devices) || [];
+        const d = devices[parseInt(el.getAttribute("data-flow-dev-align"), 10)];
+        if (!d) return;
+        // "Allinea" toglie la scelta locale e lascia parlare la mappa
+        // condivisa: e' il modo di far sparire una divergenza senza dover
+        // indovinare quale delle due sia quella giusta.
+        d.parent = null;
+        this._dirty = true;
+        this._touch();
+      };
+    });
     all("[data-flow-dev-remove]").forEach((el) => {
       el.onclick = () => {
         if (!card || !card.flow || !card.flow.devices) return;
@@ -12346,6 +12411,10 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .tr-pick-all{display:flex;gap:6px;margin-top:7px}
 /* A reading bridged over a momentary zero is still a reading, but it is not
    live: the dotted outline is the difference, and the tooltip says why. */
+.flow-dev{display:flex;flex-direction:column;gap:5px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.flow-dev:last-of-type{border-bottom:0}
+.flow-dev .room-ent{padding:0}
+.flow-dev label{margin:0}
 .ef-dev.bridged strong{opacity:.75;font-style:italic}
 .ef-dev.bridged{border-left:2px dotted color-mix(in srgb,var(--accent) 60%,transparent)}
 .ef-n.bridged .ef-n-disc{border-style:dotted}
@@ -12503,7 +12572,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.41.0";
+const CYBORG_BUILD = "0.42.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

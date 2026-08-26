@@ -3671,6 +3671,127 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
             ok("stato ripristinato dopo la sezione 42", !states["sensor.t_a"]);
           }
 
+          console.log("\n== 43. LA GERARCHIA SI DICHIARA ANCHE DAL FLUSSO ==");
+          {
+            // L'editor del flusso non offriva la parentela: solo nome, icona e
+            // cestino. Quello dell'analisi economica si'. Dichiararla di la' e
+            // vederla applicata di qua funzionava (0.38.0), ma non c'era modo
+            // di dichiararla QUI ne' di verificare che fosse arrivata.
+            const savedDash = el._dashboard, savedReg = el._registry;
+            states["sensor.q_potenza"] = S("1400", { friendly_name: "Quadro Potenza", device_class: "power", unit_of_measurement: "W" });
+            states["sensor.p_potenza"] = S("120", { friendly_name: "Presa cucina Potenza", device_class: "power", unit_of_measurement: "W" });
+            states["sensor.f_potenza"] = S("95", { friendly_name: "Friggitrice Potenza", device_class: "power", unit_of_measurement: "W" });
+            states["sensor.p_energia"] = S("400", { friendly_name: "Presa cucina Energia", device_class: "energy", unit_of_measurement: "kWh" });
+            states["sensor.f_energia"] = S("134", { friendly_name: "Friggitrice Energia", device_class: "energy", unit_of_measurement: "kWh" });
+            states["sensor.x_potenza"] = S("60", { friendly_name: "Fuori card Potenza", device_class: "power", unit_of_measurement: "W" });
+
+            el._registry = { areas: [], byArea: {}, entityArea: {}, category: {}, orphans: [], deviceName: {},
+              entityDevice: { "sensor.p_potenza": "d_p", "sensor.p_energia": "d_p",
+                "sensor.f_potenza": "d_f", "sensor.f_energia": "d_f" },
+              deviceEntities: { d_p: ["sensor.p_potenza", "sensor.p_energia"],
+                d_f: ["sensor.f_potenza", "sensor.f_energia"] } };
+
+            const flowCard = { id: "fc", type: "energyflow", entity_id: "", name: "Flusso",
+              size: "xl", appearance: {}, states: {}, actions: {},
+              flow: { solar: null, grid: null, battery: null, home: null, devices: [
+                { entity: "sensor.q_potenza", name: "Quadro", icon: "", parent: null },
+                { entity: "sensor.p_potenza", name: "Presa cucina", icon: "", parent: null },
+                { entity: "sensor.f_potenza", name: "Friggitrice", icon: "", parent: null }] } };
+            el._dashboard = { hierarchy: {}, pages: [{ id: "p", sections: [{ id: "s", items: [flowCard] }] }] };
+
+            const ed = () => el._flowEditor(flowCard);
+            ok("ogni carico ha il suo «compreso dentro»",
+               (ed().match(/data-flow-dev-parent="/g) || []).length === 3,
+               String((ed().match(/data-flow-dev-parent="/g) || []).length));
+            ok("un carico non puo' essere padre di se stesso",
+               !/data-flow-dev-parent="2"[\s\S]{0,400}?value="sensor\.f_potenza"/.test(ed()));
+            ok("all'inizio nessuno dipende da nessuno",
+               !/già dichiarato/.test(ed()) && /— è un carico a sé —/.test(ed()));
+
+            // il doppio controllo: dichiarata sull'ENERGIA nell'analisi
+            // economica, deve risultare gia' scelta qui, sui watt
+            el._dashboard.hierarchy["sensor.f_energia"] = "sensor.p_energia";
+            const inh = ed();
+            ok("la parentela dichiarata altrove risulta gia' scelta qui",
+               /<option value="sensor\.p_potenza" selected>/.test(inh),
+               (inh.match(/<option value="sensor\.p_potenza"[^>]*>/g) || []).join());
+            ok("e viene detto che arriva dall'altra card",
+               /già dichiarato nell'analisi economica/.test(inh));
+
+            // un padre che non e' fra i carichi di QUESTA card va detto, non taciuto
+            el._dashboard.hierarchy["sensor.q_potenza"] = "sensor.x_potenza";
+            ok("un padre fuori dalla card viene segnalato",
+               /che non è fra questi carichi/.test(ed()), ed().slice(0, 40));
+            delete el._dashboard.hierarchy["sensor.q_potenza"];
+
+            // scelta a mano: scrive sulla card E sulla mappa condivisa
+            flowCard.flow.devices[1].parent = "sensor.q_potenza";
+            el._setParent("sensor.p_potenza", "sensor.q_potenza");
+            ok("scegliendo qui si scrive anche nella mappa condivisa",
+               el._dashboard.hierarchy["sensor.p_potenza"] === "sensor.q_potenza");
+            // il blocco della singola riga, non tutta la pagina: "Presa cucina"
+            // compare anche fra le opzioni delle altre righe
+            const blockOf = (label) => {
+              const html = ed();
+              const i = html.indexOf("<span>" + label + "</span>");
+              if (i < 0) return "";
+              const start = html.lastIndexOf('<div class="flow-dev">', i);
+              const end = html.indexOf('<div class="flow-dev">', i);
+              return html.slice(start, end < 0 ? html.length : end);
+            };
+            ok("e la scelta a mano non viene marcata come ereditata",
+               !/già dichiarato/.test(blockOf("Presa cucina")),
+               blockOf("Presa cucina").slice(0, 80));
+
+            // divergenza: la scelta locale dice una cosa, la mappa un'altra
+            // La voce diretta vincerebbe sempre: la divergenza esiste quando la
+            // mappa condivisa risponde attraverso l'ALTRO sensore dello stesso
+            // apparecchio, che e' esattamente il caso reale (kWh contro W).
+            delete el._dashboard.hierarchy["sensor.p_potenza"];
+            el._dashboard.hierarchy["sensor.p_energia"] = "sensor.f_energia";
+            flowCard.flow.devices[1].parent = "sensor.q_potenza";
+            const div = blockOf("Presa cucina");
+            ok("una divergenza fra le due card viene mostrata",
+               /altrove risulta dentro/.test(div) && /data-flow-dev-align="1"/.test(div),
+               div.replace(/\s+/g, " ").slice(0, 160));
+            delete el._dashboard.hierarchy["sensor.p_energia"];
+
+            // e il diagramma disegna davvero l'albero
+            flowCard.flow.devices[1].parent = null;
+            flowCard.flow.devices[2].parent = null;
+            el._dashboard.hierarchy = { "sensor.f_energia": "sensor.p_energia",
+              "sensor.p_potenza": "sensor.q_potenza" };
+            const loads = el._flowLoads(flowCard.flow, 1400);
+            // _flowLoads restituisce le RADICI: i figli stanno dentro children,
+            // che e' il modo in cui il diagramma li disegna incolonnati.
+            const flat = [];
+            (function walk(list) { for (const l of list) { flat.push(l); walk(l.children || []); } })(loads);
+            const byId = Object.fromEntries(flat.map((l) => [l.entity, l]));
+            ok("i tre carichi sono tutti nel diagramma",
+               !!byId["sensor.q_potenza"] && !!byId["sensor.p_potenza"] && !!byId["sensor.f_potenza"],
+               JSON.stringify(flat.map((l) => [l.entity, l.watts, l.parent])));
+            ok("e solo il quadro e' una radice",
+               loads.filter((l) => !l.other).length === 1
+               && loads.filter((l) => !l.other)[0].entity === "sensor.q_potenza",
+               JSON.stringify(loads.map((l) => l.entity)));
+            ok("il diagramma mette la presa sotto il quadro",
+               byId["sensor.p_potenza"].parent === "sensor.q_potenza",
+               String(byId["sensor.p_potenza"].parent));
+            ok("e la friggitrice sotto la presa, arrivando dai kWh",
+               byId["sensor.f_potenza"].parent === "sensor.p_potenza",
+               String(byId["sensor.f_potenza"].parent));
+            ok("il quadro resta la radice", byId["sensor.q_potenza"].parent === null,
+               String(byId["sensor.q_potenza"].parent));
+
+            ok("editor flusso: nessun undefined",
+               !/>undefined</.test(ed()) && !ed().includes("[object"));
+
+            for (const id of ["sensor.q_potenza","sensor.p_potenza","sensor.f_potenza",
+              "sensor.p_energia","sensor.f_energia","sensor.x_potenza"]) delete states[id];
+            el._dashboard = savedDash; el._registry = savedReg;
+            ok("stato ripristinato dopo la sezione 43", !states["sensor.q_potenza"]);
+          }
+
           console.log("\n" + "=".repeat(46));
           console.log(pass + " passati, " + fail + " falliti");
           process.exit(fail ? 1 : 0);

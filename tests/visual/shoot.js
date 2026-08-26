@@ -1288,6 +1288,80 @@ const DEFAULT_DASH = {
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.resolve(__dirname, "60-map-lit.png") });
 
+  console.log("\n== COMPRESO DENTRO NEL FLUSSO ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, selectFlow: true });
+  await page.evaluate(() => { const el = window.__EL__; el._editing = true; el._signature = ""; el.render(); });
+  await page.waitForTimeout(800);
+
+  const sel = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll("[data-flow-dev-parent]")).map((s2) => {
+      const r = s2.getBoundingClientRect();
+      const block = s2.closest(".flow-dev");
+      const name = block && block.querySelector(".room-ent span");
+      const idx = Number(s2.getAttribute("data-flow-dev-parent"));
+      const card = window.__EL__._findCard("flowcard");
+      return { i: idx, entity: ((card.flow.devices || [])[idx] || {}).entity,
+        h: Math.round(r.height), right: Math.round(r.right),
+        options: Array.from(s2.options).map((o) => o.value),
+        value: s2.value, name: name ? name.textContent.trim() : "" };
+    });
+    const panel = document.querySelector(".editor");
+    return { rows, panelRight: panel ? Math.round(panel.getBoundingClientRect().right) : 0,
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth };
+  });
+  ok("ogni carico del flusso ha il suo «compreso dentro»",
+     sel.rows.length >= 3, JSON.stringify(sel.rows.map((r) => r.name)));
+  ok("nessuno puo' scegliere se stesso come padre",
+     sel.rows.every((r) => r.entity && !r.options.includes(r.entity)),
+     JSON.stringify(sel.rows.map((r) => [r.entity, r.options])));
+  ok("e ognuno puo' scegliere tutti gli altri",
+     sel.rows.every((r) => r.options.length === sel.rows.length),
+     JSON.stringify(sel.rows.map((r) => r.options.length)));
+  ok("all'inizio sono tutti carichi a se'",
+     sel.rows.every((r) => r.value === ""), JSON.stringify(sel.rows.map((r) => r.value)));
+  ok("i menu sono toccabili", sel.rows.every((r) => r.h >= 30),
+     JSON.stringify(sel.rows.map((r) => r.h)));
+  ok("e non escono dal pannello",
+     sel.rows.every((r) => r.right <= sel.panelRight + 1) && sel.scrollW <= sel.winW + 1,
+     JSON.stringify([sel.panelRight, sel.rows.map((r) => r.right)]));
+
+  // sceglierlo qui deve cambiare il disegno, non solo la casella
+  const applied = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const before = document.querySelectorAll(".ef-n.leaf:not(.child)").length;
+    const s2 = document.querySelectorAll("[data-flow-dev-parent]")[1];
+    const target = Array.from(s2.options).find((o) => o.value)?.value;
+    s2.value = target;
+    s2.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 500));
+    const card = el._findCard("flowcard");
+    const child = document.querySelector(".ef-n.leaf.child");
+    return { target, before,
+      after: document.querySelectorAll(".ef-n.leaf:not(.child)").length,
+      hasChild: !!child,
+      stored: (card.flow.devices[1] || {}).parent,
+      shared: el._dashboard.hierarchy[(card.flow.devices[1] || {}).entity] || null };
+  });
+  ok("scegliendo un padre il carico diventa un figlio nel disegno",
+     applied.hasChild && applied.after === applied.before - 1,
+     JSON.stringify(applied));
+  ok("la scelta viene salvata sulla card", applied.stored === applied.target,
+     applied.stored + " vs " + applied.target);
+  ok("e finisce anche nella mappa condivisa di tutta la dashboard",
+     applied.shared === applied.target, applied.shared + " vs " + applied.target);
+  ok("tornando a «carico a sé» il disegno torna piatto",
+     await page.evaluate(async () => {
+       const s2 = document.querySelectorAll("[data-flow-dev-parent]")[1];
+       s2.value = ""; s2.dispatchEvent(new Event("change"));
+       await new Promise((r) => setTimeout(r, 500));
+       return !document.querySelector(".ef-n.leaf.child");
+     }));
+  await page.screenshot({ path: path.resolve(__dirname, "68-flow-parent.png") });
+
   console.log("\n== GERARCHIA DEI CARICHI ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

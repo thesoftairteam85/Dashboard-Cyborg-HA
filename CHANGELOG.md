@@ -4,6 +4,41 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.42.0] - 2026-08-26
+
+«Compreso dentro» anche nell'editor del flusso energetico.
+
+### Non era ridondanza: era la meta' mancante
+L'editor dell'analisi economica offriva la parentela ("compreso dentro"),
+quello del flusso energetico **no**: nome, icona e cestino, punto. Dichiararla
+di la' e vederla applicata di qua funzionava dalla 0.38.0, ma non c'era modo di
+dichiararla **qui**, ne' di verificare che fosse arrivata. Era esattamente
+l'asimmetria che ha prodotto tre segnalazioni di fila.
+
+### Novita'
+- Ogni carico monitorato ha il suo menu **COMPRESO DENTRO**, con gli altri
+  carichi della card e "— è un carico a sé —". Un carico non compare fra i
+  propri possibili padri.
+- **Il doppio controllo e' visivo, non manuale.** La parentela dichiarata
+  nell'analisi economica — che ragiona in kWh — risulta **gia' scelta** qui,
+  sui watt, con l'etichetta *già dichiarato nell'analisi economica*. Non si
+  riscrive: si vede.
+- Un padre che **non e' fra i carichi di questa card** viene detto invece che
+  taciuto: *dipende da X, che non è fra questi carichi: viene disegnato lo
+  stesso come padre*.
+- Se la scelta locale e la mappa condivisa **divergono**, la card lo segnala e
+  offre **ALLINEA**, che toglie la scelta locale e lascia parlare la mappa —
+  senza dover indovinare quale delle due fosse quella giusta.
+- Scegliere qui scrive nella **mappa condivisa di tutta la dashboard**: una
+  sola verita', due posti da cui dichiararla e da cui controllarla. Gli anelli
+  vengono spezzati subito, non in quattro punti che devono ricordarsene.
+
+### Verifiche
+994 asserzioni frontend, 341 misurate in Chromium — fra cui: scegliere un padre
+dal menu trasforma davvero il nodo in un figlio nel disegno (un nodo di primo
+livello in meno, uno di secondo in piu'), la scelta finisce sia sulla card sia
+nella mappa condivisa, e tornando a "carico a sé" il disegno torna piatto.
+
 ## [0.41.0] - 2026-08-26
 
 Due difetti che avevo introdotto io: la pagina che salta in cima e i cerchi
