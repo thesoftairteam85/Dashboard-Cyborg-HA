@@ -723,6 +723,112 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== DISPOSITIVI SENZA AREA ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true, editing: true, selectRoom: true, orphans: true });
+  await page.waitForTimeout(900);
+
+  const warned = await page.evaluate(() => {
+    const w = document.querySelector(".hint.warn");
+    return { text: w ? w.textContent.replace(/\s+/g, " ").trim() : "",
+      color: w ? getComputedStyle(w).color : "",
+      plain: (() => { const p = document.querySelector(".hint:not(.warn)");
+        return p ? getComputedStyle(p).color : ""; })() };
+  });
+  ok("l'editor stanza avverte da solo che ci sono dispositivi senza area",
+     /3 dispositivi di Home Assistant non hanno un'area/.test(warned.text), warned.text.slice(0, 120));
+  ok("e l'avviso non è un suggerimento grigio come gli altri",
+     warned.color !== warned.plain, warned.color + " vs " + warned.plain);
+
+  // the list itself lives behind "aggiungi dispositivo"
+  await page.evaluate(() => { const el = window.__EL__; el._roomPicker = true; el._signature = ""; el.render(); });
+  await page.waitForTimeout(400);
+
+  const orph = await page.evaluate(() => {
+    const head = document.querySelector(".entity-result-head.warn");
+    const plain = document.querySelector(".entity-result-head:not(.warn)");
+    const note = document.querySelector(".entity-result-note");
+    const btns = Array.from(document.querySelectorAll("[data-orphan-assign]")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return { id: b.getAttribute("data-orphan-assign"),
+        w: Math.round(r.width), h: Math.round(r.height), right: Math.round(r.right) };
+    });
+    const rows = Array.from(document.querySelectorAll("[data-orphan-assign]"))
+      .map((b) => b.closest(".entity-result-row"))
+      .map((r) => { const b = r.getBoundingClientRect();
+        return { left: Math.round(b.left), right: Math.round(b.right), text: r.textContent.replace(/\s+/g, " ").trim() }; });
+    const panel = document.querySelector(".editor");
+    const pb = panel ? panel.getBoundingClientRect() : null;
+    return { hasHead: !!head,
+      headText: head ? head.textContent.trim() : "",
+      headColor: head ? getComputedStyle(head).color : "",
+      plainColor: plain ? getComputedStyle(plain).color : "",
+      headOpacity: head ? Number(getComputedStyle(head).opacity) : 0,
+      plainOpacity: plain ? Number(getComputedStyle(plain).opacity) : 0,
+      note: note ? note.textContent.replace(/\s+/g, " ").trim() : "",
+      btns, rows,
+      panelRight: pb ? Math.round(pb.right) : 0,
+      winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("il blocco dei senza-area compare nell'editor stanza", orph.hasHead, JSON.stringify(orph).slice(0, 160));
+  ok("e dice quanti sono", /SENZA AREA IN HOME ASSISTANT · 3/.test(orph.headText), orph.headText);
+  // it has to read as a warning, not as another grey heading
+  ok("si distingue davvero dagli altri titoli",
+     orph.headColor !== orph.plainColor && orph.headOpacity > orph.plainOpacity,
+     orph.headColor + "/" + orph.headOpacity + " vs " + orph.plainColor + "/" + orph.plainOpacity);
+  ok("spiega che il pulsante tocca Home Assistant",
+     /cambia Home Assistant/.test(orph.note), orph.note.slice(0, 120));
+  ok("c'è un pulsante per ciascuno", orph.btns.length === 3,
+     JSON.stringify(orph.btns.map((b) => b.id)));
+  ok("il pulsante è abbastanza grande da centrarlo col pollice",
+     orph.btns.every((b) => b.w >= 28 && b.h >= 28), JSON.stringify(orph.btns));
+  ok("l'apparecchio è scritto accanto all'entità",
+     orph.rows.some((r) => /Interruttore Piano Induzione · switch\.piano_induzione_din/.test(r.text)),
+     JSON.stringify(orph.rows.map((r) => r.text.slice(0, 70))));
+  ok("niente esce dal pannello",
+     orph.btns.every((b) => b.right <= orph.panelRight + 1)
+     && orph.rows.every((r) => r.right <= orph.panelRight + 1),
+     JSON.stringify([orph.panelRight, orph.btns.map((b) => b.right)]));
+  ok("nessuno scorrimento orizzontale", orph.scrollW <= orph.winW + 1,
+     orph.scrollW + " vs " + orph.winW);
+
+  // pressing it must file the device, and must NOT also pin the entity by hand
+  const filed = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sent = [];
+    const real = el._hass.callWS.bind(el._hass);
+    el._hass.callWS = (m) => {
+      sent.push(m);
+      if (m.type === "config/device_registry/update") {
+        window.__DEVREG[0].area_id = m.area_id;
+        return Promise.resolve({});
+      }
+      return real(m);
+    };
+    const room = el._room(el._selected.roomId);
+    const before = Array.isArray(room.entities) ? room.entities.slice() : null;
+    document.querySelector('[data-orphan-assign="switch.piano_induzione_din"]').click();
+    await new Promise((r) => setTimeout(r, 500));
+    const after = el._room(el._selected.roomId);
+    return { sent: sent.map((m) => m.type), area: (sent.find((m) => m.area_id) || {}).area_id,
+      device: (sent.find((m) => m.device_id) || {}).device_id,
+      before, after: Array.isArray(after.entities) ? after.entities.slice() : null,
+      stillOrphan: el._orphans().includes("switch.piano_induzione_din") };
+  });
+  ok("il tocco archivia l'apparecchio nell'area della stanza",
+     filed.sent.includes("config/device_registry/update") && filed.device === "dev_din"
+     && !!filed.area, JSON.stringify(filed.sent) + " " + filed.area);
+  ok("e non aggiunge anche l'entità a mano alla stanza",
+     JSON.stringify(filed.before) === JSON.stringify(filed.after),
+     JSON.stringify(filed.before) + " -> " + JSON.stringify(filed.after));
+  ok("dopo l'assegnazione sparisce dall'elenco dei senza-area",
+     filed.stillOrphan === false);
+
+  await page.screenshot({ path: path.resolve(__dirname, "61-orphans.png") });
+
   console.log("\n== MATERIALI E LUCE ==");
   const readRoom = async (opts) => {
     await page.goto("http://127.0.0.1:8899/harness.html");

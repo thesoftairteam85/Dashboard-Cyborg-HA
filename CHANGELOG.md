@@ -4,6 +4,52 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.37.0] - 2026-08-26
+
+I dispositivi che Home Assistant non ha messo in nessuna stanza.
+
+### Il problema
+Un interruttore acceso e funzionante — il piano a induzione — non compariva
+sotto Cucina. Non era un errore della dashboard: quel dispositivo, in Home
+Assistant, **non era assegnato ad alcuna area**, né sull'entità né
+sull'apparecchio. Nessuna stanza poteva trovarlo, e nulla lo diceva: spariva
+e basta. Sull'impianto reale non era un caso isolato — 269 entità su 382 non
+hanno un'area, e fra queste ci sono il CDZ, il contatto della porta e i
+comandi della videocamera.
+
+### Novità
+- **L'editor della stanza avverte da solo**: "N dispositivi di Home Assistant
+  non hanno un'area: nessuna stanza può trovarli."
+- Sotto la ricerca dispositivi compare il blocco **SENZA AREA IN HOME
+  ASSISTANT**, ordinato mettendo davanti quello che si comanda (luci,
+  interruttori, clima, tapparelle) e lasciando in fondo i sensori. Automazioni,
+  persone, telefoni e diagnostica restano fuori: non sono roba da stanza.
+- Ogni riga si può **aggiungere a mano alla stanza** oppure **archiviare
+  nell'area con un tocco**. Il pulsante lo dice chiaramente: cambia Home
+  Assistant, non solo la dashboard, e sposta **tutto l'apparecchio** — la presa
+  con i suoi quattro sensori — non la singola entità.
+- Lo stesso blocco compare nell'editor della **card Stanza**, dove l'unica cosa
+  sensata da fare è assegnare l'area, perché quella card segue l'area.
+- Un rifiuto di Home Assistant viene **detto**, non ingoiato in silenzio.
+
+### Copia vecchia nel browser
+- L'indirizzo del modulo ora porta **un'impronta del file**, non la sola
+  versione: `?v=0.37.0-<hash>`. Stesso file, stesso indirizzo e nessun
+  download inutile; un solo byte diverso, indirizzo nuovo e ricarica
+  garantita. Prima, una modifica senza cambio di versione lasciava il browser
+  sul modulo già importato — e un modulo ES già importato non viene mai
+  riletto, qualunque cosa dicano le intestazioni di cache.
+- L'avviso **"SVUOTA LA CACHE"** ora funziona anche quando il pannello è
+  montato come card di Lovelace, dove `panel.config` non esiste: la versione
+  dichiarata dall'integrazione viene letta da `hass.panels`.
+
+### Verifiche
+- `config/device_registry/update` (device_id + area_id) e
+  `config/entity_registry/update` (entity_id + area_id) verificati sul
+  sorgente di core 2026.8.3, non a memoria.
+- 904 asserzioni frontend, 285 misurate in Chromium, 15 sulla chiave di cache
+  del pannello, più schema e notifiche. Tutte verdi.
+
 ## [0.36.0] - 2026-08-26
 
 Ogni giorno del meteo ha le sue ore.

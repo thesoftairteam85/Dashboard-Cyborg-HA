@@ -3089,6 +3089,190 @@ console.log("\n== 36. MATERIALI E LUCE VERA ==");
   ok("stato ripristinato dopo la sezione 36", !states["light.sala_a"]);
 }
 
-console.log("\n" + "=".repeat(46));
-console.log(pass + " passati, " + fail + " falliti");
-process.exit(fail ? 1 : 0);
+console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
+{
+  // Oscar's real case: a Tuya DIN-rail plug named "Interruttore Piano
+  // Induzione" whose switch is on, but which Home Assistant has filed in no
+  // area at all - neither on the entity nor on the device. Nothing in the
+  // dashboard could put it in the kitchen, and it simply vanished.
+  states["switch.induzione"] = S("on", { friendly_name: "Interruttore Piano Induzione" });
+  states["sensor.induzione_potenza"] = S("2100", { friendly_name: "Induzione Potenza",
+    device_class: "power", unit_of_measurement: "W" });
+  states["switch.induzione_blocco"] = S("off", { friendly_name: "Blocco bambini" });
+  states["light.lampada_cucina"] = S("on", { friendly_name: "Lampada <cucina>" });
+  states["switch.senza_apparecchio"] = S("off", { friendly_name: "Presa <orfana>" });
+  states["binary_sensor.porta"] = S("off", { friendly_name: "Contatto porta", device_class: "door" });
+
+  const areasWS = [{ area_id: "cucina", name: "Cucina" }, { area_id: "bagno", name: "Bagno" }];
+  const devicesWS = [
+    { id: "dev_induzione", name: "Interruttore Piano Induzione", area_id: null },
+    { id: "dev_lampada", name: "Lampada cucina", area_id: "cucina" },
+  ];
+  const entitiesWS = [
+    { entity_id: "switch.induzione", device_id: "dev_induzione", area_id: null },
+    { entity_id: "sensor.induzione_potenza", device_id: "dev_induzione", area_id: null },
+    { entity_id: "switch.induzione_blocco", device_id: "dev_induzione", area_id: null,
+      entity_category: "config" },
+    { entity_id: "light.lampada_cucina", device_id: "dev_lampada", area_id: null },
+    { entity_id: "switch.senza_apparecchio", device_id: null, area_id: null },
+    { entity_id: "binary_sensor.porta", device_id: null, area_id: null },
+    { entity_id: "automation.esco_di_casa_allarme_on", device_id: null, area_id: null },
+    { entity_id: "person.oscar", device_id: null, area_id: null },
+    { entity_id: "device_tracker.iphone_di_oscar", device_id: null, area_id: null },
+    { entity_id: "switch.luci_scale", device_id: null, area_id: "bagno" },
+  ];
+  const regWS = (m) => {
+    if (m.type === "config/area_registry/list") return Promise.resolve(areasWS);
+    if (m.type === "config/device_registry/list") return Promise.resolve(devicesWS);
+    if (m.type === "config/entity_registry/list") return Promise.resolve(entitiesWS);
+    return Promise.resolve({});
+  };
+  const savedWS = el._hass.callWS;
+  const savedRegistry = el._registry;
+  el._hass.callWS = regWS;
+  el._registry = null;
+  el._registryLoading = false;
+
+  (async () => {
+    await el._loadRegistry();
+
+    // --- the registry itself
+    ok("l'entità senza area non finisce in nessuna area",
+       !Object.values(el._registry.byArea).some((ids) => ids.includes("switch.induzione")),
+       JSON.stringify(el._registry.byArea));
+    ok("ma viene registrata come senza area",
+       el._registry.orphans.includes("switch.induzione"),
+       JSON.stringify(el._registry.orphans));
+    ok("l'entità la cui area sta sull'apparecchio non è orfana",
+       !el._registry.orphans.includes("light.lampada_cucina")
+       && (el._registry.byArea.cucina || []).includes("light.lampada_cucina"));
+    ok("le entità di configurazione restano fuori dall'elenco",
+       !el._registry.orphans.includes("switch.induzione_blocco"));
+
+    // --- what the user is actually shown
+    const list = el._orphans();
+    ok("automazioni, persone e telefoni non compaiono",
+       !list.includes("automation.esco_di_casa_allarme_on")
+       && !list.includes("person.oscar")
+       && !list.includes("device_tracker.iphone_di_oscar"), JSON.stringify(list));
+    ok("gli interruttori vengono prima dei sensori",
+       list.indexOf("switch.induzione") < list.indexOf("sensor.induzione_potenza"),
+       JSON.stringify(list));
+    ok("un contatto porta è comunque proposto",
+       list.includes("binary_sensor.porta"), JSON.stringify(list));
+
+    // --- the block
+    const blk = el._orphanBlock("cucina", new Set(), "pick");
+    ok("il blocco dichiara quanti sono", /SENZA AREA IN HOME ASSISTANT · 4/.test(blk), blk.slice(0, 120));
+    ok("e dice a quale area li archivierebbe", /<strong>Cucina<\/strong>/.test(blk));
+    ok("e avverte che tocca Home Assistant, non solo la dashboard",
+       /cambia Home Assistant/.test(blk));
+    ok("ogni riga ha il pulsante di assegnazione",
+       (blk.match(/data-orphan-assign=/g) || []).length === 4,
+       String((blk.match(/data-orphan-assign=/g) || []).length));
+    ok("in modalità pick le righe si possono anche aggiungere a mano",
+       (blk.match(/data-pick-entity=/g) || []).length === 4);
+    ok("il nome viene messo in sicurezza",
+       blk.includes("Presa &lt;orfana&gt;") && !blk.includes("Presa <orfana>"));
+    ok("compare anche l'apparecchio, per capire di cosa si tratta",
+       blk.includes("Interruttore Piano Induzione · switch.induzione"));
+
+    const assign = el._orphanBlock("cucina", new Set(), "assign");
+    ok("in modalità assign non si aggiunge nulla a mano",
+       !/data-pick-entity=/.test(assign) && /data-orphan-assign=/.test(assign));
+
+    ok("chi è già nella stanza non viene riproposto",
+       !el._orphanBlock("cucina", new Set(["switch.induzione"]), "pick")
+          .includes('data-orphan-assign="switch.induzione"'));
+
+    // --- the regression that hid it: the area block used to return early
+    const room = { id: "r1", area_id: "bagno", entities: null, hidden: [] };
+    el._entityQuery = "";
+    const res = el._roomEntityResults(room);
+    ok("con l'area esaurita si vedono comunque i senza-area",
+       /SENZA AREA IN HOME ASSISTANT/.test(res), res.slice(0, 160));
+    const room2 = { id: "r2", area_id: "cucina", entities: [], hidden: [] };
+    ok("e li si vede anche quando l'area ha ancora dispositivi liberi",
+       /DALL'AREA DI QUESTA STANZA/.test(el._roomEntityResults(room2))
+       && /SENZA AREA IN HOME ASSISTANT/.test(el._roomEntityResults(room2)));
+
+    // --- assigning
+    const sent = [];
+    el._hass.callWS = (m) => { sent.push(m); return regWS(m); };
+    await el._assignArea("switch.induzione", "cucina");
+    const upd = sent.filter((m) => /registry\/update$/.test(m.type));
+    ok("assegnare sposta l'apparecchio, non la singola entità",
+       upd.length === 1 && upd[0].type === "config/device_registry/update"
+       && upd[0].device_id === "dev_induzione" && upd[0].area_id === "cucina",
+       JSON.stringify(upd));
+    ok("e rilegge le anagrafiche invece di indovinare il nuovo stato",
+       sent.some((m) => m.type === "config/entity_registry/list"));
+
+    sent.length = 0;
+    await el._assignArea("switch.senza_apparecchio", "cucina");
+    const upd2 = sent.filter((m) => /registry\/update$/.test(m.type));
+    ok("senza apparecchio si aggiorna l'entità",
+       upd2.length === 1 && upd2[0].type === "config/entity_registry/update"
+       && upd2[0].entity_id === "switch.senza_apparecchio" && upd2[0].area_id === "cucina",
+       JSON.stringify(upd2));
+
+    sent.length = 0;
+    await el._assignArea("switch.induzione", "");
+    ok("senza un'area di destinazione non parte nessuna chiamata",
+       sent.length === 0, JSON.stringify(sent));
+
+    // --- a rejection must be reported, not swallowed
+    el._registry = null;
+    await el._loadRegistry();
+    el._hass.callWS = (m) => (/registry\/update$/.test(m.type)
+      ? Promise.reject(new Error("area_id non valida")) : regWS(m));
+    el._error = "";
+    await el._assignArea("switch.induzione", "cucina");
+    ok("un rifiuto di Home Assistant viene detto, non ingoiato",
+       /area_id non valida/.test(el._error || ""), String(el._error));
+
+    // --- the cap
+    el._hass.callWS = regWS;
+    for (let i = 0; i < 30; i++) {
+      states["switch.finto_" + i] = S("off", { friendly_name: "Finto " + i });
+      entitiesWS.push({ entity_id: "switch.finto_" + i, device_id: null, area_id: null });
+    }
+    el._registry = null;
+    await el._loadRegistry();
+    const big = el._orphanBlock("cucina", new Set(), "pick");
+    ok("l'elenco si ferma a venti righe",
+       (big.match(/data-orphan-assign=/g) || []).length === 20,
+       String((big.match(/data-orphan-assign=/g) || []).length));
+    ok("ma dichiara quanti ne restano fuori", /…e altri 14\./.test(big),
+       big.slice(-200));
+
+    ok("senza orfani il blocco non occupa spazio",
+       el._orphanBlock("cucina", new Set(el._orphans()), "pick") === "");
+
+    // --- stale build outside the panel
+    const savedPanel = el.panel;
+    el.panel = undefined;
+    el._hass.panels = { "cyborg-dashboard": { config: { version: "9.9.9" } } };
+    ok("montata come card la versione del server si legge lo stesso",
+       el._serverVersion() === "9.9.9", el._serverVersion());
+    ok("e la copia vecchia viene segnalata anche lì", el._staleBuild() === true);
+    el._hass.panels = { "cyborg-dashboard": { config: { version: CYBORG_BUILD_TEST } } };
+    ok("mentre una copia aggiornata non allarma nessuno", el._staleBuild() === false);
+    delete el._hass.panels;
+    el.panel = savedPanel;
+
+    // --- cleanup
+    for (let i = 0; i < 30; i++) delete states["switch.finto_" + i];
+    for (const id of ["switch.induzione", "sensor.induzione_potenza", "switch.induzione_blocco",
+      "light.lampada_cucina", "switch.senza_apparecchio", "binary_sensor.porta"]) delete states[id];
+    el._hass.callWS = savedWS;
+    el._registry = savedRegistry;
+    el._error = "";
+    ok("stato ripristinato dopo la sezione 37", !states["switch.induzione"]);
+
+    console.log("\n" + "=".repeat(46));
+    console.log(pass + " passati, " + fail + " falliti");
+    process.exit(fail ? 1 : 0);
+  })();
+}
+

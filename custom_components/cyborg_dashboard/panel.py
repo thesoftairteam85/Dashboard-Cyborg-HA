@@ -1,6 +1,7 @@
 """Cyborg Dashboard sidebar panel."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -14,6 +15,28 @@ _LOGGER = logging.getLogger(__name__)
 PANEL_PATH = "cyborg-dashboard"
 WEB_COMPONENT = "cyborg-dashboard"
 STATIC_PATH = "/cyborg_dashboard/static"
+
+def _cache_key() -> str:
+    """Cache key for the JS module URL: version plus a hash of the file itself.
+
+    The version alone is not enough. Two things break it. A development build
+    changes cyborg-dashboard.js without changing manifest.json, so the URL stays
+    identical and the browser keeps the old module - an ES module already
+    imported in a document is never re-fetched, whatever the cache headers say.
+    And a browser that has cached the module under an old URL only lets go when
+    the URL itself changes. Hashing the shipped bytes makes the URL a function
+    of the content: identical file, identical URL and a free cache hit; one byte
+    different, new URL and a guaranteed re-fetch. sha256 over ~700 kB costs
+    about a millisecond, once, at setup - paid in the executor, not the loop.
+    """
+    version = _integration_version()
+    js = Path(__file__).parent / "www" / "cyborg-dashboard.js"
+    try:
+        digest = hashlib.sha256(js.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return version
+    return f"{version}-{digest}"
+
 
 def _integration_version() -> str:
     """Read the version from manifest.json for cache-busting the JS module URL.
@@ -79,6 +102,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     # core versions turn this into a hard error) - so it must run in the
     # executor thread pool, not be called inline here.
     version = await hass.async_add_executor_job(_integration_version)
+    cache_key = await hass.async_add_executor_job(_cache_key)
     # Publishing the module on every frontend page registers the Lovelace card
     # as a side effect, without the user having to add a resource by hand.
     # A custom panel is NOT a Lovelace dashboard, so it can never be picked as
@@ -93,14 +117,14 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     # version. add_extra_js_url already loads this module on every frontend
     # page, Lovelace included, so no separate resource is needed.
     await _async_prune_stale_resources(hass)
-    frontend.add_extra_js_url(hass, f"{STATIC_PATH}/cyborg-dashboard.js?v={version}")
+    frontend.add_extra_js_url(hass, f"{STATIC_PATH}/cyborg-dashboard.js?v={cache_key}")
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_PATH,
         webcomponent_name=WEB_COMPONENT,
         sidebar_title="Cyborg Dashboard",
         sidebar_icon="mdi:view-dashboard-edit",
-        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={version}",
+        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={cache_key}",
         config={"version": version},
         require_admin=False,
     )

@@ -113,7 +113,7 @@ const hass={states,
     if(m.type==="cyborg_dashboard/get") return {dashboard:window.__DASH__};
     if(m.type==="cyborg_dashboard/save"){saved=m.dashboard;return {saved:true,revision:1}}
     if(m.type==="config/area_registry/list") return AREA.map(([area_id,name,icon])=>({area_id,name,icon}));
-    if(m.type==="config/device_registry/list") return [];
+    if(m.type==="config/device_registry/list") return window.__DEVREG||[];
     if(m.type==="config/entity_registry/list") return entReg;
     if(m.type==="history/history_during_period"){
       const out={}; const now=Date.now();
@@ -197,6 +197,23 @@ const hass={states,
 
 window.__mount=(dash,opts)=>{
   window.__DASH__=dash;
+  // Injected BEFORE the element is created: _loadRegistry fires on the first
+  // render, so anything added afterwards would race with it.
+  if(opts&&opts.orphans){
+    states["switch.piano_induzione_din"]={entity_id:"switch.piano_induzione_din",state:"on",
+      attributes:{friendly_name:"Interruttore Piano Induzione Interruttore"}};
+    states["sensor.piano_induzione_din_potenza"]={entity_id:"sensor.piano_induzione_din_potenza",
+      state:"2100",attributes:{friendly_name:"Interruttore Piano Induzione Potenza",
+      device_class:"power",unit_of_measurement:"W"}};
+    states["switch.presa_orfana"]={entity_id:"switch.presa_orfana",state:"off",
+      attributes:{friendly_name:"Presa senza apparecchio"}};
+    window.__DEVREG=[{id:"dev_din",name:"Interruttore Piano Induzione",area_id:null}];
+    if(!entReg.some(e=>e.entity_id==="switch.piano_induzione_din")){
+      entReg.push({entity_id:"switch.piano_induzione_din",area_id:null,device_id:"dev_din",disabled_by:null,hidden_by:null},
+                  {entity_id:"sensor.piano_induzione_din_potenza",area_id:null,device_id:"dev_din",disabled_by:null,hidden_by:null},
+                  {entity_id:"switch.presa_orfana",area_id:null,device_id:null,disabled_by:null,hidden_by:null});
+    }
+  }
   document.body.innerHTML="";
   const el=document.createElement("cyborg-dashboard");
   document.body.appendChild(el);

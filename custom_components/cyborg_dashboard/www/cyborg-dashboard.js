@@ -1582,6 +1582,20 @@ function hourlyChart(points, labels, unit, meta) {
  * ======================================================================== */
 
 /** Floor materials, as pure CSS. No image files, nothing to host, nothing to lose. */
+/**
+ * Domains that can sensibly belong to a room, most-controllable first.
+ *
+ * Used only to rank and trim the "no area" list. It is a whitelist and not a
+ * blacklist on purpose: automations, people, device trackers, the sun and the
+ * update entities are all area-less by nature, and putting them in a list
+ * titled "these are missing from your rooms" would bury the three switches
+ * that really are missing under two hundred that never belonged there.
+ */
+const ROOMABLE_DOMAINS = ["light", "switch", "climate", "cover", "fan", "lock",
+  "media_player", "vacuum", "humidifier", "water_heater", "valve", "siren",
+  "camera", "alarm_control_panel", "remote", "lawn_mower", "binary_sensor",
+  "sensor", "number", "select", "button", "text", "event", "image"];
+
 const ROOM_MATERIALS = {
   parquet: { l: "Parquet", base: "#7a4a24", plank: true },
   piastrelle: { l: "Piastrelle", base: "#8e9aa6", tile: 46 },
@@ -1698,7 +1712,14 @@ class CyborgDashboard extends HTMLElement {
   /** Version the integration says it is, from the panel config. */
   _serverVersion() {
     const cfg = (this.panel && this.panel.config) || this._cardConfig || {};
-    return String(cfg.version || "");
+    if (cfg.version) return String(cfg.version);
+    // Mounted as a Lovelace card there is no `panel`, so the stale-copy
+    // warning used to be silently unavailable in exactly the place a stale
+    // copy is most likely: the panel registration is still on the hass
+    // object, and it carries the version the integration reports.
+    const panels = (this._hass && this._hass.panels) || {};
+    const own = panels["cyborg-dashboard"];
+    return String((own && own.config && own.config.version) || "");
   }
 
   /**
@@ -2546,6 +2567,7 @@ class CyborgDashboard extends HTMLElement {
       const deviceArea = {};
       for (const d of devices || []) deviceArea[d.id] = d.area_id || null;
       const byArea = {};
+      const orphans = [];
       // entity_category marks the plumbing: firmware version, signal strength,
       // "restart" buttons. Home Assistant hides those from its own auto
       // dashboards, and showing them is what turns one room into a wall of
@@ -2559,7 +2581,14 @@ class CyborgDashboard extends HTMLElement {
         if (e.device_id) entityDevice[e.entity_id] = e.device_id;
         if (e.entity_category) category[e.entity_id] = e.entity_category;
         const area = e.area_id || (e.device_id ? deviceArea[e.device_id] : null);
-        if (!area) continue;
+        if (!area) {
+          // Not a failure: Home Assistant simply has no area for this one,
+          // neither on the entity nor on its device. Recorded rather than
+          // dropped, because "the switch I just turned on is nowhere" is a
+          // registry gap the dashboard should point at, not hide.
+          if (!e.entity_category) orphans.push(e.entity_id);
+          continue;
+        }
         (byArea[area] = byArea[area] || []).push(e.entity_id);
       }
       // Reverse index built once here rather than scanned per row: the
@@ -2572,13 +2601,111 @@ class CyborgDashboard extends HTMLElement {
         for (const id of ids) entityArea[id] = areaName[aid] || aid;
       }
       this._registry = { areas: areas || [], byArea, entityArea, category,
-        entityDevice, deviceName };
+        entityDevice, deviceName, orphans };
     } catch (err) {
       this._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
-        entityDevice: {}, deviceName: {}, error: true };
+        entityDevice: {}, deviceName: {}, orphans: [], error: true };
     }
     this._registryLoading = false;
     this._touch();
+  }
+
+  /** Human name of an area id, falling back to the id itself. */
+  _areaName(areaId) {
+    const a = ((this._registry && this._registry.areas) || [])
+      .find((x) => x.area_id === areaId);
+    return (a && (a.name || a.area_id)) || areaId || "";
+  }
+
+  /**
+   * Entities Home Assistant has filed in no area at all, ranked so the things
+   * you actually operate come first.
+   *
+   * Sorting by ROOMABLE_DOMAINS index and not alphabetically is deliberate: on
+   * a real installation this list is dominated by phone and camera sensors,
+   * and a light or a switch sitting at position 180 is a list nobody reads.
+   */
+  _orphans() {
+    const reg = this._registry;
+    if (!reg || !Array.isArray(reg.orphans)) return [];
+    const rank = (id) => ROOMABLE_DOMAINS.indexOf(id.split(".")[0]);
+    return reg.orphans
+      .filter((id) => this._hass.states[id] && rank(id) >= 0)
+      .sort((a, b) => {
+        const d = rank(a) - rank(b);
+        if (d) return d;
+        const na = (this._hass.states[a].attributes.friendly_name || a);
+        const nb = (this._hass.states[b].attributes.friendly_name || b);
+        return String(na).localeCompare(String(nb));
+      });
+  }
+
+  /**
+   * Give an area-less entity an area, in Home Assistant itself.
+   *
+   * The device is updated in preference to the entity whenever the entity has
+   * one, because that is how Home Assistant is meant to be filed: one plug
+   * carries a switch plus four measurements, and assigning the device moves
+   * all five in one go instead of leaving four of them still homeless.
+   * Commands verified against core 2026.8.3: config/device_registry/update
+   * takes device_id + area_id, config/entity_registry/update takes
+   * entity_id + area_id (both accept a string or null).
+   */
+  async _assignArea(entityId, areaId) {
+    if (!entityId || !areaId) return;
+    const deviceId = (this._registry && this._registry.entityDevice
+      && this._registry.entityDevice[entityId]) || null;
+    try {
+      if (deviceId) {
+        await this._hass.callWS({ type: "config/device_registry/update",
+          device_id: deviceId, area_id: areaId });
+      } else {
+        await this._hass.callWS({ type: "config/entity_registry/update",
+          entity_id: entityId, area_id: areaId });
+      }
+    } catch (err) {
+      this._error = "Home Assistant ha rifiutato l'assegnazione: "
+        + ((err && (err.message || err.code)) || "errore sconosciuto");
+      this._touch();
+      return;
+    }
+    // The registry cache is now a lie, so it is thrown away rather than
+    // patched: one extra round-trip beats a dashboard that disagrees with
+    // Home Assistant about where a device lives.
+    this._registry = null;
+    await this._loadRegistry();
+  }
+
+  /**
+   * The "no area" block shown under an entity picker.
+   *
+   * mode "pick"   - rows can be tapped to add the entity to this room by hand
+   * mode "assign" - rows can only be filed into the area (a room *card* has no
+   *                 manual list: it follows its area, so the fix is the area)
+   */
+  _orphanBlock(areaId, already, mode) {
+    const skip = already instanceof Set ? already : new Set(already || []);
+    const orphans = this._orphans().filter((id) => !skip.has(id));
+    if (!orphans.length) return "";
+    const shown = orphans.slice(0, 20);
+    const rest = orphans.length - shown.length;
+    const names = (this._registry && this._registry.deviceName) || {};
+    const devs = (this._registry && this._registry.entityDevice) || {};
+    const label = this._areaName(areaId);
+    return `<div class="entity-result-head warn">SENZA AREA IN HOME ASSISTANT · ${orphans.length}</div>
+      <div class="entity-result-note">Home Assistant non li ha assegnati a nessuna area, né sull'entità né sull'apparecchio: nessuna stanza può trovarli da sola.${
+        areaId ? ` Il pulsante a destra li archivia in <strong>${esc(label)}</strong> — cambia Home Assistant, non solo questa dashboard, e sposta tutto l'apparecchio, non la singola entità.` : ""}</div>
+      ${shown.map((id) => {
+        const st = this._hass.states[id];
+        const dev = names[devs[id]] || "";
+        const row = `<ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
+          <div class="err-text"><strong>${esc(st.attributes.friendly_name || id)}</strong><small>${esc(dev ? dev + " · " + id : id)}</small></div>
+          ${areaId ? `<button class="mini" data-orphan-assign="${esc(id)}" title="Assegna a ${esc(label)} in Home Assistant"><ha-icon icon="mdi:home-plus"></ha-icon></button>` : `<span class="err-state">${esc(st.state)}</span>`}`;
+        return mode === "assign"
+          ? `<div class="entity-result-row">${row}</div>`
+          : `<div class="entity-result-row" data-pick-entity="${esc(id)}">${row}</div>`;
+      }).join("")}
+      ${rest > 0 ? `<div class="entity-result-empty">…e altri ${rest}. Assegnali un'area in Home Assistant, oppure cercali per nome qui sopra.</div>` : ""}`;
   }
 
   /** Entities shown as badges in a room: explicit list, or derived from its area. */
@@ -3580,6 +3707,13 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint">${custom
           ? `${all.length} dispositivi scelti a mano. Sulla mappa ne vedi al massimo ${MAX_BADGES_PER_ROOM}: entra nella stanza per vedere i visibili.`
           : `Presi dall'area collegata, senza le entità di diagnostica e configurazione. Sulla mappa compaiono i ${Math.min(derived.length, MAX_BADGES_PER_ROOM)} più significativi; l'occhio qui sotto decide chi si vede entrando nella stanza.`}</span>
+        ${(() => {
+          // The count is shown here, always, and not only inside the search
+          // panel: the case that started this was a plug that was on, working
+          // and simply absent, with nothing anywhere saying why.
+          const n = this._orphans().length;
+          return n ? `<span class="hint warn"><ha-icon icon="mdi:alert-outline"></ha-icon> ${n} dispositivi di Home Assistant non hanno un'area: nessuna stanza può trovarli. Aprili qui sotto per assegnarli.</span>` : "";
+        })()}
         <button class="wide" data-room-add-device="${esc(room.id)}"><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI DISPOSITIVO</button>
         ${this._roomPicker ? `<label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off" data-autofocus></label>
           <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._roomEntityResults(room)}</div>
@@ -3627,24 +3761,24 @@ class CyborgDashboard extends HTMLElement {
   _roomEntityResults(room) {
     const q = (this._entityQuery || "").trim().toLowerCase();
     const already = new Set(this._roomAllEntities(room));
-    if (!q) {
-      const pool = (room.area_id && this._registry && this._registry.byArea[room.area_id]) || [];
-      const free = pool.filter((id) => !already.has(id) && this._hass.states[id]);
-      if (!free.length) {
-        return `<div class="entity-result-empty">${room.area_id
-          ? "Tutti i dispositivi dell'area sono già nella stanza. Cerca per aggiungerne altri."
-          : "Digita per cercare tra tutte le entità di Home Assistant."}</div>`;
-      }
-      return `<div class="entity-result-head">DALL'AREA DI QUESTA STANZA</div>` + free.slice(0, 14).map((id) => {
+    if (q) return this._entityResults();
+    const pool = (room.area_id && this._registry && this._registry.byArea[room.area_id]) || [];
+    const free = pool.filter((id) => !already.has(id) && this._hass.states[id]);
+    const fromArea = free.length
+      ? `<div class="entity-result-head">DALL'AREA DI QUESTA STANZA</div>` + free.slice(0, 14).map((id) => {
         const st = this._hass.states[id];
         return `<div class="entity-result-row" data-pick-entity="${esc(id)}">
           <ha-icon icon="${esc(autoIcon(id, st))}"></ha-icon>
           <div class="err-text"><strong>${esc(st.attributes.friendly_name || id)}</strong><small>${esc(id)}</small></div>
           <span class="err-state">${esc(st.state)}</span>
         </div>`;
-      }).join("");
-    }
-    return this._entityResults();
+      }).join("")
+      : `<div class="entity-result-empty">${room.area_id
+        ? "Tutti i dispositivi dell'area sono già nella stanza. Cerca per aggiungerne altri."
+        : "Digita per cercare tra tutte le entità di Home Assistant."}</div>`;
+    // The area block alone is what made a switch that Home Assistant never
+    // filed anywhere look as though it did not exist.
+    return fromArea + this._orphanBlock(room.area_id, already, "pick");
   }
 
   _renderFloorplanPageEditor() {
@@ -7297,6 +7431,7 @@ class CyborgDashboard extends HTMLElement {
               <ha-icon icon="${shown ? "mdi:eye" : "mdi:eye-off"}"></ha-icon></button>
           </div>`;
         }).join("") || '<div class="entity-result-empty">Area vuota.</div>'}</div>
+        ${this._orphanBlock(card.area, new Set(pool), "assign")}
         <label>LETTURE IN TESTA<input type="number" min="0" max="8" data-prop="max_readings" value="${card.max_readings ?? 4}"></label>
         <label class="check"><input type="checkbox" data-prop="show_others" ${card.show_others !== false ? "checked" : ""}> Mostra anche il gruppo "Altro"</label>
       </div>` : ""}`;
@@ -10039,7 +10174,25 @@ class CyborgDashboard extends HTMLElement {
     });
   }
 
+  _bindOrphanRows() {
+    Array.from(this.querySelectorAll("[data-orphan-assign]")).forEach((btn) => {
+      btn.onclick = (ev) => {
+        // The button sits inside a [data-pick-entity] row in the room editor:
+        // without this the same tap would both file the device in the area and
+        // pin it to the room by hand, and the manual pin would then survive a
+        // later move in Home Assistant.
+        ev.stopPropagation();
+        ev.preventDefault();
+        const card = this._selectedCard();
+        const area = (card && card.type === "room" && card.area)
+          || (this._room(this._selected && this._selected.roomId) || {}).area_id;
+        this._assignArea(btn.getAttribute("data-orphan-assign"), area);
+      };
+    });
+  }
+
   _bindEntityRows() {
+    this._bindOrphanRows();
     Array.from(this.querySelectorAll("[data-pick-entity]")).forEach((row) => {
       row.onclick = () => {
         const id = row.getAttribute("data-pick-entity");
@@ -11348,6 +11501,11 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .seg button{flex:1;padding:9px 6px;font-size:10.5px;letter-spacing:.05em;background:transparent;border:0;color:var(--primary-text-color);opacity:.55}
 .seg button.active{opacity:1;color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,transparent)}
 .entity-result-head{font:9.5px ui-monospace,monospace;letter-spacing:.14em;opacity:.45;padding:8px 4px 4px}
+.entity-result-head.warn{opacity:.95;color:#ffb703}
+.hint.warn{opacity:.85;color:#ffb703;display:flex;align-items:center;gap:6px}
+.hint.warn ha-icon{--mdc-icon-size:15px;flex:0 0 auto}
+.entity-result-note{font-size:11px;line-height:1.5;opacity:.6;padding:0 4px 8px}
+.entity-result-note strong{opacity:.95;color:#ffb703;font-weight:600}
 .room-ent-pos{color:var(--accent);font-size:9px;flex-shrink:0}
 .room-ent.hidden{opacity:.35}
 .room-ent.hidden span{text-decoration:line-through}
@@ -11797,7 +11955,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.36.0";
+const CYBORG_BUILD = "0.37.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
