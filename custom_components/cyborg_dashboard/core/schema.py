@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -303,6 +303,7 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
 def default_dashboard() -> dict[str, Any]:
     return {
         "version": SCHEMA_VERSION,
+        "hierarchy": {},
         "vehicles": [],
         "revision": 0,
         "pages": [{
@@ -778,6 +779,63 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
         result["revision"] = int(data.get("revision", 0))
     except (TypeError, ValueError):
         result["revision"] = 0
+
+    # ------------------------------------------------------------ hierarchy
+    #
+    # "This load hangs off that one" is a fact about the WIRING, not about a
+    # card. It used to be stored twice — once in the energy-flow card's device
+    # list and once in the economy card's — so declaring it in one left the
+    # other drawing the same two loads side by side, in parallel, as if the
+    # fryer were not plugged into the socket strip that measures it.
+    #
+    # One map for the whole dashboard: entity -> parent entity. The cards read
+    # it; their own per-card `parent` still works and wins when set, so nothing
+    # configured before this change is lost.
+    raw_hier = data.get("hierarchy")
+    hierarchy: dict[str, str] = {}
+    if isinstance(raw_hier, dict):
+        for child, parent in raw_hier.items():
+            if (isinstance(child, str) and "." in child
+                    and isinstance(parent, str) and "." in parent
+                    and child != parent):
+                hierarchy[child] = parent
+
+    # v10: seed it from whatever the cards already declared, so an existing
+    # installation keeps the hierarchy it configured and immediately gets it
+    # in both cards instead of one.
+    if stored_version and stored_version < 10:
+        for page in result["pages"] if isinstance(result.get("pages"), list) else []:
+            for section in page.get("sections") or []:
+                for card in section.get("items") or []:
+                    lists = []
+                    if isinstance(card.get("devices"), list):
+                        lists.append(card["devices"])
+                    flow = card.get("flow")
+                    if isinstance(flow, dict) and isinstance(flow.get("devices"), list):
+                        lists.append(flow["devices"])
+                    for devices in lists:
+                        for dev in devices:
+                            if not isinstance(dev, dict):
+                                continue
+                            child, parent = dev.get("entity"), dev.get("parent")
+                            if (isinstance(child, str) and "." in child
+                                    and isinstance(parent, str) and "." in parent
+                                    and child != parent):
+                                hierarchy.setdefault(child, parent)
+
+    # A cycle would make a total impossible to compute and would hang any
+    # renderer walking upwards, so it is broken here rather than in four
+    # different places that each have to remember to guard.
+    for child in list(hierarchy):
+        seen = {child}
+        node = hierarchy.get(child)
+        while node:
+            if node in seen:
+                del hierarchy[child]
+                break
+            seen.add(node)
+            node = hierarchy.get(node)
+    result["hierarchy"] = hierarchy
 
     vehicles = data.get("vehicles")
     if isinstance(vehicles, list):

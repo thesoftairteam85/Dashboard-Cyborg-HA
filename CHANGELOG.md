@@ -4,6 +4,51 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.33.0] - 2026-08-24
+
+La gerarchia dei carichi si dichiara una volta sola. Schema alla versione 10.
+
+### Il bug
+Avevi impostato la gerarchia e il flusso energetico continuava a disegnare i
+due carichi **in parallelo**. Non era il disegno a sbagliare: la stessa cosa —
+«questo carico è dentro quello» — era **memorizzata in due posti diversi**, la
+lista dispositivi della card Analisi economica e quella della card Flusso.
+Dichiararla in una lasciava l'altra completamente all'oscuro. Ed è anche il
+motivo per cui non ricordavi dove si facesse: si fa in due posti.
+
+Ma «la friggitrice è dentro la presa» è un fatto sull'**impianto**, non su una
+card. Ora è così: una mappa unica a livello di dashboard, letta da entrambe le
+card. La versione 10 dello schema la **semina da sola** con quello che avevi
+già dichiarato, quindi la tua configurazione non va rifatta — comincia
+semplicemente a valere anche nel flusso. Il `parent` scritto su una singola
+card continua a funzionare e ha la precedenza quando c'è.
+
+I cicli vengono spezzati alla lettura togliendo **un solo anello**, non
+svuotando la mappa: il resto di quello che hai dichiarato resta valido.
+
+### Correzione di disegno
+**I due carichi si accavallavano**, con le targhette fuse in
+«Friggitrice ad ariaCantinetta». Due cause: con due o tre carichi la
+spaziatura restava quella pensata per otto, e il limite di larghezza delle
+targhette era **un valore fisso in pixel** — 104 px sono un terzo di un
+telefono e un sesto di un monitor, mentre il diagramma è posizionato in
+**percentuale**. Ora pochi carichi si prendono lo spazio che hanno, e ogni
+targhetta è limitata alla larghezza dello **spazio che le compete**, calcolata
+dalla spaziatura stessa.
+
+### Verifiche
+862 asserzioni frontend, suite schema (con la migrazione v10, la mappa ripulita
+dai dati sporchi e l'invariante «nessun ciclo»), suite notifiche e **251
+misurate** in Chromium (8 nuove). Fra le nuove: che un figlio dichiarato
+**solo** nella mappa condivisa venga disegnato come figlio e su una riga più
+bassa del padre, e che su uno schermo da 390 px nessuna targhetta si accavalli
+con la vicina.
+
+Sistemata anche l'instabilità di tre asserzioni mie, che leggevano un'opacità
+**mentre la dissolvenza era in corso**: la suite ora passa quattro volte di
+fila senza variazioni.
+
+
 ## [0.32.0] - 2026-08-24
 
 Seguire una linea col cursore, un meteo che dice di dove parla, e

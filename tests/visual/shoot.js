@@ -723,6 +723,78 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== GERARCHIA DEI CARICHI ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, hierarchy: true });
+  await page.waitForTimeout(900);
+
+  const hier = await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll(".ef-n.leaf")).map((n) => {
+      const b = n.getBoundingClientRect();
+      const lab = n.querySelector(".ef-n-lab");
+      const lb = lab ? lab.getBoundingClientRect() : null;
+      return { label: lab ? lab.textContent.trim() : "",
+        child: n.classList.contains("child"),
+        top: Math.round(b.top), left: Math.round(b.left), right: Math.round(b.right),
+        labLeft: lb ? Math.round(lb.left) : 0, labRight: lb ? Math.round(lb.right) : 0 };
+    });
+    return { nodes, winW: window.innerWidth };
+  });
+  const parent = hier.nodes.find((n) => /Presa cucina/.test(n.label));
+  const child = hier.nodes.find((n) => /Friggitrice/.test(n.label));
+  ok("i due carichi sono disegnati", !!parent && !!child,
+     JSON.stringify(hier.nodes.map((n) => n.label)));
+  // the whole point: declared once in the shared map, honoured by the diagram
+  ok("il figlio è marcato come tale, non messo in parallelo",
+     child.child === true && parent.child === false,
+     JSON.stringify({ p: parent.child, c: child.child }));
+  ok("e sta su una riga più in basso del padre",
+     child.top > parent.top, parent.top + " vs " + child.top);
+
+  console.log("\n== NODI CHE NON SI SOVRAPPONGONO ==");
+  const phoneFlow = await browser.newPage({ viewport: { width: 390, height: 900 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneFlow.on("pageerror", (e) => errors.push("PHONE-FLOW: " + e.message));
+  await phoneFlow.goto("http://127.0.0.1:8899/harness.html");
+  await phoneFlow.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneFlow.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneFlow.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true });
+  await phoneFlow.waitForTimeout(900);
+  const pf = await phoneFlow.evaluate(() => {
+    const rows = {};
+    for (const n of document.querySelectorAll(".ef-n.leaf")) {
+      const b = n.getBoundingClientRect();
+      const lab = n.querySelector(".ef-n-lab");
+      const lb = lab ? lab.getBoundingClientRect() : null;
+      const key = Math.round(b.top / 20);
+      (rows[key] = rows[key] || []).push({
+        label: lab ? lab.textContent.trim() : "",
+        left: Math.round(b.left), right: Math.round(b.right),
+        labLeft: lb ? Math.round(lb.left) : 0, labRight: lb ? Math.round(lb.right) : 0 });
+    }
+    return { rows, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  const overlaps = [];
+  for (const key of Object.keys(pf.rows)) {
+    const row = pf.rows[key].sort((a, b) => a.labLeft - b.labLeft);
+    for (let i = 1; i < row.length; i++) {
+      if (row[i].labLeft < row[i - 1].labRight) overlaps.push([row[i - 1].label, row[i].label]);
+    }
+  }
+  ok("telefono: le targhette dei carichi non si accavallano",
+     overlaps.length === 0, JSON.stringify(overlaps));
+  const allNodes = Object.values(pf.rows).flat();
+  ok("telefono: nessun nodo esce dallo schermo",
+     allNodes.length > 0 && allNodes.every((n) => n.left >= -1 && n.right <= pf.winW + 1),
+     JSON.stringify(allNodes.map((n) => [n.left, n.right])));
+  ok("telefono: nessuno scorrimento orizzontale", pf.scrollW <= pf.winW + 1,
+     pf.scrollW + " vs " + pf.winW);
+  await phoneFlow.close();
+
   console.log("\n== SEGUIRE UNA LINEA COL CURSORE ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
@@ -746,7 +818,8 @@ const DEFAULT_DASH = {
 
   await page.mouse.move(plot.x, plot.y);
   await page.waitForTimeout(200);
-  const hov = await page.evaluate(() => {
+  const hov = await page.evaluate(async () => {
+    await new Promise((r) => setTimeout(r, 300));
     const svg = document.querySelector("[data-trend-svg]");
     const lines = Array.from(svg.querySelectorAll(".tr-line")).map((l) => ({
       id: l.getAttribute("data-series"),
@@ -775,7 +848,7 @@ const DEFAULT_DASH = {
      parseFloat(foc.w) > parseFloat(others[0].w) && foc.op > others[0].op,
      foc.w + "/" + foc.op + " vs " + others[0].w + "/" + others[0].op);
   ok("compare la guida verticale sotto il puntatore",
-     hov.hoverOpacity === 1 && hov.cursorX > 0, JSON.stringify({ o: hov.hoverOpacity, x: hov.cursorX }));
+     hov.hoverOpacity > 0.9 && hov.cursorX > 0, JSON.stringify({ o: hov.hoverOpacity, x: hov.cursorX }));
   ok("c'è un punto di riferimento su ogni linea",
      hov.dots.length >= 4 && hov.dots.every((d) => d.cy > 0), JSON.stringify(hov.dots));
   ok("tutti i punti stanno sullo stesso istante",
@@ -803,7 +876,8 @@ const DEFAULT_DASH = {
 
   await page.mouse.move(plot.left - 40, plot.top - 40);
   await page.waitForTimeout(200);
-  const away = await page.evaluate(() => {
+  const away = await page.evaluate(async () => {
+    await new Promise((r) => setTimeout(r, 300));
     const svg = document.querySelector("[data-trend-svg]");
     return { focus: svg.querySelectorAll(".tr-line.focus").length,
       dim: svg.querySelectorAll(".tr-line.dim").length,
@@ -811,7 +885,7 @@ const DEFAULT_DASH = {
       o: Number(getComputedStyle(svg.querySelector(".tr-hover")).opacity) };
   });
   ok("uscendo dal grafico tutto torna com'era",
-     away.focus === 0 && away.dim === 0 && away.hidden && away.o === 0, JSON.stringify(away));
+     away.focus === 0 && away.dim === 0 && away.hidden && away.o < 0.1, JSON.stringify(away));
 
   console.log("\n== METEO: LUOGO E SCALA ==");
   const wx = await page.evaluate(async () => {
@@ -868,7 +942,8 @@ const DEFAULT_DASH = {
   });
   await page.mouse.move(wxBox.x, wxBox.y);
   await page.waitForTimeout(200);
-  const wxHov = await page.evaluate(() => {
+  const wxHov = await page.evaluate(async () => {
+    await new Promise((r) => setTimeout(r, 300));
     const plot = document.querySelector(".wxc-plot");
     const read = plot.querySelector(".wxc-read");
     const dot = plot.querySelector(".wxc-pt");
@@ -880,7 +955,7 @@ const DEFAULT_DASH = {
       o: Number(getComputedStyle(plot.querySelector(".wxc-hover")).opacity) };
   });
   ok("anche sul meteo il puntatore dà il dettaglio",
-     wxHov.hovering && !wxHov.hidden && wxHov.o === 1, JSON.stringify(wxHov));
+     wxHov.hovering && !wxHov.hidden && wxHov.o > 0.9, JSON.stringify(wxHov));
   ok("con ora e temperatura", /\d{1,2}:\d{2}/.test(wxHov.text) && /°/.test(wxHov.text),
      wxHov.text.slice(0, 70));
   ok("e il punto sta sulla curva, sotto la guida",

@@ -56,6 +56,8 @@ const states={
  "sensor.i_l2":S("2.14",{friendly_name:"Corrente L2",device_class:"current",unit_of_measurement:"A"}),
  "climate.termo_test":S("off",{friendly_name:"Termostato",supported_features:385,hvac_modes:["off","heat_cool"],min_temp:1,max_temp:7,target_temp_step:0.5,current_temperature:21,temperature:4}),
  "input_boolean.automazioni_cdz_disattivate":S("off",{friendly_name:"Automazioni CDZ Disattivate"}),
+ "sensor.presa_cucina_potenza":S("120",{friendly_name:"Presa cucina",device_class:"power",unit_of_measurement:"W"}),
+ "sensor.friggitrice_potenza":S("95",{friendly_name:"Friggitrice ad aria",device_class:"power",unit_of_measurement:"W"}),
  "sensor.temperatura_esterna":S("24.0",{friendly_name:"Temperatura esterna",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_cpu":S("52.1",{friendly_name:"Raspberry CPU",device_class:"temperature",unit_of_measurement:"°C"}),
  "sensor.t_inv":S("91.3",{friendly_name:"Inverter",device_class:"temperature",unit_of_measurement:"°C"}),
@@ -290,6 +292,19 @@ window.__mount=(dash,opts)=>{
             appearance:{},states:{},actions:{},source:"manual",device_class:"voltage",
             max_series:8,series:[],hours:24,y_min:null,y_max:null});
           el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"tfcard"};
+        }
+        if(opts&&opts.hierarchy){
+          // the parent is declared ONLY in the dashboard-wide map, never on the
+          // flow card's own device list: that is the case that used to draw the
+          // two loads side by side
+          el._dashboard.hierarchy={"sensor.friggitrice_potenza":"sensor.presa_cucina_potenza"};
+          const card=el._sections().flatMap(x=>x.items||[]).find(i=>i.type==="energyflow");
+          if(card){
+            card.flow=card.flow||{};
+            card.flow.devices=[{entity:"sensor.presa_cucina_potenza",name:"Presa cucina",icon:"",parent:null},
+                               {entity:"sensor.friggitrice_potenza",name:"Friggitrice ad aria",icon:"",parent:null}];
+            el._flowOpen=el._flowOpen||{};el._flowOpen[card.id]=true;
+          }
         }
         if(opts&&opts.thermostat){
           const sec=el._sections()[0]||{items:[]};

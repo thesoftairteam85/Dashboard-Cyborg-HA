@@ -3637,7 +3637,8 @@ class CyborgDashboard extends HTMLElement {
     const f = fmtPower(watts);
     const r = o.radius || 34;
     const inside = !o.outside;
-    return `<div class="ef-n ${o.cls || ""}${inside ? " inside" : ""}" style="--nc:${slot.color};--r:${r * 2}px;left:${(x / 600) * 100}%;top:${(y / o.vb) * 100}%"
+    const lw = o.slot ? `--lw:calc(${((o.slot / 600) * 100).toFixed(2)}cqw - 8px);` : "";
+    return `<div class="ef-n ${o.cls || ""}${inside ? " inside" : ""}" style="--nc:${slot.color};--r:${r * 2}px;${lw}left:${(x / 600) * 100}%;top:${(y / o.vb) * 100}%"
         ${o.attrs || ""}>
         <span class="ef-n-lab">${esc(slot.label)}</span>
         <span class="ef-n-disc">
@@ -3690,7 +3691,7 @@ class CyborgDashboard extends HTMLElement {
         name: d.name || st.attributes.friendly_name || d.entity,
         icon: d.icon || autoIcon(d.entity, st),
         watts: n,
-        parent: d.parent || null,
+        parent: this._parentOf(d.entity, d.parent),
         children: [],
       });
     }
@@ -3711,7 +3712,7 @@ class CyborgDashboard extends HTMLElement {
         const vs = vehicleState(v, this._hass.states);
         all.push({
           entity: v.power, name: v.name, icon: v.icon, watts: vw,
-          parent: v.flow_parent || null, children: [],
+          parent: this._parentOf(v.power, v.flow_parent), children: [],
           vehicle: v, soc: vs.soc, charging: vs.charging,
         });
         already.add(v.power);
@@ -3743,6 +3744,44 @@ class CyborgDashboard extends HTMLElement {
     return loads;
   }
 
+  /**
+   * Who a load hangs off, for the whole dashboard.
+   *
+   * The per-card `parent` still wins when it is set — an existing card keeps
+   * doing exactly what it did — but when it is not, the shared map answers.
+   * That is what makes "the fryer is inside the socket strip" a fact declared
+   * once and honoured by both the flow diagram and the economic analysis,
+   * instead of two lists that can disagree about the same wiring.
+   */
+  _hierarchy() {
+    const h = this._dashboard && this._dashboard.hierarchy;
+    return (h && typeof h === "object") ? h : {};
+  }
+
+  _parentOf(entity, declared) {
+    if (declared) return declared;
+    const p = this._hierarchy()[entity];
+    return p && p !== entity ? p : null;
+  }
+
+  /** Record a parent for everybody, not just for the card being edited. */
+  _setParent(entity, parent) {
+    if (!this._dashboard) return;
+    if (!this._dashboard.hierarchy || typeof this._dashboard.hierarchy !== "object") {
+      this._dashboard.hierarchy = {};
+    }
+    const h = this._dashboard.hierarchy;
+    if (!parent) { delete h[entity]; return; }
+    if (parent === entity) return;
+    // Walk up before accepting: a cycle makes every total uncomputable.
+    let node = parent, guard = 0;
+    while (node && guard++ < 20) {
+      if (node === entity) return;
+      node = h[node];
+    }
+    h[entity] = parent;
+  }
+
   _flowSubtree(item, flow, homeWatts, precomputed, homeR) {
     const loads = precomputed || this._flowLoads(flow, homeWatts);
     if (!loads.length) {
@@ -3752,7 +3791,12 @@ class CyborgDashboard extends HTMLElement {
           : "Nessun carico monitorato — aggiungili nell'editor della card")}</text>` };
     }
     const n = loads.length;
-    const spacing = Math.min(120, 560 / n);
+    // With only two or three loads the old formula still packed them 120 units
+    // apart — fine on a desktop, but the diagram is positioned in PERCENT of a
+    // 600-unit viewBox, so on a 370 px phone that is 74 real pixels between two
+    // discs whose labels are wider than that. They collided into
+    // "Friggitrice ad ariaCantinetta". Few loads get the room they have.
+    const spacing = n <= 2 ? 230 : n === 3 ? 175 : Math.min(120, 560 / n);
     const y = 476;
     const childY = 616;
     const hasChildren = loads.some((l) => l.children.length);
@@ -3778,7 +3822,7 @@ class CyborgDashboard extends HTMLElement {
         // climbing" answer different questions, and on a car it is the second
         // one that decides whether you can leave.
         l.vehicle && l.soc !== null ? Math.round(l.soc) + "%" + (l.charging ? " ⚡" : "") : null,
-        { vb, radius: r, outside: true,
+        { vb, radius: r, outside: true, slot: spacing,
           cls: "leaf" + (l.other ? " other" : "") + (l.vehicle ? " ev" + (l.charging ? " charging" : "") : ""),
           attrs: l.entity ? `data-fp-badge="${esc(l.entity)}"` : "" }));
 
@@ -3786,14 +3830,15 @@ class CyborgDashboard extends HTMLElement {
       if (!cn) return;
       const refChild = Math.max(...l.children.map((c) => c.watts), 1);
       l.children.forEach((c, j) => {
-        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(88, spacing));
+        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(cn <= 2 ? 150 : 88, spacing));
         svg.push(this._flowPath("ef-c" + i + "-" + j,
           `M${x},${y + r + 4} C${x},${y + 84} ${cx},${childY - 84} ${cx},${childY - 32}`,
           c.watts, "#7de2ff", false));
         html.push(this._flowNodeHtml(cx, childY,
           { label: c.name, icon: c.icon, color: "#7de2ff" },
           c.watts, null,
-          { vb, radius: this._flowRadius(c.watts, refChild, 16, 28), outside: true, cls: "leaf child",
+          { vb, radius: this._flowRadius(c.watts, refChild, 16, 28), outside: true,
+            slot: Math.min(cn <= 2 ? 150 : 88, spacing), cls: "leaf child",
             attrs: c.entity ? `data-fp-badge="${esc(c.entity)}"` : "" }));
       });
     });
@@ -6308,7 +6353,7 @@ class CyborgDashboard extends HTMLElement {
       const source = d.kind === "source";
       return {
         entity: d.entity,
-        parent: d.parent || null,
+        parent: this._parentOf(d.entity, d.parent),
         source,
         name: d.name || (st && st.attributes.friendly_name) || d.entity,
         icon: d.icon || (st ? autoIcon(d.entity, st) : (source ? "mdi:solar-power-variant" : "mdi:power-plug")),
@@ -9493,6 +9538,9 @@ class CyborgDashboard extends HTMLElement {
         const d = card.devices[parseInt(el.getAttribute("data-eco-dev-parent"), 10)];
         if (!d) return;
         d.parent = el.value || null;
+        // Declared once, honoured everywhere: the flow diagram reads the same
+        // map, so the hierarchy no longer has to be entered twice.
+        this._setParent(d.entity, d.parent);
         this._touch();
       };
     });
@@ -9704,6 +9752,7 @@ class CyborgDashboard extends HTMLElement {
         const devices = (card.flow && card.flow.devices) || [];
         if (!devices[i]) return;
         devices[i].parent = el.value || null;
+        this._setParent(devices[i].entity, devices[i].parent);
         // a cycle would make the "unmeasured" maths meaningless
         const seen = new Set();
         let node = devices[i], guard = 0;
@@ -10789,7 +10838,7 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-path.active{stroke:var(--nc);opacity:.32}
 .ef-dot{fill:var(--nc);stroke:none;filter:drop-shadow(0 0 5px var(--nc))}
 .ef-svg{position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible}
-.ef-nodes{position:absolute;inset:0;pointer-events:none}
+.ef-nodes{position:absolute;inset:0;pointer-events:none;container-type:inline-size}
 .ef-n{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;width:max-content;padding:0;border:0;background:none;color:var(--primary-text-color);letter-spacing:0;font:inherit;pointer-events:auto}
 .ef-n-lab{font:700 9px ui-monospace,SFMono-Regular,monospace;letter-spacing:2px;text-transform:uppercase;opacity:.45;white-space:nowrap}
 .ef-n-disc{position:relative;display:grid;place-items:center;width:var(--r);height:var(--r);border-radius:50%;background:radial-gradient(circle at 50% 35%,color-mix(in srgb,var(--nc) 26%,#0a1119),color-mix(in srgb,var(--nc) 9%,#070d14));border:1.5px solid color-mix(in srgb,var(--nc) 75%,transparent);box-shadow:0 0 18px color-mix(in srgb,var(--nc) 26%,transparent),inset 0 0 14px color-mix(in srgb,var(--nc) 12%,transparent);transition:box-shadow .2s,border-color .2s}
@@ -10808,10 +10857,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-n.home .ef-n-sub{color:var(--nc);opacity:.7}
 .ef-n.home.open .ef-n-disc{border-style:dashed}
 .ef-n.leaf{cursor:pointer}
-.ef-n.leaf .ef-n-lab{order:3;opacity:.7;font:600 10px Inter,system-ui,sans-serif;letter-spacing:.01em;text-transform:none;max-width:104px;overflow:hidden;text-overflow:ellipsis}
+.ef-n.leaf .ef-n-lab{order:3;opacity:.7;font:600 10px Inter,system-ui,sans-serif;letter-spacing:.01em;text-transform:none;max-width:min(104px,var(--lw,104px));overflow:hidden;text-overflow:ellipsis}
 .ef-n.leaf .ef-n-val{order:2;font-size:13px}
 .ef-n.leaf.child .ef-n-val{font-size:11.5px}
-.ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:88px}
+.ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:min(88px,var(--lw,88px))}
 .ef-n.leaf.ev .ef-n-disc{border-color:color-mix(in srgb,#06d6a0 70%,transparent)}
 .ef-n.leaf.ev.charging .ef-n-disc{animation:evPulse 1.9s ease-in-out infinite}
 .ef-n.leaf.ev .ef-n-sub{color:#06d6a0;opacity:.9;font-weight:700}
@@ -11486,7 +11535,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.32.0";
+const CYBORG_BUILD = "0.33.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
