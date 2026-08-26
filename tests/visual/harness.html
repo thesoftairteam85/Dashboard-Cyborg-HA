@@ -173,7 +173,7 @@ const hass={states,
       // deterministic hours: no Math.random, so the screenshots stay stable
       const base=Date.parse("2026-08-24T10:00:00+02:00");
       const conds=["sunny","partlycloudy","partlycloudy","cloudy","rainy"];
-      setTimeout(()=>cb({type:"hourly",forecast:Array.from({length:12},(_,i)=>({
+      setTimeout(()=>cb({type:"hourly",forecast:Array.from({length:60},(_,i)=>({
         datetime:new Date(base+i*3600000).toISOString(),
         condition:conds[i%conds.length],
         temperature:Math.round((24+Math.sin(i/2.4)*3.4)*10)/10,

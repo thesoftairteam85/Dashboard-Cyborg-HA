@@ -6251,7 +6251,11 @@ class CyborgDashboard extends HTMLElement {
         { type: "weather/subscribe_forecast", forecast_type: "hourly", entity_id: id },
         (ev) => { this._hourly = this._hourly || {}; this._hourly[id] = (ev && ev.forecast) || []; this._touch(); });
     }
-    const hourly = ((this._hourly || {})[id] || []).slice(0, 12);
+    // The full hourly forecast is kept, not just the next twelve: providers
+    // send 48-72 hours, and those extra hours are exactly what a future day
+    // needs when it is opened. The strip at the top still shows twelve.
+    const hourlyAll = (this._hourly || {})[id] || [];
+    const hourly = hourlyAll.slice(0, 12);
     const daily = ((this._forecast || {})[id] || []).slice(0, 7);
 
     const temps = hourly.map((h) => h.temperature).filter((n) => Number.isFinite(n));
@@ -6339,6 +6343,44 @@ class CyborgDashboard extends HTMLElement {
               ${open ? `<div class="wxd-day-detail">
                 <div class="wxd-day-cond">${esc(dlabel)}${
                   dt ? " · " + esc(dt.getDate() + "/" + (dt.getMonth() + 1)) : ""}</div>
+                ${(() => {
+                  // The hours of THIS day, taken from the same hourly forecast.
+                  // Matching on the local calendar day rather than on a window
+                  // of hours: "tomorrow" means midnight to midnight where the
+                  // house is, not "24 to 48 hours from now".
+                  const sameDay = hourlyAll.filter((h) => {
+                    const hd = new Date(h.datetime);
+                    return !Number.isNaN(hd.getTime()) && hd.getDate() === dt.getDate()
+                      && hd.getMonth() === dt.getMonth() && hd.getFullYear() === dt.getFullYear();
+                  });
+                  if (sameDay.length < 2) {
+                    return `<div class="wxd-nohours">La previsione ora per ora non arriva fino a questo giorno.</div>`;
+                  }
+                  const temps = sameDay.map((h) => num(h.temperature)).filter((n) => n !== null);
+                  const chart = temps.length > 1
+                    ? hourlyChart(temps, sameDay.map((h) => hhmm2(h.datetime)), unit,
+                        sameDay.map((h) => {
+                          const [, cl] = WEATHER_CONDITIONS[h.condition] || ["", String(h.condition || "")];
+                          return { cond: cl,
+                            rain: num(h.precipitation_probability) !== null ? num(h.precipitation_probability) + "%" : null,
+                            mm: num(h.precipitation) !== null && num(h.precipitation) > 0 ? num(h.precipitation) + " mm" : null,
+                            wind: num(h.wind_speed) !== null ? Math.round(num(h.wind_speed)) + " " + (a.wind_speed_unit || "km/h") : null };
+                        }))
+                    : "";
+                  return `<div class="wxd-dayhours">
+                    <h5>Ora per ora</h5>
+                    ${chart}
+                    <div class="wxd-hours">${sameDay.map((h) => {
+                      const [hi2] = WEATHER_CONDITIONS[h.condition] || ["mdi:weather-cloudy"];
+                      return `<div class="wxd-hour">
+                        <span>${esc(hhmm2(h.datetime))}</span>
+                        <ha-icon icon="${esc(hi2)}"></ha-icon>
+                        <strong>${esc(num(h.temperature) !== null ? Math.round(num(h.temperature)) + "°" : "—")}</strong>
+                        ${num(h.precipitation_probability) ? `<em>${esc(Math.round(num(h.precipitation_probability)))}%</em>` : ""}
+                      </div>`;
+                    }).join("")}</div>
+                  </div>`;
+                })()}
                 <div class="wxd-facts">${detail.map(([ic, k, v]) => `
                   <div class="wxd-fact"><ha-icon icon="${esc(ic)}"></ha-icon>
                     <span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join("")}</div>
@@ -11593,6 +11635,9 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .wxd-day{width:100%;background:transparent;border:0;color:inherit;text-align:left}
 .wxd-chev{--mdc-icon-size:15px;opacity:.4;flex-shrink:0}
 .wxd-day-detail{padding:2px 11px 11px}
+.wxd-dayhours{margin:4px 0 12px}
+.wxd-dayhours h5{margin:0 0 6px;font:9.5px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;opacity:.45;font-weight:700}
+.wxd-nohours{margin:4px 0 10px;font-size:10.5px;opacity:.45}
 .wxd-day-cond{font:9.5px ui-monospace,monospace;letter-spacing:1px;text-transform:uppercase;opacity:.5;margin-bottom:8px}
 .ovl-title{flex:1;min-width:0}
 .ovl-title strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -11752,7 +11797,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.35.0";
+const CYBORG_BUILD = "0.36.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

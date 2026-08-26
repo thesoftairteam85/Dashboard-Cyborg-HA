@@ -1143,6 +1143,48 @@ const DEFAULT_DASH = {
   });
   ok("e si richiudono", closed === 0, String(closed));
 
+  // The hourly forecast covers two or three days, so a future day must show
+  // ITS hours — not just today's, and not nothing.
+  const dayHours = await page.evaluate(async () => {
+    const el = window.__EL__;
+    // line the daily forecast up with the hours the mock actually sends
+    const base = new Date("2026-08-24T10:00:00+02:00");
+    const day = (n) => new Date(base.getTime() + n * 86400000).toISOString();
+    el._forecast["weather.casa_oscar"] = [0, 1, 2, 3, 4].map((n) => ({
+      datetime: day(n), condition: "partlycloudy", temperature: 28 - n, templow: 18 }));
+    el._wxDay = {}; el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 250));
+    const rows = Array.from(document.querySelectorAll("[data-wx-day]"));
+    const out = [];
+    for (const idx of [0, 1, 4]) {
+      rows[idx].click();
+      await new Promise((r) => setTimeout(r, 220));
+      const det = document.querySelector(".wxd-day-detail");
+      out.push({ idx,
+        hours: det.querySelectorAll(".wxd-hour").length,
+        chart: !!det.querySelector(".wxc"),
+        note: !!det.querySelector(".wxd-nohours"),
+        labels: Array.from(det.querySelectorAll(".wxd-hour span")).map((x) => x.textContent) });
+      document.querySelectorAll("[data-wx-day]")[idx].click();
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return out;
+  });
+  const d0 = dayHours.find((d) => d.idx === 0);
+  const d1 = dayHours.find((d) => d.idx === 1);
+  const d4 = dayHours.find((d) => d.idx === 4);
+  ok("oggi ha le sue ore", d0.hours >= 6 && d0.chart, JSON.stringify(d0.hours));
+  ok("anche domani ha le SUE ore, non quelle di oggi",
+     d1.hours >= 12 && d1.chart, JSON.stringify(d1.hours));
+  ok("e sono ore diverse da quelle di oggi",
+     d1.labels[0] !== d0.labels[0] || d1.hours !== d0.hours,
+     d0.labels[0] + " vs " + d1.labels[0]);
+  ok("domani parte da mezzanotte, non dall'ora attuale",
+     d1.labels[0] === "00:00", d1.labels[0]);
+  // beyond the provider's horizon the panel says so instead of showing nothing
+  ok("oltre l'orizzonte della previsione lo dice", d4.note && d4.hours === 0,
+     JSON.stringify(d4));
+
   console.log("\n== CONTROLLO TEMPERATURA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

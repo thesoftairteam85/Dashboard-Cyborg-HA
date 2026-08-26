@@ -4,6 +4,35 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.36.0] - 2026-08-26
+
+Ogni giorno del meteo ha le sue ore.
+
+### Il problema
+Aprendo un giorno futuro si vedevano i totali — massima, minima, pioggia,
+vento — ma non l'andamento ora per ora. Il dato però c'era già: i fornitori
+mandano 48-72 ore di previsione oraria, e il pannello ne teneva **solo le
+prime dodici**, quelle della striscia in cima. Domani e dopodomani venivano
+scaricati e buttati via.
+
+### Novità
+- **Aprendo un giorno compaiono le sue ore**, con la stessa curva e lo stesso
+  indicatore al puntatore della striscia principale: temperatura, condizione,
+  probabilità di pioggia e vento su ogni ora di quel giorno.
+- Le ore sono selezionate per **giorno di calendario locale**, non per una
+  finestra di ore: «domani» vuol dire da mezzanotte a mezzanotte dov'è la casa,
+  non «fra 24 e 48 ore».
+- Oltre l'orizzonte della previsione oraria il pannello **lo dice**, invece di
+  mostrare uno spazio vuoto senza spiegazione.
+
+### Verifiche
+874 asserzioni frontend e **271 misurate** in Chromium (5 nuove), con un
+fornitore simulato che manda 60 ore: che oggi abbia le sue ore, che domani
+abbia le **sue** e non quelle di oggi, che domani parta da mezzanotte e non
+dall'ora attuale, e che il quinto giorno — fuori dall'orizzonte — dichiari il
+motivo invece di restare vuoto.
+
+
 ## [0.35.0] - 2026-08-26
 
 Mappa 3D: materiali e luce vera. Primo dei due passaggi.
