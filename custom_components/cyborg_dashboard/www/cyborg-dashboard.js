@@ -3619,6 +3619,30 @@ class CyborgDashboard extends HTMLElement {
    * read: doubling the power doubles the ink. A floor keeps a 5 W standby load
    * from collapsing into an unreadable dot.
    */
+  /**
+   * Circle size for a power reading.
+   *
+   * Square root, because a circle is read by how much ink it has: scaling the
+   * radius linearly makes a 4x load look 16x bigger.
+   *
+   * Two failed attempts are worth recording, because the second is the
+   * interesting one.
+   *
+   * 1. `min + (max - min) * sqrt(...)` with min 20 and max 38. The curve was
+   *    right and the RANGE was too narrow: 25 W next to 196 W came out 26 px
+   *    against 38 px — near enough identical on a phone. The order of
+   *    magnitude, the entire reason for drawing circles, was invisible.
+   *
+   * 2. Pure area-proportional, `max * sqrt(w / ref)`. Theoretically correct and
+   *    worse in practice: as soon as ONE node dominates — an "unmeasured"
+   *    remainder of 1.5 kW next to loads of tens of watts — every other circle
+   *    lands on the legibility floor and they all become the same size again.
+   *    Exactly the complaint, arrived at from the opposite direction.
+   *
+   * So: the sqrt curve mapped across a WIDE band. The ordering is always
+   * readable and the proportion is honest within the band, which is the trade
+   * every scaled-circle chart makes once a real dataset has a dominant member.
+   */
   _flowRadius(watts, reference, min, max) {
     const ref = Math.max(reference, 1);
     const w = Math.max(0, watts || 0);
@@ -3719,6 +3743,34 @@ class CyborgDashboard extends HTMLElement {
       }
     }
 
+    // A child whose parent is not itself on the diagram cannot be drawn under
+    // anything, so it silently became a root and the hierarchy looked ignored —
+    // which is exactly what it looked like on screen: four loads in a row.
+    //
+    // If the declared parent is a real load with a power reading, it belongs on
+    // the diagram: the user said this load hangs off that one, and drawing the
+    // child without the parent is drawing half a fact. It is added here rather
+    // than demanding the user list it twice.
+    {
+      const present = new Set(all.map((l) => l.entity));
+      for (const l of all.slice()) {
+        if (!l.parent || present.has(l.parent)) continue;
+        const pst = this._hass.states[l.parent];
+        const pw = pst ? powerWatts(pst) : null;
+        if (pw === null) continue;
+        all.push({
+          entity: l.parent,
+          name: pst.attributes.friendly_name || l.parent,
+          icon: autoIcon(l.parent, pst),
+          watts: pw,
+          parent: this._parentOf(l.parent, null),
+          children: [],
+          implied: true,
+        });
+        present.add(l.parent);
+      }
+    }
+
     // A nested load is already inside its parent's reading, so only roots may
     // be summed against the house total — counting both would invent
     // consumption that does not exist and shrink "unmeasured" to nothing.
@@ -3811,7 +3863,7 @@ class CyborgDashboard extends HTMLElement {
     loads.forEach((l, i) => {
       const x = Math.round(300 + (i - (n - 1) / 2) * spacing);
       const color = l.other ? "#8d99ae" : l.vehicle ? (l.vehicle.color || "#06d6a0") : "#00e5ff";
-      const r = this._flowRadius(l.watts, refRoot, 20, 38);
+      const r = this._flowRadius(l.watts, refRoot, 12, 42);
       svg.push(this._flowPath("ef-l" + i,
         `M300,${322 + (homeR || 0)} C300,${390 + (homeR || 0)} ${x},${y - 74} ${x},${y - r - 5}`,
         l.watts, color, false));
@@ -3837,7 +3889,7 @@ class CyborgDashboard extends HTMLElement {
         html.push(this._flowNodeHtml(cx, childY,
           { label: c.name, icon: c.icon, color: "#7de2ff" },
           c.watts, null,
-          { vb, radius: this._flowRadius(c.watts, refChild, 16, 28), outside: true,
+          { vb, radius: this._flowRadius(c.watts, refChild, 10, 30), outside: true,
             slot: Math.min(cn <= 2 ? 150 : 88, spacing), cls: "leaf child",
             attrs: c.entity ? `data-fp-badge="${esc(c.entity)}"` : "" }));
       });
@@ -11535,7 +11587,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.33.0";
+const CYBORG_BUILD = "0.34.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

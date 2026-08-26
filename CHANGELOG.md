@@ -4,6 +4,59 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.34.0] - 2026-08-26
+
+Due difetti veri sul flusso energetico, e il test che avrebbe dovuto
+prenderli era scritto male.
+
+### Il figlio non stava sotto il padre
+La 0.33 ha unificato la gerarchia, ma restava un caso scoperto: **se il carico
+padre non è fra i dispositivi della card Flusso, il figlio non ha niente sotto
+cui stare** e ricadeva silenziosamente in cima, in parallelo agli altri. È il
+tuo caso: la presa che misura la friggitrice era dichiarata nell'analisi
+economica ma non nell'elenco del diagramma.
+
+Ora, se il padre dichiarato ha una lettura di potenza vera, **viene tirato
+dentro il diagramma da solo**. Hai detto che quel carico dipende da quello:
+disegnare il figlio senza il padre è disegnare mezzo fatto, e non ha senso
+chiederti di elencare la stessa presa due volte.
+
+### Non si leggeva l'ordine di grandezza
+Due tentativi sbagliati, e il secondo è quello interessante.
+
+Il primo era il codice originale: curva giusta (radice quadrata, perché un
+cerchio si legge da quanto inchiostro ha) ma **intervallo troppo stretto** —
+25 W accanto a 196 W venivano 26 px contro 38 px, su un telefono
+indistinguibili.
+
+Il secondo l'ho scritto io ieri: **puro proporzionale all'area**.
+Teoricamente corretto e peggiore nella pratica — appena un nodo domina, per
+esempio un «Non misurato» da 1,5 kW accanto a carichi da decine di watt, tutti
+gli altri cerchi finiscono sul minimo di leggibilità e tornano identici fra
+loro. Lo stesso difetto, raggiunto dalla parte opposta.
+
+Quindi: curva a radice quadrata su un **intervallo largo**. L'ordinamento è
+sempre leggibile e la proporzione è onesta dentro la banda — il compromesso
+che fa ogni grafico a cerchi scalati quando i dati veri hanno un elemento
+dominante.
+
+### Il test era scritto male
+L'asserzione che doveva impedire le targhette accavallate **raggruppava i nodi
+per fascia orizzontale** prima di confrontarli. Ma i nodi hanno raggi diversi,
+quindi le loro targhette stanno ad altezze diverse: due targhette che si
+toccavano finivano in gruppi diversi e non venivano mai confrontate. Ora il
+confronto è fra **tutte le coppie**, con vera intersezione di rettangoli.
+
+Aggiunta anche una scena che riproduce il caso reale — quattro carichi, quei
+nomi, quelle potenze, 390 px — e verifica che le targhette non si tocchino,
+che un carico sei volte più grande abbia un cerchio visibilmente più grande, e
+che **più watt non disegnino mai un cerchio più piccolo**.
+
+### Verifiche
+862 asserzioni frontend, suite schema, suite notifiche e **257 misurate** in
+Chromium (6 nuove), due esecuzioni consecutive identiche.
+
+
 ## [0.33.0] - 2026-08-24
 
 La gerarchia dei carichi si dichiara una volta sola. Schema alla versione 10.

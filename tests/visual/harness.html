@@ -293,6 +293,24 @@ window.__mount=(dash,opts)=>{
             max_series:8,series:[],hours:24,y_min:null,y_max:null});
           el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"tfcard"};
         }
+        if(opts&&opts.oscar){
+          // Oscar's actual screenshot: four loads, long Italian names, and the
+          // declared parent NOT present in the flow card's own device list.
+          el._hass.states["sensor.asciugatrice_w"]=S("161",{friendly_name:"Asciugatrice",device_class:"power",unit_of_measurement:"W"});
+          el._hass.states["sensor.friggitrice_w"]=S("27.3",{friendly_name:"Friggitrice ad aria",device_class:"power",unit_of_measurement:"W"});
+          el._hass.states["sensor.cantinetta_w"]=S("25.3",{friendly_name:"Cantinetta Potenza",device_class:"power",unit_of_measurement:"W"});
+          el._hass.states["sensor.presa_cucina_w"]=S("60",{friendly_name:"Presa cucina",device_class:"power",unit_of_measurement:"W"});
+          el._dashboard.hierarchy={"sensor.friggitrice_w":"sensor.presa_cucina_w"};
+          const card=el._sections().flatMap(x=>x.items||[]).find(i=>i.type==="energyflow");
+          if(card){
+            card.flow=card.flow||{};
+            // the parent is deliberately absent here
+            card.flow.devices=[{entity:"sensor.asciugatrice_w",name:"Asciugatrice",icon:"",parent:null},
+                               {entity:"sensor.friggitrice_w",name:"Friggitrice ad aria",icon:"",parent:null},
+                               {entity:"sensor.cantinetta_w",name:"Cantinetta Potenza",icon:"",parent:null}];
+            el._flowOpen=el._flowOpen||{};el._flowOpen[card.id]=true;
+          }
+        }
         if(opts&&opts.hierarchy){
           // the parent is declared ONLY in the dashboard-wide map, never on the
           // flow card's own device list: that is the case that used to draw the

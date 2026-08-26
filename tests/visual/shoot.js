@@ -754,6 +754,73 @@ const DEFAULT_DASH = {
   ok("e sta su una riga più in basso del padre",
      child.top > parent.top, parent.top + " vs " + child.top);
 
+  console.log("\n== IL CASO REALE: QUATTRO CARICHI SU UN TELEFONO ==");
+  const phoneOscar = await browser.newPage({ viewport: { width: 390, height: 900 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneOscar.on("pageerror", (e) => errors.push("PHONE-OSCAR: " + e.message));
+  await phoneOscar.goto("http://127.0.0.1:8899/harness.html");
+  await phoneOscar.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneOscar.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneOscar.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, oscar: true });
+  await phoneOscar.waitForTimeout(900);
+
+  const os = await phoneOscar.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll(".ef-n.leaf")).map((n) => {
+      const disc = n.querySelector(".ef-n-disc");
+      const lab = n.querySelector(".ef-n-lab");
+      const db = disc.getBoundingClientRect();
+      const lb = lab.getBoundingClientRect();
+      return { label: lab.textContent.trim(), child: n.classList.contains("child"),
+        r: Math.round(db.width / 2), top: Math.round(db.top),
+        labLeft: Math.round(lb.left), labRight: Math.round(lb.right),
+        labTop: Math.round(lb.top), labBottom: Math.round(lb.bottom),
+        clipped: lab.scrollWidth > lab.clientWidth + 1 };
+    });
+    return { nodes, winW: window.innerWidth };
+  });
+
+  const hits = [];
+  for (let i = 0; i < os.nodes.length; i++) {
+    for (let j = i + 1; j < os.nodes.length; j++) {
+      const a = os.nodes[i], b = os.nodes[j];
+      if (a.labLeft < b.labRight && b.labLeft < a.labRight
+          && a.labTop < b.labBottom && b.labTop < a.labBottom) hits.push([a.label, b.label]);
+    }
+  }
+  ok("telefono: le quattro targhette non si toccano", hits.length === 0, JSON.stringify(hits));
+
+  // "non c'è ordine di grandezza": 161 W against 25 W must LOOK different.
+  const asc = os.nodes.find((n) => /Asciugatrice/.test(n.label));
+  const cant = os.nodes.find((n) => /Cantinetta/.test(n.label));
+  ok("i due carichi estremi ci sono", !!asc && !!cant,
+     JSON.stringify(os.nodes.map((n) => n.label)));
+  ok("un carico sei volte più grande ha un cerchio visibilmente più grande",
+     asc.r >= cant.r * 1.35, asc.r + " vs " + cant.r);
+  const mono = await phoneOscar.evaluate(() => {
+    const el = window.__EL__;
+    const card = el._sections().flatMap((s2) => s2.items).find((i) => i.type === "energyflow");
+    const loads = el._flowLoads(card.flow, el._flowValues(card.flow).home);
+    return loads.map((l) => ({ name: l.name, w: l.watts }));
+  });
+  const paired = mono.map((m) => {
+    const node = os.nodes.find((n) => n.label === m.name && !n.child);
+    return node ? { name: m.name, w: m.w, r: node.r } : null;
+  }).filter(Boolean).sort((a, b) => a.w - b.w);
+  ok("più watt non disegnano mai un cerchio più piccolo",
+     paired.length >= 3 && paired.every((p, i) => i === 0 || p.r >= paired[i - 1].r),
+     JSON.stringify(paired));
+
+  // the declared parent was NOT in the card's device list
+  const frig = os.nodes.find((n) => /Friggitrice/.test(n.label));
+  const presa = os.nodes.find((n) => /Presa cucina/.test(n.label));
+  ok("il padre dichiarato viene tirato dentro il diagramma", !!presa,
+     JSON.stringify(os.nodes.map((n) => n.label)));
+  ok("e il figlio finisce sotto di lui, non in parallelo",
+     frig.child === true && presa.child === false && frig.top > presa.top,
+     JSON.stringify({ figlio: frig.child, padre: presa.child, dy: frig.top - presa.top }));
+  await phoneOscar.close();
+
   console.log("\n== NODI CHE NON SI SOVRAPPONGONO ==");
   const phoneFlow = await browser.newPage({ viewport: { width: 390, height: 900 },
     deviceScaleFactor: 3, isMobile: true, hasTouch: true });
@@ -774,20 +841,24 @@ const DEFAULT_DASH = {
       (rows[key] = rows[key] || []).push({
         label: lab ? lab.textContent.trim() : "",
         left: Math.round(b.left), right: Math.round(b.right),
-        labLeft: lb ? Math.round(lb.left) : 0, labRight: lb ? Math.round(lb.right) : 0 });
+        labLeft: lb ? Math.round(lb.left) : 0, labRight: lb ? Math.round(lb.right) : 0,
+        labTop: lb ? Math.round(lb.top) : 0, labBottom: lb ? Math.round(lb.bottom) : 0 });
     }
     return { rows, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
   });
+  const labs = Object.values(pf.rows).flat();
   const overlaps = [];
-  for (const key of Object.keys(pf.rows)) {
-    const row = pf.rows[key].sort((a, b) => a.labLeft - b.labLeft);
-    for (let i = 1; i < row.length; i++) {
-      if (row[i].labLeft < row[i - 1].labRight) overlaps.push([row[i - 1].label, row[i].label]);
+  for (let i = 0; i < labs.length; i++) {
+    for (let j = i + 1; j < labs.length; j++) {
+      const a = labs[i], b = labs[j];
+      const hit = a.labLeft < b.labRight && b.labLeft < a.labRight
+        && a.labTop < b.labBottom && b.labTop < a.labBottom;
+      if (hit) overlaps.push([a.label, b.label]);
     }
   }
   ok("telefono: le targhette dei carichi non si accavallano",
      overlaps.length === 0, JSON.stringify(overlaps));
-  const allNodes = Object.values(pf.rows).flat();
+  const allNodes = labs;
   ok("telefono: nessun nodo esce dallo schermo",
      allNodes.length > 0 && allNodes.every((n) => n.left >= -1 && n.right <= pf.winW + 1),
      JSON.stringify(allNodes.map((n) => [n.left, n.right])));
