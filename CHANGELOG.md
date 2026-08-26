@@ -4,6 +4,46 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.40.0] - 2026-08-26
+
+Il flusso energetico si legge anche sul telefono.
+
+### Il difetto
+I nodi del diagramma sono HTML posizionato in **percentuale** sopra un disegno
+che si rimpicciolisce, ma i dischi e le scritte erano in **pixel fissi**. Su un
+telefono il riquadro passa da 560 a 330 px mentre le pastiglie restano grandi
+uguali: si accavallano. Con la gerarchia dei carichi finalmente rispettata
+(0.38.0) il caso peggiore e' diventato il piu' comune — un padre e un figlio
+incolonnati — e l'etichetta del padre finiva **sotto** il disco del figlio.
+Misurato: 60x7 px di sovrapposizione su uno schermo da 390 px, zero su desktop.
+
+La prova che c'era gia' non lo vedeva perche' misurava **solo foglie
+affiancate**: nessuno aveva mai misurato una colonna padre-figlio su schermo
+stretto.
+
+### La correzione
+- Su una card stretta (sotto i 460 px) il disegno viene **allungato in
+  verticale**: le stesse percentuali cadono piu' distanti, i tracciati si
+  stirano — il viewBox e' gia' `preserveAspectRatio="none"` — e le scritte
+  restano leggibili invece di rimpicciolirsi con il resto. Rimpicciolire tutto
+  in proporzione sarebbe stato piu' semplice e avrebbe reso le etichette da
+  10 px alte 6.
+- Il rapporto d'aspetto del riquadro passa **dallo stile inline al CSS**
+  (`--vb`): un attributo `style` inline batte ogni foglio di stile, quindi la
+  container query non avrebbe mai potuto vincerlo. E' la stessa trappola gia'
+  pagata sui muri della mappa 3D.
+- **Larghezza dei nomi e distanza fra i nodi erano la stessa variabile.** Sono
+  due cose diverse: un figlio unico non ha nessuno accanto, quindi il suo nome
+  puo' usare tutto lo spazio del padre. Con le due confuse "Friggitrice ad
+  aria" usciva "Friggitrice a..." con mezzo diagramma vuoto intorno.
+
+### Verifiche
+Nuova prova permanente: telefono da 390 px, gerarchia aperta, **ogni** disco,
+etichetta e valore confrontati a coppie con tutti gli altri. Zero
+sovrapposizioni, nessun nome tagliato, figlio sotto il padre e staccato,
+diagramma dentro lo schermo — e su schermo largo il disegno non viene allungato
+inutilmente. 977 asserzioni frontend, 325 misurate in Chromium.
+
 ## [0.39.0] - 2026-08-26
 
 Uno zero che non era uno zero, le card che si incastrano, le linee che scegli tu.

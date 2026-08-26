@@ -1327,6 +1327,114 @@ const DEFAULT_DASH = {
      JSON.stringify({ figlio: frig.child, padre: presa.child, dy: frig.top - presa.top }));
   await phoneOscar.close();
 
+  console.log("\n== GERARCHIA SUL TELEFONO ==");
+  // Il caso che si e' rotto davvero: i nodi sono HTML posizionato in
+  // PERCENTUALE sopra un disegno che si rimpicciolisce, ma dischi e scritte
+  // sono in PIXEL. Su un telefono il riquadro passa da 560 a 330 px e le stesse
+  // pastiglie, rimaste grandi uguali, si accavallano. Con un padre e un figlio
+  // incolonnati l'etichetta del padre finiva sotto il disco del figlio - e la
+  // prova precedente non lo vedeva perche' misurava solo foglie affiancate.
+  const phoneHier = await browser.newPage({ viewport: { width: 390, height: 900 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneHier.on("pageerror", (e) => errors.push("PHONE-HIER: " + e.message));
+  await phoneHier.goto("http://127.0.0.1:8899/harness.html");
+  await phoneHier.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneHier.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneHier.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, hierarchy: true });
+  await phoneHier.waitForTimeout(1100);
+
+  const ph = await phoneHier.evaluate(() => {
+    const parts = [];
+    document.querySelectorAll(".ef-n").forEach((n) => {
+      const lab = n.querySelector(".ef-n-lab");
+      const who = ((lab && lab.textContent.trim()) || n.className).slice(0, 22);
+      for (const key of ["ef-n-disc", "ef-n-lab", "ef-n-val"]) {
+        const el = n.querySelector("." + key);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        parts.push({ who, key, l: r.left, t: r.top, r: r.right, b: r.bottom,
+          clipped: el.scrollWidth > el.clientWidth + 1, text: el.textContent.trim() });
+      }
+    });
+    const hits = [];
+    for (let i = 0; i < parts.length; i++) {
+      for (let j = i + 1; j < parts.length; j++) {
+        const a = parts[i], b = parts[j];
+        if (a.who === b.who) continue;   // stesso nodo: disco e scritta si toccano per forza
+        const ox = Math.min(a.r, b.r) - Math.max(a.l, b.l);
+        const oy = Math.min(a.b, b.b) - Math.max(a.t, b.t);
+        if (ox > 2 && oy > 2) hits.push([a.who + "/" + a.key, b.who + "/" + b.key,
+          Math.round(ox) + "x" + Math.round(oy)]);
+      }
+    }
+    const st = document.querySelector(".ef-stage");
+    const sb = st ? st.getBoundingClientRect() : null;
+    const child = document.querySelector(".ef-n.leaf.child");
+    const parent = Array.from(document.querySelectorAll(".ef-n.leaf:not(.child)"))
+      .find((n) => /Presa cucina/.test(n.textContent));
+    return { parts: parts.length, hits,
+      stageW: sb ? Math.round(sb.width) : 0, stageH: sb ? Math.round(sb.height) : 0,
+      childTop: child ? Math.round(child.getBoundingClientRect().top) : 0,
+      parentBottom: parent ? Math.round(parent.getBoundingClientRect().bottom) : 0,
+      clipped: parts.filter((p) => p.clipped).map((p) => p.text),
+      winW: window.innerWidth, scrollW: document.documentElement.scrollWidth,
+      right: Math.max(...parts.map((p) => p.r)), left: Math.min(...parts.map((p) => p.l)) };
+  });
+
+  ok("telefono: il diagramma ha davvero i suoi nodi", ph.parts >= 12, String(ph.parts));
+  ok("telefono: niente si accavalla, nemmeno le scritte con i dischi",
+     ph.hits.length === 0, JSON.stringify(ph.hits));
+  ok("telefono: il figlio sta sotto il padre, staccato",
+     ph.childTop > ph.parentBottom, ph.parentBottom + " -> " + ph.childTop);
+  // il riquadro deve essersi allungato: e' la leva che crea lo spazio
+  ok("telefono: su una card stretta il disegno si allunga",
+     ph.stageH > ph.stageW * 1.3, ph.stageW + "x" + ph.stageH);
+  ok("telefono: nessun nome viene tagliato", ph.clipped.length === 0,
+     JSON.stringify(ph.clipped));
+  ok("telefono: il diagramma sta nello schermo",
+     ph.left >= -1 && ph.right <= ph.winW + 1 && ph.scrollW <= ph.winW + 1,
+     JSON.stringify([ph.left, ph.right, ph.scrollW, ph.winW]));
+  await phoneHier.screenshot({ path: path.resolve(__dirname, "67-phone-hier.png") });
+  await phoneHier.close();
+
+  // e la stessa scena su schermo largo non deve essersi rotta
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true, hierarchy: true });
+  await page.waitForTimeout(900);
+  const dsk = await page.evaluate(() => {
+    const parts = [];
+    document.querySelectorAll(".ef-n").forEach((n) => {
+      const lab = n.querySelector(".ef-n-lab");
+      const who = ((lab && lab.textContent.trim()) || n.className).slice(0, 22);
+      for (const key of ["ef-n-disc", "ef-n-lab", "ef-n-val"]) {
+        const el = n.querySelector("." + key);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        parts.push({ who, key, l: r.left, t: r.top, r: r.right, b: r.bottom });
+      }
+    });
+    let hits = 0;
+    for (let i = 0; i < parts.length; i++) {
+      for (let j = i + 1; j < parts.length; j++) {
+        const a = parts[i], b = parts[j];
+        if (a.who === b.who) continue;
+        if (Math.min(a.r, b.r) - Math.max(a.l, b.l) > 2
+            && Math.min(a.b, b.b) - Math.max(a.t, b.t) > 2) hits++;
+      }
+    }
+    const st = document.querySelector(".ef-stage").getBoundingClientRect();
+    return { hits, w: Math.round(st.width), h: Math.round(st.height) };
+  });
+  ok("su schermo largo resta come prima", dsk.hits === 0, String(dsk.hits));
+  ok("e non viene allungato inutilmente", dsk.h < dsk.w * 1.35,
+     dsk.w + "x" + dsk.h);
+
   console.log("\n== NODI CHE NON SI SOVRAPPONGONO ==");
   const phoneFlow = await browser.newPage({ viewport: { width: 390, height: 900 },
     deviceScaleFactor: 3, isMobile: true, hasTouch: true });

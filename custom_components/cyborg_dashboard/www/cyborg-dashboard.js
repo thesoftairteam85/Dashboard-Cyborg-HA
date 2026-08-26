@@ -4297,8 +4297,15 @@ class CyborgDashboard extends HTMLElement {
       const cn = l.children.length;
       if (!cn) return;
       const refChild = Math.max(...l.children.map((c) => c.watts), 1);
+      // Two different quantities that used to be one. `spread` is how far
+      // apart the children are drawn; `room` is how wide their names may be.
+      // A single child has nothing beside it, so its name may use the whole
+      // slot of its parent - with the two conflated, "Friggitrice ad aria"
+      // came out "Friggitrice a..." on a phone with nothing next to it.
+      const spread = Math.min(cn <= 2 ? 150 : 88, spacing);
+      const room = cn === 1 ? spacing : spread;
       l.children.forEach((c, j) => {
-        const cx = Math.round(x + (j - (cn - 1) / 2) * Math.min(cn <= 2 ? 150 : 88, spacing));
+        const cx = Math.round(x + (j - (cn - 1) / 2) * spread);
         svg.push(this._flowPath("ef-c" + i + "-" + j,
           `M${x},${y + r + 4} C${x},${y + 84} ${cx},${childY - 84} ${cx},${childY - 32}`,
           c.watts, "#7de2ff", false));
@@ -4306,7 +4313,7 @@ class CyborgDashboard extends HTMLElement {
           { label: c.name, icon: c.icon, color: "#7de2ff" },
           c.watts, null,
           { vb, radius: this._flowRadius(c.watts, refChild, 10, 30), outside: true,
-            slot: Math.min(cn <= 2 ? 150 : 88, spacing), cls: "leaf child",
+            slot: room, cls: "leaf child",
             attrs: c.entity ? `data-fp-badge="${esc(c.entity)}"` : "" }));
       });
     });
@@ -4395,7 +4402,7 @@ class CyborgDashboard extends HTMLElement {
     }).join("");
 
     return `<div class="ef${open ? " open" : ""}">
-        <div class="ef-stage" style="aspect-ratio:600/${vb}">
+        <div class="ef-stage" style="--vb:${vb}">
           <svg class="ef-svg" viewBox="0 0 600 ${vb}" preserveAspectRatio="none">
             ${paths}${sub.svg}
           </svg>
@@ -11682,8 +11689,19 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .dom-chip.on{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 13%,transparent)}
 
 .item.flow .value{display:none}
-.ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%}
-.ef-stage{position:relative;width:100%;max-width:560px;margin:0 auto}
+.ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%;container-type:inline-size;container-name:efcard}
+.ef-stage{position:relative;width:100%;max-width:560px;margin:0 auto;aspect-ratio:600 / var(--vb,706)}
+/* I nodi sono HTML posizionato in PERCENTUALE sopra un disegno che si
+   rimpicciolisce, ma i dischi e le scritte sono in PIXEL: su un telefono il
+   riquadro passa da 560 a 330 px e le stesse pastiglie, rimaste grandi uguali,
+   si accavallano - misurato, l'etichetta del padre finiva sotto il disco del
+   figlio. Su una card stretta il disegno viene quindi allungato in verticale:
+   le percentuali cadono piu' distanti, i tracciati si stirano (il viewBox e'
+   preserveAspectRatio="none") e le scritte restano leggibili invece di
+   rimpicciolirsi con il resto. */
+@container efcard (max-width: 460px){
+  .ef-stage{aspect-ratio:600 / calc(var(--vb,706) * 1.38)}
+}
 /* Without fill:none an SVG path is filled with the default black, which drew
    the connections as solid tapering wedges instead of lines. */
 .ef-path{fill:none;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
@@ -11710,10 +11728,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ef-n.home .ef-n-sub{color:var(--nc);opacity:.7}
 .ef-n.home.open .ef-n-disc{border-style:dashed}
 .ef-n.leaf{cursor:pointer}
-.ef-n.leaf .ef-n-lab{order:3;opacity:.7;font:600 10px Inter,system-ui,sans-serif;letter-spacing:.01em;text-transform:none;max-width:min(104px,var(--lw,104px));overflow:hidden;text-overflow:ellipsis}
+.ef-n.leaf .ef-n-lab{order:3;opacity:.7;font:600 10px Inter,system-ui,sans-serif;letter-spacing:.01em;text-transform:none;max-width:min(168px,var(--lw,168px));overflow:hidden;text-overflow:ellipsis}
 .ef-n.leaf .ef-n-val{order:2;font-size:13px}
 .ef-n.leaf.child .ef-n-val{font-size:11.5px}
-.ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:min(88px,var(--lw,88px))}
+.ef-n.leaf.child .ef-n-lab{font-size:9px;max-width:min(150px,var(--lw,150px))}
 .ef-n.leaf.ev .ef-n-disc{border-color:color-mix(in srgb,#06d6a0 70%,transparent)}
 .ef-n.leaf.ev.charging .ef-n-disc{animation:evPulse 1.9s ease-in-out infinite}
 .ef-n.leaf.ev .ef-n-sub{color:#06d6a0;opacity:.9;font-weight:700}
@@ -12467,7 +12485,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.39.0";
+const CYBORG_BUILD = "0.40.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

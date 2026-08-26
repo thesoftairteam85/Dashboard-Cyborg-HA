@@ -512,7 +512,9 @@ ok("aperto: la foglia piu' grossa ha il raggio maggiore", (() => {
 })());
 ok("aperto: elenco piatto nascosto (niente doppioni)", !treeOpened.includes("ef-dev-bar"));
 ok("aperto: viewBox esteso", /viewBox="0 0 600 566"/.test(treeOpened), (treeOpened.match(/viewBox="[^"]+"/) || [])[0]);
-ok("aperto: proporzioni bloccate sullo stage", treeOpened.includes("aspect-ratio:600/566"));
+ok("aperto: l'altezza del riquadro e' dichiarata come variabile, non inline",
+   treeOpened.includes('style="--vb:566"') && !treeOpened.includes("aspect-ratio:600/566"),
+   (treeOpened.match(/class="ef-stage"[^>]*/) || [])[0]);
 ok("aperto: le foglie reali sono cliccabili", treeOpened.includes('data-fp-badge="sensor.lav"'));
 ok("aperto: il nodo non misurato non e' cliccabile", !/ef-leaf other[^>]*data-fp-badge/.test(treeOpened));
 ok("aperto: nessun undefined", !/>undefined</.test(treeOpened) && !treeOpened.includes("[object"));
