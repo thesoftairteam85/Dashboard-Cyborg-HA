@@ -3950,7 +3950,19 @@ class CyborgDashboard extends HTMLElement {
     const r = o.radius || 34;
     const inside = !o.outside;
     const lw = o.slot ? `--lw:calc(${((o.slot / 600) * 100).toFixed(2)}cqw - 8px);` : "";
-    return `<div class="ef-n ${o.cls || ""}${inside ? " inside" : ""}" style="--nc:${slot.color};--r:${r * 2}px;${lw}left:${(x / 600) * 100}%;top:${(y / o.vb) * 100}%"
+    // The disc is sized in the SAME units as the drawing it sits on, not in
+    // fixed pixels. It used to be `${r * 2}px`, so on a phone the picture
+    // shrank to 330px while the discs stayed as big as on a 560px desktop and
+    // swallowed the whole diagram. `cqw` is a percentage of the stage, exactly
+    // like the left/top below, so a node keeps its proportion at every width.
+    // The 18px floor is the point below which the icon inside stops being an
+    // icon. It is deliberately low: the radius encodes power, so a floor that
+    // bites early flattens the difference between a 25 W lamp and a 160 W
+    // dryer - measured, at 22px the two came out 11 and 13 pixels and the
+    // ordering stopped being readable, which is the very thing the sizes are
+    // there to say.
+    const dia = `max(18px, ${(((r * 2) / 600) * 100).toFixed(2)}cqw)`;
+    return `<div class="ef-n ${o.cls || ""}${inside ? " inside" : ""}" style="--nc:${slot.color};--r:${dia};${lw}left:${(x / 600) * 100}%;top:${(y / o.vb) * 100}%"
         ${o.attrs || ""}>
         <span class="ef-n-lab">${esc(slot.label)}</span>
         <span class="ef-n-disc">
@@ -8615,16 +8627,23 @@ class CyborgDashboard extends HTMLElement {
         ${this._renderOverlay()}
       </div>`;
 
-    // restore scroll synchronously, before the browser paints, so there is no
-    // visible jump
-    if (scroller && pageTop) scroller.scrollTop = pageTop;
     for (const key of Object.keys(scrolls)) {
       const el = this.querySelector(`[data-keep-scroll="${key}"]`);
       if (el) el.scrollTop = scrolls[key];
     }
 
     this._bind();
+    // The packing pass MUST run before the page scroll is put back. Until every
+    // card has declared its row span the grid rows are 6px tall, so the page is
+    // a fraction of its real height for one moment: setting scrollTop then gets
+    // clamped to that tiny maximum and the view snaps to the top. Packing
+    // first, restoring after, and both before the browser paints, means the
+    // position is measured against the real height and nothing is ever seen
+    // moving. This is what "ogni volta che clicco mi butta in alto" was.
     this._packGrid();
+    // restore scroll synchronously, before the browser paints, so there is no
+    // visible jump
+    if (scroller && pageTop) scroller.scrollTop = pageTop;
     if (focusKey) {
       const sel = focusKey === "__search" ? "[data-entity-search]"
         : `[data-prop="${focusKey}"],[data-sec-prop="${focusKey}"],[data-page-prop="${focusKey}"]`;
@@ -11691,16 +11710,15 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .item.flow .value{display:none}
 .ef{margin-top:10px;display:flex;flex-direction:column;gap:10px;max-width:560px;margin-left:auto;margin-right:auto;width:100%;container-type:inline-size;container-name:efcard}
 .ef-stage{position:relative;width:100%;max-width:560px;margin:0 auto;aspect-ratio:600 / var(--vb,706)}
-/* I nodi sono HTML posizionato in PERCENTUALE sopra un disegno che si
-   rimpicciolisce, ma i dischi e le scritte sono in PIXEL: su un telefono il
-   riquadro passa da 560 a 330 px e le stesse pastiglie, rimaste grandi uguali,
-   si accavallano - misurato, l'etichetta del padre finiva sotto il disco del
-   figlio. Su una card stretta il disegno viene quindi allungato in verticale:
-   le percentuali cadono piu' distanti, i tracciati si stirano (il viewBox e'
-   preserveAspectRatio="none") e le scritte restano leggibili invece di
-   rimpicciolirsi con il resto. */
+/* I dischi scalano con il riquadro (vedi --r), quindi il disegno mantiene le
+   sue proporzioni a ogni larghezza. Resta fuori scala il TESTO, che e' a
+   misura fissa per restare leggibile: su un riquadro da 330 px un'etichetta da
+   10 px pesa quasi il doppio che su uno da 560. Su una card stretta il disegno
+   viene percio' allungato quel tanto che basta a fare posto alle scritte - i
+   tracciati si stirano, il viewBox e' preserveAspectRatio="none" - invece di
+   rimpicciolire anche loro. */
 @container efcard (max-width: 460px){
-  .ef-stage{aspect-ratio:600 / calc(var(--vb,706) * 1.38)}
+  .ef-stage{aspect-ratio:600 / calc(var(--vb,706) * 1.15)}
 }
 /* Without fill:none an SVG path is filled with the default black, which drew
    the connections as solid tapering wedges instead of lines. */
@@ -12485,7 +12503,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.40.0";
+const CYBORG_BUILD = "0.41.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

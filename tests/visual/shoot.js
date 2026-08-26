@@ -735,6 +735,65 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== LA PAGINA NON SALTA IN ALTO ==");
+  // Con le card a incastro la griglia ha righe da 6px, e finche' ogni card non
+  // ha dichiarato quante gliene servono la pagina e' alta una frazione del
+  // vero. Rimettere lo scorrimento in quel momento lo faceva tosare
+  // dall'altezza minuscola e la vista schizzava in cima: "ogni volta che
+  // clicco mi butta in alto". La misura e' semplice - scorri, tocca qualcosa
+  // che ridisegna, e devi essere ancora li'.
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, trend: true });
+  await page.waitForTimeout(1200);
+
+  const scrolled = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sc = document.scrollingElement;
+    sc.scrollTop = Math.round((sc.scrollHeight - sc.clientHeight) * 0.6);
+    await new Promise((r) => setTimeout(r, 120));
+    const before = sc.scrollTop;
+    // un ridisegno qualsiasi, come quello che segue ogni tocco
+    el._signature = ""; el.render();
+    const after = sc.scrollTop;
+    return { before, after, max: sc.scrollHeight - sc.clientHeight };
+  });
+  ok("scorrendo a meta' pagina c'e' davvero da scorrere",
+     scrolled.before > 200, JSON.stringify(scrolled));
+  ok("un ridisegno non sposta la pagina",
+     Math.abs(scrolled.after - scrolled.before) <= 2,
+     scrolled.before + " -> " + scrolled.after);
+
+  // e ora il caso vero: il pannello delle linee, che ridisegna a ogni tocco
+  const pickScroll = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sc = document.scrollingElement;
+    const svg = document.querySelector("[data-trend-svg]");
+    el._seriesPicker = svg.getAttribute("data-trend-svg");
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 200));
+    const row = document.querySelector("[data-trend-pick]");
+    if (!row) return { skipped: true };
+    row.scrollIntoView({ block: "center" });
+    await new Promise((r) => setTimeout(r, 150));
+    const before = sc.scrollTop;
+    const rowTop = Math.round(row.getBoundingClientRect().top);
+    document.querySelectorAll("[data-trend-pick]")[1].click();
+    await new Promise((r) => setTimeout(r, 300));
+    const after = sc.scrollTop;
+    const still = document.querySelector("[data-trend-pick]");
+    return { before, after, rowTop,
+      rowTopAfter: still ? Math.round(still.getBoundingClientRect().top) : null };
+  });
+  ok("il pannello delle linee resta dov'era", pickScroll.skipped !== true
+     && Math.abs(pickScroll.after - pickScroll.before) <= 2,
+     JSON.stringify(pickScroll));
+  ok("e la riga toccata resta sotto il dito",
+     Math.abs(pickScroll.rowTopAfter - pickScroll.rowTop) <= 6,
+     pickScroll.rowTop + " -> " + pickScroll.rowTopAfter);
+
   console.log("\n== RETTANGOLI CHE SI INCASTRANO ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
@@ -1371,11 +1430,13 @@ const DEFAULT_DASH = {
     }
     const st = document.querySelector(".ef-stage");
     const sb = st ? st.getBoundingClientRect() : null;
+    const homeDisc = document.querySelector(".ef-n.home .ef-n-disc");
     const child = document.querySelector(".ef-n.leaf.child");
     const parent = Array.from(document.querySelectorAll(".ef-n.leaf:not(.child)"))
       .find((n) => /Presa cucina/.test(n.textContent));
     return { parts: parts.length, hits,
       stageW: sb ? Math.round(sb.width) : 0, stageH: sb ? Math.round(sb.height) : 0,
+      discRatio: homeDisc && sb ? homeDisc.getBoundingClientRect().width / sb.width : 0,
       childTop: child ? Math.round(child.getBoundingClientRect().top) : 0,
       parentBottom: parent ? Math.round(parent.getBoundingClientRect().bottom) : 0,
       clipped: parts.filter((p) => p.clipped).map((p) => p.text),
@@ -1429,11 +1490,21 @@ const DEFAULT_DASH = {
       }
     }
     const st = document.querySelector(".ef-stage").getBoundingClientRect();
-    return { hits, w: Math.round(st.width), h: Math.round(st.height) };
+    const hd = document.querySelector(".ef-n.home .ef-n-disc");
+    return { hits, w: Math.round(st.width), h: Math.round(st.height),
+      discRatio: hd ? hd.getBoundingClientRect().width / st.width : 0 };
   });
   ok("su schermo largo resta come prima", dsk.hits === 0, String(dsk.hits));
   ok("e non viene allungato inutilmente", dsk.h < dsk.w * 1.35,
      dsk.w + "x" + dsk.h);
+  // Il numero che tiene ferma la correzione: il disco deve pesare la stessa
+  // frazione del riquadro su un telefono e su un desktop. Era in pixel fissi,
+  // quindi su 330 px pesava quasi il doppio e si mangiava il disegno.
+  ok("il disco pesa la stessa frazione del riquadro ovunque",
+     Math.abs(ph.discRatio - dsk.discRatio) < 0.03,
+     ph.discRatio.toFixed(3) + " (telefono) vs " + dsk.discRatio.toFixed(3) + " (desktop)");
+  ok("e non e' un valore assurdo",
+     ph.discRatio > 0.1 && ph.discRatio < 0.35, ph.discRatio.toFixed(3));
 
   console.log("\n== NODI CHE NON SI SOVRAPPONGONO ==");
   const phoneFlow = await browser.newPage({ viewport: { width: 390, height: 900 },

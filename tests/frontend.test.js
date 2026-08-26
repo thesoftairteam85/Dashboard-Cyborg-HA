@@ -420,7 +420,9 @@ const fhtml = el._renderCard(flowCard, fsec);
 ok("4 nodi disegnati", (fhtml.match(/class="ef-n /g) || []).length === 4, String((fhtml.match(/class="ef-n /g) || []).length));
 ok("i nodi hanno icone vere (traliccio, casa)", fhtml.includes("mdi:transmission-tower") && fhtml.includes('icon="mdi:home"'));
 ok("dimensione dei nodi proporzionale alla potenza", (() => {
-  const rs = [...fhtml.matchAll(/--r:(\d+)px/g)].map(m => +m[1]);
+  // Il raggio non e' piu' in pixel fissi ma in frazione del riquadro (cqw):
+  // e' quella la misura che scala col disegno, ed e' quella da leggere.
+  const rs = [...fhtml.matchAll(/--r:max\([\d.]+px, ([\d.]+)cqw\)/g)].map(m => +m[1]);
   return rs.length === 4 && new Set(rs).size > 1;
 })(), fhtml.match(/--r:\d+px/g) + "");
 ok("3 percorsi attivi", (fhtml.match(/class="ef-path active"/g) || []).length === 3);
@@ -507,11 +509,14 @@ ok("aperto: nessuna percentuale (la dimensione dice la proporzione)", !/\d+%<\/s
 ok("aperto: la foglia piu' grossa ha il raggio maggiore", (() => {
   const blocks = treeOpened.split('class="ef-n leaf').slice(1);
   const lav = blocks.find(b => b.includes("Lavatrice")), nas = blocks.find(b => b.includes("NAS"));
-  const r = (b) => +(/--r:(\d+)px/.exec(b) || [])[1];
+  const r = (b) => +(/--r:max\([\d.]+px, ([\d.]+)cqw\)/.exec(b) || [])[1];
   return lav && nas && r(lav) > r(nas);
 })());
 ok("aperto: elenco piatto nascosto (niente doppioni)", !treeOpened.includes("ef-dev-bar"));
 ok("aperto: viewBox esteso", /viewBox="0 0 600 566"/.test(treeOpened), (treeOpened.match(/viewBox="[^"]+"/) || [])[0]);
+ok("aperto: i dischi sono in frazione del riquadro, non in pixel",
+   /--r:max\([\d.]+px, [\d.]+cqw\)/.test(treeOpened) && !/--r:\d+px/.test(treeOpened),
+   (treeOpened.match(/--r:[^;]*/) || [])[0]);
 ok("aperto: l'altezza del riquadro e' dichiarata come variabile, non inline",
    treeOpened.includes('style="--vb:566"') && !treeOpened.includes("aspect-ratio:600/566"),
    (treeOpened.match(/class="ef-stage"[^>]*/) || [])[0]);
@@ -561,7 +566,7 @@ ok("albero a due livelli renderizzato", (hHtml.match(/class="ef-n leaf child/g) 
 ok("viewBox esteso per il secondo livello", /viewBox="0 0 600 706"/.test(hHtml), (hHtml.match(/viewBox="[^"]+"/) || [])[0]);
 ok("il figlio maggiore e' disegnato piu' grande", (() => {
   const b = hHtml.split('class="ef-n leaf child').slice(1);
-  const r = (x) => +(/--r:(\d+)px/.exec(x) || [])[1];
+  const r = (x) => +(/--r:max\([\d.]+px, ([\d.]+)cqw\)/.exec(x) || [])[1];
   const forno = b.find(x => x.includes("Forno")), piano = b.find(x => x.includes("Piano"));
   return forno && piano && r(forno) > r(piano);
 })());

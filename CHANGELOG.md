@@ -4,6 +4,49 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.41.0] - 2026-08-26
+
+Due difetti che avevo introdotto io: la pagina che salta in cima e i cerchi
+ancora fuori misura.
+
+### La pagina saltava in alto a ogni tocco
+- **Causa: il layout a incastro di 0.39.0.** Con le card a incastro la griglia
+  ha righe da 6 px, e finche' ogni card non ha dichiarato quante gliene servono
+  la pagina e' alta **una frazione del vero**. Il ripristino dello scorrimento
+  girava *prima* di quella dichiarazione: il valore veniva tosato dall'altezza
+  minuscola e la vista schizzava in cima. Misurato: scorrimento a 1240 px, dopo
+  un ridisegno **0**.
+- La sequenza e' ora: contenuto → aggancio dei comandi → **calcolo delle
+  altezze** → ripristino dello scorrimento, tutto prima che il browser
+  disegni. Misurato: 1240 → 1240.
+- Prova permanente: scorri a meta' pagina, tocca una riga del pannello delle
+  linee, e devi essere ancora li' — con la riga toccata **sotto il dito**.
+  Rimessa la vecchia sequenza, la prova fallisce: non e' un'asserzione che
+  passa da sola.
+
+### I cerchi del flusso energetico erano ancora fuori misura
+- 0.40.0 aveva allungato il riquadro per fare posto, ma i dischi erano rimasti
+  **in pixel fissi**: su un telefono il riquadro e' 330 px e un disco da 104 px
+  ne occupava un terzo, contro un quinto sul desktop.
+- Il disco e' ora dichiarato nelle **stesse unita' del disegno** (`cqw`, cioe'
+  una frazione del riquadro), esattamente come le coordinate: un nodo tiene la
+  sua proporzione a ogni larghezza. Sul telefono il disco di CASA passa da 104
+  a 57 px.
+- Il pavimento e' **18 px**, non 22: il raggio codifica la potenza, e un
+  pavimento che morde presto appiattisce la differenza fra una lampada da 25 W
+  e un'asciugatrice da 160 W. Misurato: a 22 px i due venivano 11 e 13 pixel e
+  l'ordine di grandezza smetteva di leggersi — che e' proprio quello che le
+  dimensioni servono a dire.
+- Con i dischi in proporzione l'allungamento verticale serve molto meno: da
+  1.38 a **1.15**, quel tanto che basta a fare posto alle scritte, che restano
+  a misura fissa per restare leggibili.
+- Prova permanente: il disco deve pesare **la stessa frazione del riquadro** su
+  telefono e desktop (scarto sotto il 3%).
+
+### Verifiche
+978 asserzioni frontend, 331 misurate in Chromium, piu' schema, notifiche e
+chiave di cache.
+
 ## [0.40.0] - 2026-08-26
 
 Il flusso energetico si legge anche sul telefono.
