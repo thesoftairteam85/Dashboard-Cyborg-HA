@@ -4,6 +4,67 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.35.0] - 2026-08-26
+
+Mappa 3D: materiali e luce vera. Primo dei due passaggi.
+
+### La scelta, e perché ho cambiato idea
+Avevo raccomandato la strada dell'**immagine renderizzata**. Ripensandoci non
+la consiglio più, per due motivi che pesano più della fedeltà:
+
+1. **Un'immagine renderizzata è morta.** Non può mostrare una luce accesa, non
+   si abbassa col dimmer, non diventa notte. Tutto quello che la casa sta
+   *facendo* deve tornarci sopra come targhetta — cioè esattamente la confusione
+   di simboli da cui questa dashboard cerca di allontanarsi.
+2. **Costa un modello 3D per ogni cliente.** Mezza giornata a installazione non
+   scala su un prodotto da rivendere.
+
+Quindi lo sforzo va dove il fotorealismo non ha risposta: **luce, stato,
+movimento**. Una scena generata può fare l'unica cosa che il render non può —
+essere illuminata dalle luci vere.
+
+### Novità
+- **Materiali del pavimento**, disegnati in CSS: parquet, piastrelle, cemento,
+  tappeto, pietra, prato, acqua. Nessun file immagine da ospitare, niente che
+  possa sparire. Dedotti dal nome della stanza (bagno → piastrelle, camera →
+  parquet, garage → cemento) e sovrascrivibili nell'editor della stanza.
+- **Luce reale.** Pavimento e muri prendono colore e intensità dalle lampadine
+  che sono davvero accese: un dimmer al 30% illumina la stanza al 30%, una
+  lampadina calda la fa calda, una stanza con tutto spento resta al buio. Una
+  luce accesa su quattro non illumina come quattro. Il colore viene dalla
+  temperatura dichiarata dalla lampadina.
+- **Pozza di luce** sul pavimento, gettata dall'alto e sfumata verso i bordi.
+- **Ombre di contatto** sotto ogni stanza e **occlusione ambientale** alla base
+  dei muri. Senza, i volumi galleggiavano e la scena si leggeva come forme
+  colorate piatte — che è buona parte di quello che la faceva sembrare uno
+  schema invece di una casa.
+
+### Due difetti trovati mentre la costruivo
+- **`filter` su un elemento `preserve-3d` appiattisce tutta la scena 3D.**
+  Avevo messo il bagliore della stanza illuminata sulla stanza stessa: i muri
+  collassavano e ogni segnaposto finiva altrove. L'hanno preso i test del
+  tocco, che hanno smesso di trovare quello che cliccavano. Il bagliore ora sta
+  sul pavimento, che è una foglia e non ha niente di 3D sotto.
+- **Uno stile inline batte qualunque regola del foglio di stile.**
+  L'ombreggiatura geometrica di ogni muro era scritta come `filter` inline, per
+  cui la luce della stanza non poteva raggiungerli qualunque cosa dicesse il
+  CSS. Ora quella è una proprietà personalizzata e il foglio di stile
+  moltiplica le due cose.
+
+### Verifiche
+874 asserzioni frontend (12 nuove) e **266 misurate** in Chromium (9 nuove).
+Le nuove misurano i **pixel**, non le classi: che il pavimento acceso sia
+davvero più chiaro di quello spento, che lo siano anche i muri, che la pozza di
+luce compaia solo da accesa, che abbassando il dimmer la luminosità calcolata
+scenda davvero, e che due stanze accanto con luci diverse si distinguano nella
+stessa immagine.
+
+### Il prossimo passaggio
+Arredi come volumi semplici (letto, divano, tavolo, piano cucina) posizionabili
+per stanza. È quello che fa leggere una stanza *come* una stanza, e senza è il
+limite di quanto lontano può arrivare questa mappa.
+
+
 ## [0.34.0] - 2026-08-26
 
 Due difetti veri sul flusso energetico, e il test che avrebbe dovuto

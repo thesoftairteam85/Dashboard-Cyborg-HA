@@ -1565,6 +1565,72 @@ function hourlyChart(points, labels, unit, meta) {
   </div>`;
 }
 
+/* ==========================================================================
+ * MATERIALI E LUCE
+ *
+ * Why this and not a photorealistic render.
+ *
+ * A rendered image is dead. It cannot show a light that is ON, it cannot dim
+ * with the dimmer, it cannot go dark at night. Everything the house is
+ * actually DOING has to go back on top of it as a badge — which is precisely
+ * the clutter this dashboard is trying to get away from.
+ *
+ * A generated scene can do the one thing the render cannot: be lit by the real
+ * lights. So the effort goes where photorealism has no answer — light, state,
+ * motion — instead of chasing a fidelity that would also cost a hand-built 3D
+ * model per installation.
+ * ======================================================================== */
+
+/** Floor materials, as pure CSS. No image files, nothing to host, nothing to lose. */
+const ROOM_MATERIALS = {
+  parquet: { l: "Parquet", base: "#7a4a24", plank: true },
+  piastrelle: { l: "Piastrelle", base: "#8e9aa6", tile: 46 },
+  cemento: { l: "Cemento", base: "#7d8489" },
+  tappeto: { l: "Tappeto", base: "#6b5f70", soft: true },
+  pietra: { l: "Pietra", base: "#6f6a63", tile: 74 },
+  prato: { l: "Prato", base: "#4b7a41", soft: true },
+  acqua: { l: "Acqua", base: "#2f6f96" },
+  neutro: { l: "Neutro", base: null },
+};
+
+/** A sensible material from the room's name, overridable in the editor. */
+function guessMaterial(name) {
+  const n = String(name || "").toLowerCase();
+  if (/(bagno|doccia|lavanderia|wc|servizi)/.test(n)) return "piastrelle";
+  if (/(cucina|cottura)/.test(n)) return "piastrelle";
+  if (/(camera|letto|soppalco|studio|ufficio)/.test(n)) return "parquet";
+  if (/(soggiorno|salotto|sala|living|corridoio|ingresso|disimpegno)/.test(n)) return "parquet";
+  if (/(giardino|prato|orto)/.test(n)) return "prato";
+  if (/(piscina|vasca)/.test(n)) return "acqua";
+  if (/(garage|cantina|box|terrazz|balcone|taverna|soffitta)/.test(n)) return "cemento";
+  return "neutro";
+}
+
+/** The CSS background for a material, layered under the room's own tint. */
+function materialLayers(key) {
+  const m = ROOM_MATERIALS[key] || ROOM_MATERIALS.neutro;
+  if (!m.base) return "";
+  if (m.plank) {
+    // Planks: a repeating gradient at an angle, with a second, wider one for
+    // the joins so the pattern does not read as a single stripe frequency.
+    return `repeating-linear-gradient(94deg,
+        color-mix(in srgb,${m.base} 88%,#000) 0 3px,
+        color-mix(in srgb,${m.base} 100%,#000) 3px 5px,
+        color-mix(in srgb,${m.base} 78%,#000) 5px 22px),
+      repeating-linear-gradient(4deg, rgba(0,0,0,.16) 0 1px, transparent 1px 64px)`;
+  }
+  if (m.tile) {
+    const t = m.tile / 2;
+    return `repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px ${t}px),
+      repeating-linear-gradient(90deg, rgba(0,0,0,.22) 0 1px, transparent 1px ${t}px),
+      linear-gradient(150deg, color-mix(in srgb,${m.base} 100%,#000), color-mix(in srgb,${m.base} 72%,#000))`;
+  }
+  if (m.soft) {
+    return `radial-gradient(circle at 30% 25%, color-mix(in srgb,${m.base} 100%,#000) 0%, color-mix(in srgb,${m.base} 74%,#000) 70%)`;
+  }
+  return `linear-gradient(150deg, color-mix(in srgb,${m.base} 96%,#000), color-mix(in srgb,${m.base} 70%,#000))`;
+}
+
 class CyborgDashboard extends HTMLElement {
   constructor() {
     super();
@@ -2640,6 +2706,47 @@ class CyborgDashboard extends HTMLElement {
    * dropped too. An explicit entity list is never filtered: if you chose it by
    * hand, you meant it.
    */
+  /**
+   * How lit a room actually is, right now.
+   *
+   * This is the thing a rendered image can never do. The floor and the walls
+   * take the colour and the intensity of the lights that are really on: a
+   * dimmer at 30% lights the room at 30%, a warm bulb makes it warm, and a
+   * room with everything off goes dark. The house on screen stops being a
+   * diagram of the house and starts being a picture of it.
+   */
+  _roomLight(room) {
+    const ids = this._roomAllEntities(room)
+      .filter((id) => ["light", "switch"].includes(domainOf(id)));
+    let on = 0, total = 0, sum = 0, kelvin = 0, kn = 0;
+    for (const id of ids) {
+      const st = this._hass.states[id];
+      if (!st) continue;
+      // Only light entities count towards how BRIGHT it is; a switch that
+      // happens to be in the room may be a boiler, and a boiler does not lay
+      // light on the floor.
+      const isLight = domainOf(id) === "light";
+      if (!isLight) continue;
+      total += 1;
+      if (!ON_STATES.has(st.state)) continue;
+      on += 1;
+      const b = num(st.attributes.brightness);
+      sum += b === null ? 1 : Math.max(0.12, b / 255);
+      const k = num(st.attributes.color_temp_kelvin);
+      if (k !== null) { kelvin += k; kn += 1; }
+    }
+    if (!total || !on) return { lit: 0, color: null, on: 0, total };
+    // Average of what is on, then scaled by how many of the room's lights are
+    // on: one lamp of four lit does not light the room like all four.
+    const avg = sum / on;
+    const share = 0.45 + 0.55 * (on / total);
+    return {
+      lit: Math.max(0, Math.min(1, avg * share)),
+      color: kn ? kelvinToHex(Math.round(kelvin / kn)) : "#ffd7a3",
+      on, total,
+    };
+  }
+
   _roomAllEntities(room) {
     const hidden = new Set(Array.isArray(room.hidden) ? room.hidden : []);
     if (Array.isArray(room.entities)) {
@@ -2775,7 +2882,7 @@ class CyborgDashboard extends HTMLElement {
       return `<div class="${cls.join(" ")}" data-wall="${i}"
         style="width:${e.len.toFixed(2)}px;height:${h.toFixed(2)}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
         transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);
-        opacity:${wt.opacity};filter:brightness(${e.shade.toFixed(3)})"></div>`;
+        opacity:${wt.opacity};--face:${e.shade.toFixed(3)}"></div>`;
     }).join("") : "";
 
     const [cx, cy] = polygonCentroid(pts);
@@ -2824,11 +2931,18 @@ class CyborgDashboard extends HTMLElement {
     if (dim) cls.push("dim");
     if (ghost) cls.push("ghost");
 
+    const lightState = ghost ? { lit: 0, color: null } : this._roomLight(room);
+    if (lightState.lit > 0.02) cls.push("lit");
+    const material = room.material || guessMaterial(room.title);
+    const layers = materialLayers(material);
+
     return `<div class="${cls.join(" ")}"
-        data-room="${esc(room.id)}" data-level="${level}"
-        style="--rc:${esc(room.color)};left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px;
+        data-room="${esc(room.id)}" data-level="${level}" data-material="${esc(material)}"
+        style="--rc:${esc(room.color)};--lit:${lightState.lit.toFixed(3)};${
+          lightState.color ? `--lc:${esc(lightState.color)};` : ""}left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px;
           transform:translateZ(${(level * gap).toFixed(2)}px)${rot ? ` rotateZ(${rot}deg)` : ""}">
-        <div class="fp-floor" style="clip-path:polygon(${poly})"></div>
+        <div class="fp-floor" style="clip-path:polygon(${poly})${
+          layers ? `;--mat:${layers}` : ""}"></div>
         <svg class="fp-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${pointsToSvg(pts)}"></polygon></svg>
         ${walls}
         ${spots}
@@ -3387,6 +3501,14 @@ class CyborgDashboard extends HTMLElement {
           </div>
           <div class="icon-palette">${SECTION_ICONS.map((i) =>
             `<button type="button" class="icon-swatch" data-icon-pick="${esc(i)}" title="${esc(i)}"><ha-icon icon="${esc(i)}"></ha-icon></button>`).join("")}</div>
+        </label>
+        <label>PAVIMENTO
+          <select data-room-prop="material">
+            <option value="">Automatico · ${esc((ROOM_MATERIALS[guessMaterial(room.title)] || {}).l || "neutro")}</option>
+            ${Object.keys(ROOM_MATERIALS).map((k) =>
+              `<option value="${esc(k)}" ${room.material === k ? "selected" : ""}>${esc(ROOM_MATERIALS[k].l)}</option>`).join("")}
+          </select>
+          <span class="hint">Il materiale è disegnato in CSS, senza immagini da ospitare da nessuna parte. In automatico viene dedotto dal nome della stanza.</span>
         </label>
       </div>
 
@@ -11037,7 +11159,28 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-room.focused{z-index:15}
 .fp-room.editable{cursor:grab}
 .fp-room.editable:active{cursor:grabbing}
-.fp-floor{position:absolute;inset:0;background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a));box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent)}
+/* The floor is three layers: the material, the room's own tint, and the light
+   actually falling on it. --lit is 0..1 and comes from the real bulbs, so a
+   dimmer at 30% really does light the room at 30%. */
+.fp-floor{position:absolute;inset:0;
+  background:var(--mat, linear-gradient(135deg,color-mix(in srgb,var(--rc) 26%,#0d141d),color-mix(in srgb,var(--rc) 9%,#0b111a)));
+  background-size:cover;
+  box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent),
+             inset 0 0 22px rgba(0,0,0,.55);
+  filter:brightness(calc(0.52 + 0.75 * var(--lit,0)))}
+/* The pool of light itself, thrown from above and fading outwards. Its own
+   layer so it can sit over the material without washing the pattern away. */
+.fp-floor::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 78% 72% at 50% 38%,
+    color-mix(in srgb,var(--lc,#ffd7a3) 58%,transparent) 0%,
+    color-mix(in srgb,var(--lc,#ffd7a3) 20%,transparent) 45%,
+    transparent 78%);
+  opacity:calc(var(--lit,0) * .85);mix-blend-mode:screen;transition:opacity .5s ease}
+/* Contact shadow: without this the volumes float and the whole scene reads as
+   flat coloured shapes, which is most of what made it look like a diagram. */
+.fp-room::after{content:"";position:absolute;left:4%;right:4%;top:8%;bottom:-2%;
+  border-radius:14px;background:rgba(0,0,0,.5);filter:blur(11px);
+  transform:translateZ(-2px);pointer-events:none;z-index:-1}
 /* The floor outline is an SVG polygon rather than a CSS border: a border is
    clipped away by clip-path, so a non-rectangular room would lose its edge. */
 .fp-outline{position:absolute;inset:0;overflow:visible;pointer-events:none}
@@ -11173,8 +11316,30 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .dev-group-head strong{flex:1;font:9px ui-monospace,monospace;letter-spacing:1.3px;text-transform:uppercase;opacity:.42;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cam-off small{display:block;margin-top:4px;font:9px ui-monospace,monospace;letter-spacing:.8px;opacity:.55}
-.fp-wall{position:absolute;background:linear-gradient(to top,color-mix(in srgb,var(--rc) 34%,#0a1017) 0%,color-mix(in srgb,var(--rc) 12%,#0a1017) 65%,color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0}
-.fp-wall.side{filter:brightness(.82)}
+/* Walls: dark at the base (ambient occlusion where they meet the floor),
+   brighter towards the top where the light is, and tinted by the light in the
+   room like the floor is. */
+.fp-wall{position:absolute;
+  background:linear-gradient(to top,
+    color-mix(in srgb,var(--rc) 34%,#070b11) 0%,
+    color-mix(in srgb,var(--rc) 12%,#0a1017) 55%,
+    color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);
+  border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0;
+  filter:brightness(calc((0.7 + 0.55 * var(--lit,0)) * var(--face,1)))}
+.fp-wall::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(to top,
+    color-mix(in srgb,var(--lc,#ffd7a3) 34%,transparent) 0%,
+    color-mix(in srgb,var(--lc,#ffd7a3) 8%,transparent) 60%, transparent 100%);
+  opacity:calc(var(--lit,0) * .8);mix-blend-mode:screen;transition:opacity .5s ease}
+/* A lit room spills light past its own walls, which is what stops the rooms
+   reading as separate coloured tiles.
+   NOT on .fp-room: a filter there flattens the preserve-3d subtree and the
+   whole scene collapses. On the floor, which is a leaf. */
+.fp-room.lit .fp-floor{box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent),
+  inset 0 0 22px rgba(0,0,0,.45),
+  0 0 30px color-mix(in srgb,var(--lc,#ffd7a3) calc(var(--lit,0) * 48%),transparent)}
+/* --face is the geometric shading of that wall's own orientation, set inline
+   per wall; the stylesheet multiplies it by the light in the room. */
 .fp-anchor{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d;pointer-events:none}
 .fp-tag{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:5px;width:max-content}
 .fp-label{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:99px;background:rgba(6,12,20,.82);border:1px solid color-mix(in srgb,var(--rc) 50%,transparent);backdrop-filter:blur(6px);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--rc);white-space:nowrap}
@@ -11587,7 +11752,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.34.0";
+const CYBORG_BUILD = "0.35.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

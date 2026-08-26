@@ -3032,6 +3032,63 @@ console.log("\n== 35. CONTROLLO TEMPERATURA ==");
   ok("stato ripristinato dopo la sezione 35", !states["climate.cdz_storm"]);
 }
 
+console.log("\n== 36. MATERIALI E LUCE VERA ==");
+{
+  ok("il pavimento viene dedotto dal nome della stanza",
+     guessMaterial("Bagno") === "piastrelle" && guessMaterial("Camera da letto") === "parquet"
+     && guessMaterial("Giardino") === "prato" && guessMaterial("Garage") === "cemento",
+     [guessMaterial("Bagno"), guessMaterial("Camera da letto")].join());
+  ok("un nome sconosciuto non inventa un materiale",
+     guessMaterial("Zona X") === "neutro");
+  ok("ogni materiale produce un disegno diverso",
+     new Set(["parquet","piastrelle","cemento","tappeto","prato"].map(materialLayers)).size === 5);
+  ok("il materiale neutro non impone niente", materialLayers("neutro") === "");
+
+  // -- la luce vera --
+  states["light.sala_a"] = S("off", { friendly_name: "Sala A", supported_color_modes: ["brightness"] });
+  states["light.sala_b"] = S("off", { friendly_name: "Sala B", supported_color_modes: ["brightness"] });
+  const room = { id: "r1", title: "Soggiorno", color: "#00e5ff", x: 0, y: 0, w: 200, h: 160,
+    level: 0, points: null, spots: {}, hidden: [], walls: [], rotation: 0,
+    entities: ["light.sala_a", "light.sala_b"], vehicles: [] };
+
+  ok("con tutto spento la stanza è al buio", el._roomLight(room).lit === 0);
+
+  states["light.sala_a"] = S("on", { friendly_name: "Sala A", brightness: 255,
+    supported_color_modes: ["brightness"] });
+  const half = el._roomLight(room);
+  ok("una luce accesa su due illumina, ma non del tutto",
+     half.lit > 0.5 && half.lit < 1, String(half.lit));
+
+  states["light.sala_b"] = S("on", { friendly_name: "Sala B", brightness: 255,
+    supported_color_modes: ["brightness"] });
+  const full = el._roomLight(room);
+  ok("accese tutte e due illumina di più", full.lit > half.lit, half.lit + " -> " + full.lit);
+
+  // the point a rendered image can never do: the dimmer moves the picture
+  states["light.sala_a"] = S("on", { friendly_name: "Sala A", brightness: 26,
+    supported_color_modes: ["brightness"] });
+  states["light.sala_b"] = S("on", { friendly_name: "Sala B", brightness: 26,
+    supported_color_modes: ["brightness"] });
+  const dim = el._roomLight(room);
+  ok("abbassando il dimmer la stanza si abbassa davvero",
+     dim.lit < full.lit * 0.5, full.lit + " -> " + dim.lit);
+  ok("ma non arriva mai a zero mentre è accesa", dim.lit > 0);
+
+  states["light.sala_a"] = S("on", { friendly_name: "Sala A", brightness: 255,
+    color_temp_kelvin: 2700, supported_color_modes: ["color_temp"] });
+  ok("il colore della luce viene dalla lampadina",
+     /^#/.test(el._roomLight(room).color || ""), String(el._roomLight(room).color));
+
+  // a boiler in the room is not a lamp
+  states["switch.caldaia"] = S("on", { friendly_name: "Caldaia" });
+  room.entities = ["switch.caldaia"];
+  ok("un interruttore qualsiasi non fa luce", el._roomLight(room).lit === 0);
+  room.entities = ["light.sala_a", "light.sala_b"];
+
+  for (const id of ["light.sala_a","light.sala_b","switch.caldaia"]) delete states[id];
+  ok("stato ripristinato dopo la sezione 36", !states["light.sala_a"]);
+}
+
 console.log("\n" + "=".repeat(46));
 console.log(pass + " passati, " + fail + " falliti");
 process.exit(fail ? 1 : 0);

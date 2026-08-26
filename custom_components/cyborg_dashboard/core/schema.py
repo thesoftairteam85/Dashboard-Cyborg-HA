@@ -133,6 +133,10 @@ MONITOR_GROUP_KEYS = ("voltage", "current", "temperature", "frequency",
 
 #: What can stand on one side of a room. "open" is a real choice — an archway
 #: between kitchen and living room is not a wall — so it has to be storable.
+#: Mirrors ROOM_MATERIALS in www/cyborg-dashboard.js — keep the two in step.
+ROOM_MATERIAL_KEYS = ("parquet", "piastrelle", "cemento", "tappeto", "pietra",
+                      "prato", "acqua", "neutro")
+
 WALL_TYPE_KEYS = ("wall", "glass", "window", "door", "garage", "railing",
                   "stairs", "open")
 
@@ -187,6 +191,12 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     walls = result.get("walls")
     result["walls"] = ([w if w in WALL_TYPE_KEYS else "wall" for w in walls][:24]
                        if isinstance(walls, list) else [])
+
+    # Floor material. Empty means "work it out from the name", so a room added
+    # later gets a sensible floor without anybody choosing one, while a room
+    # whose material was set keeps it.
+    material = result.get("material")
+    result["material"] = (material if material in ROOM_MATERIAL_KEYS else "")
 
     # Vehicles parked in this room, by id. The garage is a room like any other;
     # what makes it a garage is that a car is in it.

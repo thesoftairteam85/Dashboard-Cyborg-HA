@@ -350,6 +350,21 @@ window.__mount=(dash,opts)=>{
             appearance:{},states:{},actions:{},rooms:[],bands:{},filter:""});
           if(opts.selectComfort){el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"cfcard"};}
         }
+        if(opts&&opts.lightsOn!==undefined&&el._rooms().length){
+          // first room lit to a known level, second deliberately dark, so the
+          // two can be compared against each other in the same screenshot
+          const r0=el._rooms()[0], r1=el._rooms()[1];
+          el._hass.states["light.scena_a"]={entity_id:"light.scena_a",
+            state:opts.lightsOn?"on":"off",
+            attributes:{friendly_name:"Scena A",brightness:opts.lightsOn||255,
+              color_temp_kelvin:2700,supported_color_modes:["color_temp"]}};
+          r0.entities=["light.scena_a"];
+          if(r1){
+            el._hass.states["light.scena_b"]={entity_id:"light.scena_b",state:"off",
+              attributes:{friendly_name:"Scena B",supported_color_modes:["brightness"]}};
+            r1.entities=["light.scena_b"];
+          }
+        }
         if(opts&&opts.rotate&&el._rooms().length){ el._rooms()[0].rotation=35; }
         if(opts&&opts.balcony&&el._rooms().length){
           // the reported real case: one wall, a French window, railings on the

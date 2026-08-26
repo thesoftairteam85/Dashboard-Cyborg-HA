@@ -723,6 +723,76 @@ const DEFAULT_DASH = {
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
 
+  console.log("\n== MATERIALI E LUCE ==");
+  const readRoom = async (opts) => {
+    await page.goto("http://127.0.0.1:8899/harness.html");
+    await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+    await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+    await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o), opts);
+    await page.waitForTimeout(700);
+    return page.evaluate(() => {
+      const rooms = Array.from(document.querySelectorAll(".fp-room")).slice(0, 2).map((r) => {
+        const floor = r.querySelector(".fp-floor");
+        const cs = getComputedStyle(floor);
+        const after = getComputedStyle(floor, "::after");
+        const wall = r.querySelector(".fp-wall");
+        return { lit: r.classList.contains("lit"),
+          litVar: Number(getComputedStyle(r).getPropertyValue("--lit")) || 0,
+          material: r.getAttribute("data-material"),
+          filter: cs.filter,
+          hasMat: cs.backgroundImage !== "none" && cs.backgroundImage.length > 10,
+          poolOpacity: Number(after.opacity),
+          wallFilter: wall ? getComputedStyle(wall).filter : null };
+      });
+      return { rooms };
+    });
+  };
+
+  const dark = await readRoom({ pageIndex: 1, autoRooms: true, lightsOn: 0 });
+  const bright = await readRoom({ pageIndex: 1, autoRooms: true, lightsOn: 255 });
+  const dimmed = await readRoom({ pageIndex: 1, autoRooms: true, lightsOn: 40 });
+
+  ok("una stanza al buio non è marcata come illuminata",
+     dark.rooms[0].lit === false && dark.rooms[0].litVar === 0, JSON.stringify(dark.rooms[0]));
+  ok("accendendo la luce la stanza si illumina",
+     bright.rooms[0].lit === true && bright.rooms[0].litVar > 0.5,
+     JSON.stringify(bright.rooms[0].litVar));
+
+  // the pixels must actually change, not just the class
+  const bri = (f) => { const m = /brightness\(([\d.]+)\)/.exec(f || ""); return m ? Number(m[1]) : null; };
+  ok("il pavimento acceso è davvero più chiaro di quello spento",
+     bri(bright.rooms[0].filter) > bri(dark.rooms[0].filter),
+     bri(dark.rooms[0].filter) + " -> " + bri(bright.rooms[0].filter));
+  ok("e anche i muri",
+     bri(bright.rooms[0].wallFilter) > bri(dark.rooms[0].wallFilter),
+     bri(dark.rooms[0].wallFilter) + " -> " + bri(bright.rooms[0].wallFilter));
+  ok("la pozza di luce sul pavimento compare solo da accesa",
+     dark.rooms[0].poolOpacity < 0.02 && bright.rooms[0].poolOpacity > 0.3,
+     dark.rooms[0].poolOpacity + " -> " + bright.rooms[0].poolOpacity);
+
+  // the thing a rendered image can never do
+  ok("il dimmer a un sesto illumina davvero meno",
+     dimmed.rooms[0].litVar > 0 && dimmed.rooms[0].litVar < bright.rooms[0].litVar * 0.6,
+     dimmed.rooms[0].litVar + " vs " + bright.rooms[0].litVar);
+  ok("e si vede sul pavimento, non solo nel dato",
+     bri(dimmed.rooms[0].filter) < bri(bright.rooms[0].filter),
+     bri(dimmed.rooms[0].filter) + " vs " + bri(bright.rooms[0].filter));
+
+  // a lit room next to a dark one, in the same picture
+  ok("due stanze accanto con luci diverse si distinguono",
+     bright.rooms[1] && bright.rooms[1].lit === false
+     && bri(bright.rooms[0].filter) > bri(bright.rooms[1].filter),
+     JSON.stringify([bri(bright.rooms[0].filter), bri(bright.rooms[1].filter)]));
+
+  ok("ogni stanza ha un materiale sul pavimento",
+     bright.rooms.every((r) => r.hasMat && r.material),
+     JSON.stringify(bright.rooms.map((r) => r.material)));
+
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true, lightsOn: 255 });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: path.resolve(__dirname, "60-map-lit.png") });
+
   console.log("\n== GERARCHIA DEI CARICHI ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
