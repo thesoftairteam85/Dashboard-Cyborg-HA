@@ -8,6 +8,16 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v12 hierarchy                           re-seeded from the cards once more: the
+                                        v10 pass only ran for dashboards older
+                                        than 10, so a parent declared AFTER
+                                        that migration never reached the
+                                        shared map and only one card honoured
+                                        it.
+v11 items[].grouping                    a room card groups by state (on/off)
+                                        instead of by kind of device; the
+                                        default applies to existing cards too,
+                                        because the key had never been stored.
 v5  pages[].rooms[].level                a room sits on a storey; the map became
     pages[].rooms[].points               genuinely three-dimensional. Rooms also
     pages[].rooms[].spots                gained a free polygon footprint and a
@@ -27,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -435,6 +445,15 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         except (TypeError, ValueError):
             result["max_readings"] = 4
         result["show_others"] = bool(result.get("show_others", True))
+        # How the room's devices are grouped. "state" splits them into what is
+        # on and what is off, which is the only grouping that answers the
+        # question a wall tablet is actually asked ("what is running, and what
+        # do I switch on"). "domain" is the older grouping by kind and stays
+        # available per card. The default is "state" for every card, existing
+        # ones included: the key never existed before, so there is no stored
+        # choice to overrule - only a default to pick.
+        result["grouping"] = ("domain" if result.get("grouping") == "domain"
+                              else "state")
     if result.get("type") == "monitor":
         # Per-group threshold overrides. Only known groups and known keys
         # survive; a value that will not parse is dropped so the panel falls
@@ -813,7 +832,7 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
     # v10: seed it from whatever the cards already declared, so an existing
     # installation keeps the hierarchy it configured and immediately gets it
     # in both cards instead of one.
-    if stored_version and stored_version < 10:
+    if stored_version and stored_version < 12:
         for page in result["pages"] if isinstance(result.get("pages"), list) else []:
             for section in page.get("sections") or []:
                 for card in section.get("items") or []:

@@ -307,6 +307,12 @@ const DEFAULT_DASH = {
     return {
       count: cards.length,
       areas: Array.from(document.querySelectorAll("[data-room-lights-off]")).map((b) => b.getAttribute("data-room-lights-off")),
+      areasWithLightOn: (() => {
+        const el = window.__EL__;
+        const reg = el._registry || { byArea: {} };
+        return Object.keys(reg.byArea).filter((a) => (reg.byArea[a] || []).some((id) =>
+          id.startsWith("light.") && el._hass.states[id] && el._hass.states[id].state === "on"));
+      })(),
       withReadings: cards.filter((c) => c.querySelector(".rc-strip")).length,
       covers: document.querySelectorAll(".rc-cover").length,
       coverCmds: Array.from(document.querySelectorAll("[data-cover-cmd]")).map((b) => b.getAttribute("data-cover-cmd").split("|")[1]),
@@ -314,7 +320,13 @@ const DEFAULT_DASH = {
     };
   });
   ok("aprendole tutte c'è una card per ogni area", rc.count === 5, String(rc.count));
-  ok("ogni stanza con luci ha lo spegnimento di gruppo", rc.areas.length >= 4, rc.areas.join());
+  // Raggruppando per stato il pulsante vive nell'intestazione "Accesi", quindi
+  // compare dove serve e sparisce dove non servirebbe a niente: un "spegni le
+  // luci" in una stanza al buio e' un bersaglio che occupa spazio e non fa nulla.
+  ok("lo spegnimento di gruppo compare in tutte e sole le stanze con una luce accesa",
+     rc.areasWithLightOn.length > 0
+     && rc.areas.slice().sort().join() === rc.areasWithLightOn.slice().sort().join(),
+     rc.areas.join() + "  vs  " + rc.areasWithLightOn.join());
   ok("le letture salgono in testa alla card", rc.withReadings >= 3, String(rc.withReadings));
   ok("le tapparelle hanno i tre comandi giusti",
      rc.covers > 0 && rc.coverCmds.every((c) => ["open_cover", "stop_cover", "close_cover"].includes(c)),
@@ -722,6 +734,131 @@ const DEFAULT_DASH = {
      list.rows.every((r, i) => i === 0 || r.t >= list.rows[i - 1].t + list.rows[i - 1].h - 1));
   ok("telefono: ogni riga dice nome e valore", list.rows.every((r) => r.text.length > 3));
   await phone.close();
+
+  console.log("\n== ACCESI E SPENTI ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, rooms: true });
+  await page.waitForTimeout(900);
+
+  // every room section open, so the whole house can be measured at once
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    for (const s of el._sections()) s.collapsed = false;
+    el._signature = ""; el.render();
+  });
+  await page.waitForTimeout(500);
+
+  const read = () => page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll(".rc")).map((rc) => {
+      const on = rc.querySelector(".rc-block.on-now");
+      const off = rc.querySelector(".rc-block.off-now");
+      const box = (b) => {
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right),
+          count: Number((b.querySelector("header em") || {}).textContent || 0),
+          rows: Array.from(b.querySelectorAll(".rc-row, .rc-cover, .li-item")).length,
+          names: Array.from(b.querySelectorAll(".rc-row > span, .rc-cover > span, .li-name"))
+            .map((x) => x.textContent.trim()),
+          headColor: getComputedStyle(b.querySelector("header")).color };
+      };
+      return { on: box(on), off: box(off),
+        title: (rc.closest(".card") || {}).textContent ? "" : "" };
+    }).filter((c) => c.on || c.off);
+    return { cards, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+
+  const rooms = await read();
+  ok("le stanze si presentano con accesi e spenti",
+     rooms.cards.length >= 3, String(rooms.cards.length));
+  ok("gli accesi stanno sempre sopra gli spenti",
+     rooms.cards.every((c) => !c.on || !c.off || c.on.top < c.off.top),
+     JSON.stringify(rooms.cards.map((c) => [c.on && c.on.top, c.off && c.off.top])));
+  ok("il conteggio dichiarato è quello delle righe disegnate",
+     rooms.cards.every((c) => (!c.on || c.on.count === c.on.rows)
+       && (!c.off || c.off.count === c.off.rows)),
+     JSON.stringify(rooms.cards.map((c) => [c.on && [c.on.count, c.on.rows], c.off && [c.off.count, c.off.rows]])));
+  ok("nessun dispositivo compare in tutte e due le sezioni",
+     rooms.cards.every((c) => !c.on || !c.off
+       || !c.on.names.some((n) => c.off.names.includes(n))),
+     JSON.stringify(rooms.cards.map((c) => [c.on && c.on.names, c.off && c.off.names])));
+  // the two sections must be told apart at a glance, not read word by word
+  ok("le due sezioni si distinguono a colpo d'occhio",
+     rooms.cards.every((c) => !c.on || !c.off || c.on.headColor !== c.off.headColor),
+     JSON.stringify(rooms.cards.map((c) => c.on && [c.on.headColor, c.off && c.off.headColor])));
+  ok("niente scorrimento orizzontale", rooms.scrollW <= rooms.winW + 1,
+     rooms.scrollW + " vs " + rooms.winW);
+
+  await page.screenshot({ path: path.resolve(__dirname, "62-on-off.png") });
+
+  // the whole point: switching something off moves it, by itself, to the
+  // section where it can be switched back on
+  const movedLoad = await page.evaluate(async () => {
+    const el = window.__EL__;
+    el._hass.callService = (d, s2, data) => {
+      const ids = [].concat(data.entity_id);
+      for (const id of ids) {
+        const st = el._hass.states[id];
+        // "toggle" is the service the rows actually call: a stub that only
+        // understood turn_on/turn_off left the state untouched and the test
+        // green for the wrong reason.
+        const next = s2 === "toggle" ? (st.state === "on" ? "off" : "on")
+          : s2 === "turn_off" ? "off" : "on";
+        el._hass.states[id] = { ...st, state: next };
+      }
+      el._signature = ""; el.render();
+    };
+    const before = document.querySelector(".rc-block.on-now [data-toggle-entity]");
+    if (!before) return { skipped: true };
+    const id = before.getAttribute("data-toggle-entity");
+    const name = (before.closest(".rc-row").querySelector("span") || {}).textContent;
+    before.click();
+    await new Promise((r) => setTimeout(r, 400));
+    const nowOn = document.querySelector(`.rc-block.on-now [data-toggle-entity="${id}"]`);
+    const nowOff = document.querySelector(`.rc-block.off-now [data-toggle-entity="${id}"]`);
+    const back = nowOff ? nowOff.getBoundingClientRect() : null;
+    return { id, name, inOn: !!nowOn, inOff: !!nowOff,
+      tappable: back ? Math.min(Math.round(back.width), Math.round(back.height)) : 0 };
+  });
+  ok("un carico spento lascia la sezione degli accesi",
+     movedLoad.skipped !== true && movedLoad.inOn === false, JSON.stringify(movedLoad));
+  ok("e ricompare fra gli spenti, dove si riaccende",
+     movedLoad.inOff === true, JSON.stringify(movedLoad));
+  ok("il comando per riaccenderlo è toccabile", movedLoad.tappable >= 24, String(movedLoad.tappable));
+
+  // on a phone, where the tablets actually live
+  const phoneRc = await browser.newPage({ viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneRc.on("pageerror", (e) => errors.push("PHONE-ONOFF: " + e.message));
+  await phoneRc.goto("http://127.0.0.1:8899/harness.html");
+  await phoneRc.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneRc.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneRc.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, rooms: true });
+  await phoneRc.waitForTimeout(900);
+  const prc = await phoneRc.evaluate(() => {
+    const on = document.querySelector(".rc-block.on-now");
+    const off = document.querySelector(".rc-block.off-now");
+    const rows = Array.from(document.querySelectorAll(".rc-block.on-now .rc-row, .rc-block.off-now .rc-row, .rc-block.on-now .li-row, .rc-block.off-now .li-row"))
+      .map((r) => { const b = r.getBoundingClientRect();
+        return { h: Math.round(b.height), right: Math.round(b.right), cls: r.className }; });
+    return { hasOn: !!on, hasOff: !!off, rows,
+      winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: le due sezioni ci sono", prc.hasOn || prc.hasOff, JSON.stringify(prc).slice(0, 100));
+  // includes the rows without a round icon button (clima, sicurezza): those
+  // collapsed to 33px, the smallest target on the page and the one most used
+  ok("telefono: ogni riga è grande abbastanza per un pollice",
+     prc.rows.length > 0 && prc.rows.every((r) => r.h >= 44), JSON.stringify(prc.rows));
+  ok("telefono: niente esce dallo schermo",
+     prc.rows.every((r) => r.right <= prc.winW + 1), JSON.stringify(prc.rows.map((r) => r.right)));
+  ok("telefono: nessuno scorrimento orizzontale", prc.scrollW <= prc.winW + 1,
+     prc.scrollW + " vs " + prc.winW);
+  await phoneRc.screenshot({ path: path.resolve(__dirname, "63-phone-on-off.png") });
+  await phoneRc.close();
 
   console.log("\n== DISPOSITIVI SENZA AREA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");

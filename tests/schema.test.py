@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "custom_compone
 import schema
 
 d = schema.default_dashboard()
-assert d["version"] == 10 and len(d["pages"][1]["sections"]) == 6
+assert d["version"] == schema.SCHEMA_VERSION and len(d["pages"][1]["sections"]) == 6
 
 v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c1", "entity_id": "alarm_control_panel.allarme", "section": "Sicurezza"},
@@ -13,7 +13,7 @@ v2 = {"version": 2, "revision": 7, "pages": [{"id": "home", "items": [
     {"id": "c4", "entity_id": "event.backup"}]}]}
 m = schema.normalize_dashboard(v2)
 secs = m["pages"][0]["sections"]
-assert m["version"] == 10 and m["revision"] == 7
+assert m["version"] == schema.SCHEMA_VERSION and m["revision"] == 7
 assert len(secs) == 3 and len(secs[1]["items"]) == 2, "case-insensitive merge"
 assert secs[2]["title"] == "Generale"
 assert "items" not in m["pages"][0], "legacy items must be dropped"
@@ -25,7 +25,7 @@ print("schema: all tests passed")
 
 # ---- v4: floorplan pages ---------------------------------------------------
 d = schema.default_dashboard()
-assert d["version"] == 10
+assert d["version"] == schema.SCHEMA_VERSION
 assert [p["type"] for p in d["pages"]] == ["sections", "sections", "floorplan"]
 assert [p["id"] for p in d["pages"]] == ["overview", "home", "map"]
 assert d["pages"][0]["sections"] == [], "la panoramica parte vuota, si compone in un click"
@@ -35,7 +35,7 @@ assert d["pages"][2]["view"]["pitch"] == 56 and d["pages"][2]["rooms"] == []
 v3 = {"version": 3, "pages": [{"id": "home", "sections": [
     {"id": "s", "title": "X", "items": [{"id": "c", "entity_id": "light.a"}]}]}]}
 r = schema.normalize_dashboard(v3)
-assert r["version"] == 10
+assert r["version"] == schema.SCHEMA_VERSION
 assert r["pages"][0]["type"] == "sections"
 assert r["pages"][0]["sections"][0]["items"][0]["entity_id"] == "light.a"
 assert "rooms" not in r["pages"][0] and "view" not in r["pages"][0]
@@ -231,7 +231,7 @@ stored = {"version": 4, "revision": 12, "pages": [
                 "area_id": "salotto", "entities": None}]}]}
 mig = schema.normalize_dashboard(stored)
 room = mig["pages"][0]["rooms"][0]
-assert mig["version"] == 10 and mig["revision"] == 12
+assert mig["version"] == schema.SCHEMA_VERSION and mig["revision"] == 12
 assert room["title"] == "Salotto" and room["area_id"] == "salotto" and room["w"] == 230
 assert room["level"] == 0 and room["points"] is None and room["spots"] == {}
 assert mig["pages"][0]["view"]["level_gap"] == 150
@@ -379,7 +379,7 @@ assert [v["id"] for v in d6["vehicles"]] == ["ev1", "ev1-2"], [v["id"] for v in 
 assert d6["vehicles"][0]["capacity"] == 60.0
 assert d6["vehicles"][0]["charging"] == "binary_sensor.ch"
 assert d6["vehicles"][0]["range"] is None
-assert d6["version"] == 10
+assert d6["version"] == schema.SCHEMA_VERSION
 # a vehicle with no entity at all would be a name and nothing else
 assert all(v["name"] != "Senza entita" for v in d6["vehicles"])
 assert all(v["name"] != "" for v in d6["vehicles"])
@@ -417,7 +417,7 @@ old5 = {"version": 5, "revision": 3, "pages": [
         {"id": "s", "title": "Energia", "icon": "mdi:flash", "accent": "#ffd166",
          "items": [{"id": "c", "type": "energyflow", "entity_id": "", "flow": {"grid": "sensor.g"}}]}]}]}
 m6 = schema.normalize_dashboard(old5)
-assert m6["version"] == 10 and m6["revision"] == 3 and m6["vehicles"] == []
+assert m6["version"] == schema.SCHEMA_VERSION and m6["revision"] == 3 and m6["vehicles"] == []
 assert m6["pages"][0]["sections"][0]["items"][0]["flow"]["grid"] == "sensor.g"
 assert schema.normalize_dashboard(m6) == m6
 
@@ -470,7 +470,7 @@ old_doc = {"version": 7, "revision": 4, "pages": [
 mig8 = schema.normalize_dashboard(old_doc)
 lights_card = mig8["pages"][0]["sections"][0]["items"][0]
 room_card = mig8["pages"][0]["sections"][0]["items"][1]
-assert mig8["version"] == 10
+assert mig8["version"] == schema.SCHEMA_VERSION
 assert lights_card["row_action"] == "more-info", lights_card
 # the room card's setting DID work, so it must be left exactly as chosen
 assert room_card["row_action"] == "toggle", room_card
@@ -533,7 +533,7 @@ old_rooms = {"version": 8, "revision": 3, "pages": [
     ]}]}
 mig9 = schema.normalize_dashboard(old_rooms)
 secs9 = mig9["pages"][0]["sections"]
-assert mig9["version"] == 10
+assert mig9["version"] == schema.SCHEMA_VERSION
 titles9 = [s["title"] for s in secs9]
 # the accordion is replaced IN PLACE by the sections it contained
 assert titles9 == ["Meteo", "Soggiorno", "Cucina", "Bagno", "Misto"], titles9
@@ -572,7 +572,7 @@ old_h = {"version": 9, "revision": 2, "pages": [
                 {"entity": "sensor.presa"}, {"entity": "sensor.friggitrice"}]}},
         ]}]}]}
 mig10 = schema.normalize_dashboard(old_h)
-assert mig10["version"] == 10
+assert mig10["version"] == schema.SCHEMA_VERSION
 assert mig10["hierarchy"] == {"sensor.friggitrice": "sensor.presa"}, mig10["hierarchy"]
 # a fresh dashboard simply has none
 assert schema.normalize_dashboard(None)["hierarchy"] == {}
@@ -609,3 +609,67 @@ assert chain["hierarchy"] == {"sensor.a": "sensor.b", "sensor.b": "sensor.c"}
 assert schema.normalize_dashboard(mig10)["hierarchy"] == mig10["hierarchy"]
 
 print("schema: rotazione, azione di riga ed esclusioni ok")
+
+# --- v11: una card stanza si raggruppa per stato, non per tipo ---------------
+# La chiave non era mai stata memorizzata prima, quindi non c'e' una scelta
+# dell'utente da rispettare: c'e' solo un default da scegliere, e il default e'
+# quello che serve a un tablet a muro.
+def _room(**kw):
+    item = {"id": "rc", "type": "room", "area": "cucina"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+assert schema.SCHEMA_VERSION == 12, schema.SCHEMA_VERSION
+assert _room()["grouping"] == "state", _room()["grouping"]
+assert _room(grouping="domain")["grouping"] == "domain"
+# qualunque valore inventato ricade sul default, non passa cosi' com'e'
+for junk in ("stato", "", None, 7, [], {"a": 1}, "STATE", "Domain"):
+    assert _room(grouping=junk)["grouping"] == "state", junk
+# una card gia' esistente, senza la chiave, adotta il nuovo default
+old_card = {"id": "rc", "type": "room", "area": "cucina", "hidden": ["switch.x"],
+            "max_readings": 2, "show_others": False}
+norm = schema.normalize_item(old_card, 0)
+assert norm["grouping"] == "state"
+# ...senza perdere niente di quello che l'utente aveva gia' scelto
+assert norm["hidden"] == ["switch.x"]
+assert norm["max_readings"] == 2
+assert norm["show_others"] is False
+# e la scelta, una volta fatta, sopravvive a un giro completo di salvataggio
+dash = schema.normalize_dashboard({"version": 10, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "rc", "type": "room", "area": "cucina", "grouping": "domain"}]}]}]})
+assert dash["version"] == schema.SCHEMA_VERSION
+assert dash["pages"][0]["sections"][0]["items"][0]["grouping"] == "domain"
+assert schema.normalize_dashboard(dash)["pages"][0]["sections"][0]["items"][0]["grouping"] == "domain"
+# la card di un altro tipo non guadagna la chiave
+assert "grouping" not in schema.normalize_item({"id": "x", "type": "lights"}, 0)
+
+print("schema: raggruppamento accesi/spenti ok")
+
+
+# --- v12: la gerarchia dichiarata dopo la v10 arriva comunque alla mappa -----
+d12 = schema.normalize_dashboard({"version": 11, "hierarchy": {}, "pages": [
+    {"id": "p", "title": "P", "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "eco", "type": "economy", "devices": [
+            {"entity": "sensor.quadro_energia"},
+            {"entity": "sensor.presa_energia", "parent": "sensor.quadro_energia"},
+            {"entity": "sensor.frigg_energia", "parent": "sensor.presa_energia"}]}]}]}]})
+assert d12["version"] == 12, d12["version"]
+assert d12["hierarchy"] == {"sensor.presa_energia": "sensor.quadro_energia",
+                            "sensor.frigg_energia": "sensor.presa_energia"}, d12["hierarchy"]
+
+# una dashboard gia' a 12 non viene riseminata: togliere un padre deve restare tolto
+d12b = dict(d12)
+d12b["hierarchy"] = {}
+assert schema.normalize_dashboard(d12b)["hierarchy"] == {}
+
+# la semina non inventa legami fuori dalle card
+d12c = schema.normalize_dashboard({"version": 9, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "f", "type": "energyflow", "flow": {"devices": [
+            {"entity": "sensor.a_potenza"},
+            {"entity": "sensor.b_potenza", "parent": "sensor.a_potenza"}]}}]}]}]})
+assert d12c["hierarchy"] == {"sensor.b_potenza": "sensor.a_potenza"}, d12c["hierarchy"]
+
+print("schema: risemina della gerarchia (v12) ok")

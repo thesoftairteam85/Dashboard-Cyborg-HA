@@ -1516,7 +1516,8 @@ console.log("\n== 21. CARD STANZA ==");
   states["binary_sensor.sog_porta"] = S("off", { friendly_name: "Porta", device_class: "door" });
 
   const card = { id: "rc1", type: "room", entity_id: "", name: "Soggiorno", size: "md",
-    appearance: {}, states: {}, actions: {}, area: "soggiorno", hidden: [], max_readings: 4, show_others: true };
+    appearance: {}, states: {}, actions: {}, area: "soggiorno", hidden: [], max_readings: 4,
+    show_others: true, grouping: "domain" };
   const h = el._roomCardBody(card);
   ok("la card raccoglie i dispositivi dell'area", el._roomCardEntities(card).length === 8,
      String(el._roomCardEntities(card).length));
@@ -3270,9 +3271,286 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
     el._error = "";
     ok("stato ripristinato dopo la sezione 37", !states["switch.induzione"]);
 
-    console.log("\n" + "=".repeat(46));
-    console.log(pass + " passati, " + fail + " falliti");
-    process.exit(fail ? 1 : 0);
+    console.log("\n== 38. ACCESI E SPENTI ==");
+    {
+      // What a wall tablet is actually asked: what is running, and what do I
+      // switch on. Turning something off has to move it, by itself, into the
+      // section where it can be switched back on.
+      el._registry = { areas: [{ area_id: "sala", name: "Sala" }],
+        byArea: { sala: ["light.sa_1", "light.sa_2", "climate.sa", "cover.sa_tap",
+                         "switch.sa_presa", "input_boolean.sa_vacanza",
+                         "camera.sa_cam", "sensor.sa_t", "binary_sensor.sa_porta"] },
+        entityArea: {}, category: {}, entityDevice: {}, deviceName: {}, orphans: [] };
+      states["light.sa_1"] = S("on", { friendly_name: "Faretti", supported_color_modes: ["brightness"], brightness: 200 });
+      states["light.sa_2"] = S("off", { friendly_name: "Piantana", supported_color_modes: ["brightness"] });
+      states["climate.sa"] = S("off", { friendly_name: "Condizionatore", current_temperature: 26 });
+      states["cover.sa_tap"] = S("open", { friendly_name: "Tapparella", current_position: 0 });
+      states["switch.sa_presa"] = S("on", { friendly_name: "Presa TV" });
+      states["input_boolean.sa_vacanza"] = S("off", { friendly_name: "Modalità vacanza" });
+      states["camera.sa_cam"] = S("idle", { friendly_name: "Telecamera sala" });
+      states["sensor.sa_t"] = S("26.0", { friendly_name: "Sala Temperatura", device_class: "temperature", unit_of_measurement: "°C" });
+      states["binary_sensor.sa_porta"] = S("on", { friendly_name: "Porta", device_class: "door" });
+
+      const rc = { id: "rc2", type: "room", entity_id: "", name: "Sala", size: "md",
+        appearance: {}, states: {}, actions: {}, area: "sala", hidden: [],
+        max_readings: 4, show_others: true, grouping: "state" };
+      const body = el._roomCardBody(rc);
+      const sect = (name) => {
+        const i = body.indexOf(">" + name + "<");
+        if (i < 0) return "";
+        const end = body.indexOf("</section>", i);
+        return body.slice(i, end < 0 ? body.length : end);
+      };
+      ok("la card ha le due sezioni", /Accesi/.test(body) && /Spenti/.test(body),
+         body.slice(0, 120));
+      const acc = sect("Accesi"), spe = sect("Spenti");
+      ok("una luce accesa sta fra gli accesi", acc.includes("Faretti") && !spe.includes("Faretti"));
+      ok("una luce spenta sta fra gli spenti", spe.includes("Piantana") && !acc.includes("Piantana"));
+      ok("una presa accesa sta fra gli accesi", acc.includes("Presa TV") && !spe.includes("Presa TV"));
+      ok("un input boolean spento sta fra gli spenti",
+         spe.includes("Modalità vacanza") && !acc.includes("Modalità vacanza"));
+      // "open" con posizione 0 è la trappola: lo stato dice aperta, la
+      // posizione dice chiusa, e la posizione è quella che si vede
+      ok("una tapparella a zero è spenta anche se lo stato dice aperta",
+         spe.includes("Tapparella") && !acc.includes("Tapparella"));
+      ok("un clima in off è spento", spe.includes("Condizionatore") && !acc.includes("Condizionatore"));
+      ok("i conteggi dicono il vero", /<strong>Accesi<\/strong><em>2<\/em>/.test(body)
+         && /<strong>Spenti<\/strong><em>4<\/em>/.test(body),
+         (body.match(/<strong>(Accesi|Spenti)<\/strong><em>\d+<\/em>/g) || []).join());
+
+      // things that are neither on nor off must not be sorted as if they were
+      ok("la telecamera non finisce fra gli spenti",
+         !spe.includes("Telecamera sala") && !acc.includes("Telecamera sala")
+         && body.includes("Videocamere"));
+      ok("un contatto porta non è un carico da accendere",
+         !acc.includes(">Porta<") && !spe.includes(">Porta<"));
+      ok("la lettura resta in testa", body.includes("rc-strip") && body.includes("26.0"));
+
+      // the move itself: spegnere un carico lo sposta, senza toccare la config
+      states["switch.sa_presa"] = S("off", { friendly_name: "Presa TV" });
+      const after = el._roomCardBody(rc);
+      const acc2 = (() => { const i = after.indexOf(">Accesi<");
+        return i < 0 ? "" : after.slice(i, after.indexOf("</section>", i)); })();
+      const spe2 = (() => { const i = after.indexOf(">Spenti<");
+        return i < 0 ? "" : after.slice(i, after.indexOf("</section>", i)); })();
+      ok("spegnendo un carico si sposta da solo nella sezione sotto",
+         spe2.includes("Presa TV") && !acc2.includes("Presa TV"));
+      ok("e da lì si può riaccendere",
+         spe2.includes('data-toggle-entity="switch.sa_presa"'));
+      states["switch.sa_presa"] = S("on", { friendly_name: "Presa TV" });
+
+      // il proprietario decide cosa si vede, in entrambe le sezioni
+      rc.hidden = ["input_boolean.sa_vacanza"];
+      const hid = el._roomCardBody(rc);
+      ok("un'entità nascosta non compare né fra gli accesi né fra gli spenti",
+         !hid.includes("Modalità vacanza"));
+      ok("le altre restano", hid.includes("Faretti") && hid.includes("Presa TV"));
+      rc.hidden = [];
+
+      // il raggruppamento per tipo resta disponibile per chi lo preferisce
+      rc.grouping = "domain";
+      const dom = el._roomCardBody(rc);
+      ok("per tipo torna ai blocchi di prima",
+         dom.includes("Luci") && dom.includes("Aperture") && !/>Accesi</.test(dom));
+      ok("e la telecamera resta al suo posto anche lì", dom.includes("Videocamere"));
+      rc.grouping = "state";
+
+      ok("solo la sezione accesi offre lo spegnimento luci",
+         acc.includes('data-room-lights-off="sala"') && !spe.includes("data-room-lights-off"));
+      ok("card accesi/spenti: nessun undefined",
+         !/>undefined</.test(body) && !body.includes("[object"));
+
+      // deviceOn da solo, sui casi limite
+      ok("una tapparella a metà è accesa",
+         deviceOn("cover.x", { state: "open", attributes: { current_position: 40 } }));
+      ok("senza posizione vale lo stato",
+         deviceOn("cover.x", { state: "open", attributes: {} })
+         && !deviceOn("cover.x", { state: "closed", attributes: {} }));
+      ok("un clima non disponibile non è acceso",
+         !deviceOn("climate.x", { state: "unavailable", attributes: {} }));
+      ok("un media player in standby non è acceso",
+         !deviceOn("media_player.x", { state: "standby", attributes: {} })
+         && deviceOn("media_player.x", { state: "playing", attributes: {} }));
+      ok("nessuno stato non esplode", !deviceOn("light.x", null));
+
+      for (const id of ["light.sa_1","light.sa_2","climate.sa","cover.sa_tap","switch.sa_presa",
+        "input_boolean.sa_vacanza","camera.sa_cam","sensor.sa_t","binary_sensor.sa_porta"]) delete states[id];
+      el._registry = savedRegistry;
+      ok("stato ripristinato dopo la sezione 38", !states["light.sa_1"]);
+    }
+
+    console.log("\n== 39. GERARCHIA FRA POTENZA ED ENERGIA ==");
+    {
+      // Il caso reale: la gerarchia e' dichiarata nell'analisi economica, che
+      // ragiona in kWh, e il flusso energetico disegna watt. Stessa presa,
+      // stesso cavo, due entity_id diversi: il diagramma metteva la friggitrice
+      // ACCANTO alla presa che la alimenta invece che sotto.
+      const savedReg = el._registry, savedDash = el._dashboard;
+      states["sensor.frigg_potenza"] = S("28", { friendly_name: "Friggitrice Potenza", device_class: "power", unit_of_measurement: "W" });
+      states["sensor.frigg_energia"] = S("134", { friendly_name: "Friggitrice Energia", device_class: "energy", unit_of_measurement: "kWh" });
+      states["sensor.presa_potenza"] = S("120", { friendly_name: "Presa Potenza", device_class: "power", unit_of_measurement: "W" });
+      states["sensor.presa_energia"] = S("400", { friendly_name: "Presa Energia", device_class: "energy", unit_of_measurement: "kWh" });
+      states["sensor.quadro_potenza"] = S("1400", { friendly_name: "Quadro Potenza", device_class: "power", unit_of_measurement: "W" });
+      states["sensor.quadro_energia"] = S("1548", { friendly_name: "Quadro Energia", device_class: "energy", unit_of_measurement: "kWh" });
+      states["sensor.solo_energia"] = S("5", { friendly_name: "Solo energia", device_class: "energy", unit_of_measurement: "kWh" });
+
+      el._registry = { areas: [], byArea: {}, entityArea: {}, category: {}, orphans: [],
+        deviceName: {},
+        entityDevice: { "sensor.frigg_potenza": "d_frigg", "sensor.frigg_energia": "d_frigg",
+          "sensor.presa_potenza": "d_presa", "sensor.presa_energia": "d_presa",
+          "sensor.quadro_potenza": "d_quadro", "sensor.quadro_energia": "d_quadro" },
+        deviceEntities: { d_frigg: ["sensor.frigg_potenza", "sensor.frigg_energia"],
+          d_presa: ["sensor.presa_potenza", "sensor.presa_energia"],
+          d_quadro: ["sensor.quadro_potenza", "sensor.quadro_energia"] } };
+      el._dashboard = { hierarchy: {
+        "sensor.frigg_energia": "sensor.presa_energia",
+        "sensor.presa_energia": "sensor.quadro_energia" } };
+
+      ok("dichiarata sull'energia, la gerarchia vale anche per la potenza",
+         el._parentOf("sensor.frigg_potenza", null) === "sensor.presa_potenza",
+         String(el._parentOf("sensor.frigg_potenza", null)));
+      ok("e regge su piu' livelli",
+         el._parentOf("sensor.presa_potenza", null) === "sensor.quadro_potenza",
+         String(el._parentOf("sensor.presa_potenza", null)));
+      ok("sull'energia continua a valere direttamente",
+         el._parentOf("sensor.frigg_energia", null) === "sensor.presa_energia");
+      ok("un padre dichiarato sulla singola card vince ancora",
+         el._parentOf("sensor.frigg_potenza", "sensor.quadro_potenza") === "sensor.quadro_potenza");
+      ok("una radice non inventa un padre",
+         el._parentOf("sensor.quadro_potenza", null) === null,
+         String(el._parentOf("sensor.quadro_potenza", null)));
+      ok("un'entita' senza apparecchio non eredita niente",
+         el._parentOf("sensor.solo_energia", null) === null);
+
+      // il padre deve essere della STESSA grandezza: W e kW sono la stessa
+      // cosa fisica ma non lo stesso numero
+      states["sensor.presa_potenza_kw"] = S("0.12", { friendly_name: "Presa Potenza kW", device_class: "power", unit_of_measurement: "kW" });
+      el._registry.entityDevice["sensor.presa_potenza_kw"] = "d_presa";
+      el._registry.deviceEntities.d_presa.push("sensor.presa_potenza_kw");
+      ok("fra due sensori di potenza sceglie quello con la stessa unita'",
+         el._parentOf("sensor.frigg_potenza", null) === "sensor.presa_potenza",
+         String(el._parentOf("sensor.frigg_potenza", null)));
+
+      // mai se stesso, mai un anello
+      el._dashboard.hierarchy["sensor.presa_energia"] = "sensor.frigg_energia";
+      const p = el._parentOf("sensor.frigg_potenza", null);
+      ok("non si prende come padre da solo", p !== "sensor.frigg_potenza", String(p));
+      el._dashboard.hierarchy["sensor.presa_energia"] = "sensor.quadro_energia";
+
+      // senza anagrafiche non deve esplodere: e' il caso del primo render
+      el._registry = null;
+      ok("senza anagrafiche caricate non esplode e non inventa",
+         el._parentOf("sensor.frigg_potenza", null) === null);
+
+      el._registry = savedReg; el._dashboard = savedDash;
+      for (const id of ["sensor.frigg_potenza","sensor.frigg_energia","sensor.presa_potenza",
+        "sensor.presa_energia","sensor.quadro_potenza","sensor.quadro_energia",
+        "sensor.presa_potenza_kw","sensor.solo_energia"]) delete states[id];
+      ok("stato ripristinato dopo la sezione 39", !states["sensor.frigg_potenza"]);
+    }
+
+    console.log("\n== 40. DA QUANTO E' DAVVERO ACCESO ==");
+    {
+      // Verificato sull'impianto reale: dopo un riavvio cinque interruttori
+      // portavano lo STESSO last_changed al millisecondo (10:24:10), mentre il
+      // recorder sapeva che l'asciugatrice era partita alle 08:25 e la
+      // cantinetta due giorni prima. last_changed misura da quando e' acceso
+      // Home Assistant, non da quando e' acceso il carico.
+      const savedWS = el._hass.callWS;
+      const NOW = 1756200000000;              // istante fisso: niente Date.now nei test
+      const restart = NOW - 2 * 3600000;      // "riavvio" due ore fa
+      const vero = NOW - 5 * 3600000;         // acceso davvero cinque ore fa
+
+      states["switch.asciug"] = { state: "on", attributes: { friendly_name: "Asciugatrice" },
+        last_changed: new Date(restart).toISOString() };
+      states["switch.cantin"] = { state: "on", attributes: { friendly_name: "Cantinetta" },
+        last_changed: new Date(restart).toISOString() };
+
+      let asked = null;
+      el._hass.callWS = (m) => {
+        if (m.type !== "history/history_during_period") return Promise.resolve({});
+        asked = m;
+        return Promise.resolve({
+          "switch.asciug": [
+            { s: "off", lu: (NOW - 9 * 3600000) / 1000 },
+            { s: "on", lu: vero / 1000 },
+          ],
+          // blip di rete: 0,3 secondi di unavailable non spengono niente
+          "switch.cantin": [
+            { s: "on", lu: (NOW - 40 * 3600000) / 1000 },
+            { s: "unavailable", lu: (NOW - 30 * 3600000) / 1000 },
+            { s: "on", lu: (NOW - 30 * 3600000 + 300) / 1000 },
+          ],
+        });
+      };
+
+      el._since = null; el._sinceLoading = false;
+      el._loadSince(["switch.asciug", "switch.cantin"]);
+      setTimeout(() => {
+        ok("chiede la storia di tutte le entita' in una volta sola",
+           asked && asked.entity_ids.length === 2 && asked.minimal_response === true,
+           JSON.stringify(asked && asked.entity_ids));
+        ok("l'orario vero viene dal recorder, non dal riavvio",
+           el._since["switch.asciug"].t === vero,
+           new Date(el._since["switch.asciug"].t || 0).toISOString() + " vs " + new Date(vero).toISOString());
+        ok("e non e' l'ora del riavvio",
+           el._since["switch.asciug"].t !== restart);
+        ok("un blip di rete non azzera il conteggio",
+           el._since["switch.cantin"].t === NOW - 40 * 3600000,
+           String(el._since["switch.cantin"].t));
+        ok("lo spegnimento precedente non viene attraversato",
+           el._since["switch.asciug"].t > NOW - 9 * 3600000);
+        ok("si ricorda con quale last_changed ha risposto",
+           el._since["switch.asciug"].stamp === states["switch.asciug"].last_changed);
+
+        // il numero di ore che finisce a schermo
+        ok("a schermo diventa cinque ore, non due",
+           sinceWords(el._since["switch.asciug"].t, NOW) === "da 5 h",
+           sinceWords(el._since["switch.asciug"].t, NOW));
+        ok("e last_changed da solo avrebbe detto due",
+           sinceWords(restart, NOW) === "da 2 h", sinceWords(restart, NOW));
+
+        // un secondo giro non deve ripartire finche' niente e' cambiato
+        asked = null;
+        const rows = el._activeEntities({ domains: ["switch"], exclude: [] });
+        const row = rows.find((r) => r.id === "switch.asciug");
+        ok("la card usa l'orario corretto", row && row.since === vero,
+           String(row && row.since));
+        ok("e non richiede piu' la storia di quelle gia' lette",
+           !asked || !asked.entity_ids.some((x) => x === "switch.asciug" || x === "switch.cantin"),
+           JSON.stringify(asked && asked.entity_ids));
+
+        // ma un vero cambio di stato la fa richiedere
+        states["switch.asciug"] = { state: "on", attributes: { friendly_name: "Asciugatrice" },
+          last_changed: new Date(NOW - 60000).toISOString() };
+        el._sinceLoading = false;
+        el._activeEntities({ domains: ["switch"], exclude: [] });
+        ok("un cambio vero fa richiedere la storia", asked !== null,
+           JSON.stringify(asked && asked.entity_ids));
+
+        // senza recorder si torna a last_changed invece di non dire niente
+        el._hass.callWS = () => Promise.reject(new Error("no recorder"));
+        el._since = null; el._sinceLoading = false;
+        el._loadSince(["switch.cantin"]);
+        setTimeout(() => {
+          ok("senza recorder non resta un buco",
+             el._since["switch.cantin"] && el._since["switch.cantin"].t === null);
+          const back = el._activeEntities({ domains: ["switch"], exclude: [] })
+            .find((r) => r.id === "switch.cantin");
+          ok("e la card ripiega su last_changed", back && back.since === restart,
+             String(back && back.since));
+
+          el._hass.callWS = savedWS;
+          el._since = null; el._sinceLoading = false;
+          delete states["switch.asciug"]; delete states["switch.cantin"];
+          ok("stato ripristinato dopo la sezione 40", !states["switch.asciug"]);
+
+          console.log("\n" + "=".repeat(46));
+          console.log(pass + " passati, " + fail + " falliti");
+          process.exit(fail ? 1 : 0);
+        }, 30);
+      }, 30);
+    }
   })();
 }
 

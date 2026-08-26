@@ -1430,6 +1430,34 @@ function canToggle(entityId, st) {
 }
 
 const ON_STATES = new Set(["on", "open", "unlocked", "home", "playing", "cleaning", "heat", "cool", "heat_cool", "dry", "fan_only", "auto"]);
+/**
+ * Is this device running right now?
+ *
+ * ON_STATES alone is not enough once covers and thermostats are in the same
+ * list. A shutter at 40% reports "open", but one stopped mid-travel can report
+ * "open" with position 0 on some integrations, and a thermostat in "dry" is
+ * working while one in "off" is not. Reading the position when there is one,
+ * and treating "off"/"unavailable" as the only real off-states for the climate
+ * family, is what keeps the two sections honest - a device in the wrong column
+ * on a wall tablet is worse than no column at all.
+ */
+function deviceOn(id, st) {
+  if (!st) return false;
+  const d = domainOf(id);
+  if (d === "cover") {
+    const p = num(st.attributes.current_position);
+    return p !== null ? p > 0 : st.state === "open";
+  }
+  if (d === "climate" || d === "humidifier" || d === "water_heater" || d === "fan") {
+    return st.state !== "off" && st.state !== "unavailable" && st.state !== "unknown";
+  }
+  if (d === "media_player") {
+    return st.state !== "off" && st.state !== "standby"
+      && st.state !== "unavailable" && st.state !== "unknown";
+  }
+  return ON_STATES.has(st.state);
+}
+
 const ALERT_STATES = new Set(["armed_away", "armed_home", "armed_night", "armed_vacation", "triggered", "unlocked", "open", "on"]);
 
 function esc(v) {
@@ -2575,10 +2603,14 @@ class CyborgDashboard extends HTMLElement {
       const deviceName = {};
       for (const d of devices || []) deviceName[d.id] = d.name_by_user || d.name || "";
       const entityDevice = {};
+      const deviceEntities = {};
       const category = {};
       for (const e of entities || []) {
         if (e.disabled_by || e.hidden_by) continue;
-        if (e.device_id) entityDevice[e.entity_id] = e.device_id;
+        if (e.device_id) {
+          entityDevice[e.entity_id] = e.device_id;
+          (deviceEntities[e.device_id] = deviceEntities[e.device_id] || []).push(e.entity_id);
+        }
         if (e.entity_category) category[e.entity_id] = e.entity_category;
         const area = e.area_id || (e.device_id ? deviceArea[e.device_id] : null);
         if (!area) {
@@ -2601,10 +2633,10 @@ class CyborgDashboard extends HTMLElement {
         for (const id of ids) entityArea[id] = areaName[aid] || aid;
       }
       this._registry = { areas: areas || [], byArea, entityArea, category,
-        entityDevice, deviceName, orphans };
+        entityDevice, deviceEntities, deviceName, orphans };
     } catch (err) {
       this._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
-        entityDevice: {}, deviceName: {}, orphans: [], error: true };
+        entityDevice: {}, deviceEntities: {}, deviceName: {}, orphans: [], error: true };
     }
     this._registryLoading = false;
     this._touch();
@@ -4068,8 +4100,66 @@ class CyborgDashboard extends HTMLElement {
 
   _parentOf(entity, declared) {
     if (declared) return declared;
-    const p = this._hierarchy()[entity];
-    return p && p !== entity ? p : null;
+    const h = this._hierarchy();
+    const direct = h[entity];
+    if (direct && direct !== entity) return direct;
+    return this._parentViaDevice(entity, h);
+  }
+
+  /**
+   * The same wiring, told through the other sensor of the same meter.
+   *
+   * A smart plug publishes TWO entities for one physical load: ..._potenza in
+   * W and ..._energia in kWh. The hierarchy was keyed by entity_id, so a
+   * parent declared on the energy sensor - which is what the economy card
+   * offers, because it bills kWh - was invisible to the flow diagram, which
+   * draws watts. Same plug, same cable, two entity_ids: the diagram put the
+   * fryer beside the socket strip that feeds it instead of under it.
+   *
+   * The relation belongs to the DEVICE. So the parent is looked up through the
+   * device: any entity of this meter that declares a parent answers for all of
+   * them, and the parent is then mapped back to the sensor of the same kind
+   * the caller is drawing - watts to watts, kWh to kWh.
+   */
+  _parentViaDevice(entity, h) {
+    const reg = this._registry;
+    if (!reg || !reg.entityDevice || !reg.deviceEntities) return null;
+    const dev = reg.entityDevice[entity];
+    if (!dev) return null;
+    let parentEntity = null;
+    for (const sib of reg.deviceEntities[dev] || []) {
+      if (sib === entity) continue;
+      const p = h[sib];
+      if (p && p !== entity && p !== sib) { parentEntity = p; break; }
+    }
+    if (!parentEntity) return null;
+    const twin = this._sameKindOn(parentEntity, entity);
+    return twin && twin !== entity ? twin : null;
+  }
+
+  /** The entity of `parentEntity`'s meter that measures the same thing as `like`. */
+  _sameKindOn(parentEntity, like) {
+    const reg = this._registry;
+    const want = this._hass.states[like];
+    const have = this._hass.states[parentEntity];
+    if (!want) return null;
+    const kind = (st) => st && st.attributes.device_class;
+    // already the right kind: nothing to translate
+    if (have && kind(have) === kind(want) && domainOf(parentEntity) === domainOf(like)) {
+      return parentEntity;
+    }
+    const pdev = reg.entityDevice[parentEntity];
+    if (!pdev) return null;
+    const cands = (reg.deviceEntities[pdev] || []).filter((id) => {
+      const st = this._hass.states[id];
+      return st && domainOf(id) === domainOf(like) && kind(st) === kind(want);
+    });
+    if (!cands.length) return null;
+    // Same unit first: W and kW are the same quantity but not the same number,
+    // and a diagram that mixes them silently is worse than one that omits.
+    const unit = want.attributes.unit_of_measurement;
+    return cands.find((id) => this._hass.states[id].attributes.unit_of_measurement === unit)
+      || cands[0];
   }
 
   /** Record a parent for everybody, not just for the card being edited. */
@@ -4455,8 +4545,90 @@ class CyborgDashboard extends HTMLElement {
       const changed = st.last_changed ? Date.parse(st.last_changed) : NaN;
       out.push({ id, st, since: Number.isFinite(changed) ? changed : 0 });
     }
+    // Correct the ones the recorder knows better, and ask for the ones it has
+    // not been asked about yet. The stamp comparison is what makes a real
+    // toggle refetch while a repaint does not.
+    const since = this._since || {};
+    const stale = out.filter((r) => {
+      const c = since[r.id];
+      return !c || c.stamp !== r.st.last_changed;
+    }).map((r) => r.id);
+    if (stale.length) this._loadSince(stale.slice(0, 60));
+    for (const r of out) {
+      const c = since[r.id];
+      if (c && c.stamp === r.st.last_changed && c.t) { r.since = c.t; r.capped = c.capped; }
+    }
     out.sort((a, b) => b.since - a.since);
     return out;
+  }
+
+  /**
+   * How long each of these has really been in its current state.
+   *
+   * `last_changed` is not that number. Home Assistant restores its entities at
+   * startup and stamps them with the RESTORE time, so a couple of hours after
+   * a restart every device in the house reads the same "da 2 h 44" - which is
+   * how long Home Assistant has been up, not how long the dryer has been
+   * running. Verified on the real installation: five switches carrying the
+   * identical last_changed to the millisecond, while the recorder still knew
+   * the dryer went on at 08:25 and the wine fridge two days earlier.
+   *
+   * The recorder does not rewrite history at startup, so one
+   * history/history_during_period call for the whole card recovers the truth.
+   * Cached per entity and refetched only when the entity really changes: this
+   * must not turn a card that repaints on every state update into a query
+   * storm.
+   */
+  _loadSince(ids) {
+    if (this._sinceLoading || !ids.length) return;
+    this._sinceLoading = true;
+    const startISO = new Date(Date.now() - 13 * 86400000).toISOString();
+    const stamps = {};
+    for (const id of ids) {
+      const st = this._hass.states[id];
+      stamps[id] = st ? st.last_changed : null;
+    }
+    this._hass.callWS({
+      type: "history/history_during_period",
+      start_time: startISO,
+      entity_ids: ids,
+      minimal_response: true,
+      significant_changes_only: true,
+      no_attributes: true,
+    }).then((res) => {
+      this._since = this._since || {};
+      for (const id of ids) {
+        const rows = (res && res[id]) || [];
+        const cur = this._hass.states[id] && this._hass.states[id].state;
+        let found = null, capped = false;
+        // Walk back from the newest row while the state is still the current
+        // one. A short `unavailable` blip - the wine fridge dropped off Wi-Fi
+        // for three tenths of a second - is not the appliance being switched
+        // off, so it does not reset the clock.
+        for (let i = rows.length - 1; i >= 0; i--) {
+          const r = rows[i];
+          const state = r.s !== undefined ? r.s : r.state;
+          const when = typeof r.lu === "number" ? r.lu * 1000
+            : typeof r.lc === "number" ? r.lc * 1000
+            : Date.parse(r.lc || r.last_changed || r.last_updated || "");
+          if (!Number.isFinite(when)) continue;
+          if (state === cur) { found = when; continue; }
+          if ((state === "unavailable" || state === "unknown")
+              && found !== null && found - when < 300000) continue;
+          break;
+        }
+        if (found !== null && rows.length
+            && found <= Date.parse(startISO) + 60000) capped = true;
+        this._since[id] = { t: found, capped, stamp: stamps[id] };
+      }
+      this._sinceLoading = false;
+      this._touch();
+    }).catch(() => {
+      // No recorder, or the query failed: last_changed stays the fallback.
+      this._since = this._since || {};
+      for (const id of ids) this._since[id] = { t: null, capped: false, stamp: stamps[id] };
+      this._sinceLoading = false;
+    });
   }
 
   /** The same list, split into the groups a person actually thinks in. */
@@ -4525,7 +4697,7 @@ class CyborgDashboard extends HTMLElement {
               <strong>${esc(name)}</strong>
               <small>${esc([area, g.group.detail(r.st)].filter(Boolean).join(" · "))}</small>
             </div>
-            <span class="act-since">${esc(sinceWords(r.since, now))}</span>
+            <span class="act-since">${esc((r.capped ? "oltre " : "") + sinceWords(r.since, now))}</span>
           </div>`;
         }).join("")}
         ${hidden > 0 ? `<div class="act-more">+${hidden} altr${hidden === 1 ? "o" : "i"}</div>` : ""}
@@ -5490,6 +5662,49 @@ class CyborgDashboard extends HTMLElement {
       </button>`;
     };
 
+    const rowFor = (id) => {
+      const d = domainOf(id);
+      if (d === "light") return this._lightRow(id, item);
+      if (d === "cover") return coverRow(id);
+      if (d === "climate" || d === "fan" || d === "humidifier") return climateRow(id);
+      return toggleRow(id);
+    };
+
+    // Cameras, alarm panels and plain readings are deliberately NOT sorted into
+    // on/off: a camera is not "off" because it is idle, and a door contact is
+    // not something you switch. They keep their own blocks so the two state
+    // sections stay exactly what they say they are - things you turn on and
+    // things you turn off.
+    const fixed = `${block("Videocamere", "mdi:cctv", cams, cameraRow)}
+      ${block("Sicurezza", "mdi:shield-home", alarms, alarmRow)}
+      ${item.show_others === false ? "" : block("Altro", "mdi:shape-outline", rest.slice(0, 8), toggleRow)}`;
+
+    if (item.grouping !== "domain") {
+      // Domain order is kept INSIDE each section, so a light does not jump
+      // between neighbours every time a switch changes state: only the section
+      // it belongs to changes.
+      const ordered = [].concat(lights, climates, covers, switches);
+      const on = ordered.filter((id) => deviceOn(id, this._hass.states[id]));
+      const off = ordered.filter((id) => !deviceOn(id, this._hass.states[id]));
+      return `<div class="rc">
+        ${strip ? `<div class="rc-strip">${strip}</div>` : ""}
+        ${on.length ? `<section class="rc-block on-now">
+          <header><ha-icon icon="mdi:flash"></ha-icon><strong>Accesi</strong><em>${on.length}</em>
+            ${lights.some((id) => this._hass.states[id].state === "on")
+              ? `<button class="act-off" data-room-lights-off="${esc(item.area)}" title="Spegni le luci"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+          </header>
+          ${on.map(rowFor).join("")}
+        </section>` : ""}
+        ${off.length ? `<section class="rc-block off-now">
+          <header><ha-icon icon="mdi:power-sleep"></ha-icon><strong>Spenti</strong><em>${off.length}</em></header>
+          ${off.map(rowFor).join("")}
+        </section>` : ""}
+        ${!on.length && !off.length ? `<div class="ov-empty"><ha-icon icon="mdi:toggle-switch-off-outline"></ha-icon>
+          <span>Nessun dispositivo da accendere in quest'area.</span></div>` : ""}
+        ${fixed}
+      </div>`;
+    }
+
     return `<div class="rc">
       ${strip ? `<div class="rc-strip">${strip}</div>` : ""}
       ${lights.length ? `<section class="rc-block">
@@ -5501,10 +5716,8 @@ class CyborgDashboard extends HTMLElement {
       </section>` : ""}
       ${block("Clima", "mdi:thermostat", climates, climateRow)}
       ${block("Aperture", "mdi:window-shutter", covers, coverRow)}
-      ${block("Videocamere", "mdi:cctv", cams, cameraRow)}
       ${block("Prese e interruttori", "mdi:power-plug", switches, toggleRow)}
-      ${block("Sicurezza", "mdi:shield-home", alarms, alarmRow)}
-      ${item.show_others === false ? "" : block("Altro", "mdi:shape-outline", rest.slice(0, 8), toggleRow)}
+      ${fixed}
     </div>`;
   }
 
@@ -7419,8 +7632,22 @@ class CyborgDashboard extends HTMLElement {
         ${card.area ? `<span class="hint">${ids.length} dispositivi visibili su ${pool.length} nell'area.</span>` : ""}
       </div>
       ${card.area ? `<div class="section">
+        <strong>COME RAGGRUPPARE</strong>
+        <div class="seg">
+          <button class="${card.grouping === "domain" ? "" : "active"}" data-room-group="state">Accesi e spenti</button>
+          <button class="${card.grouping === "domain" ? "active" : ""}" data-room-group="domain">Per tipo</button>
+        </div>
+        <span class="hint">${card.grouping === "domain"
+          ? "Luci, clima, aperture e prese in blocchi separati."
+          : "Due sezioni sole: quello che sta funzionando adesso e quello che è spento. Spegnendo un carico si sposta da solo nella sezione sotto, dove si riaccende."}</span>
+      </div>
+      <div class="section">
         <strong>COSA MOSTRARE</strong>
-        <span class="hint">Le entità di diagnostica e configurazione sono già escluse. Qui togli quelle che non ti interessano.</span>
+        <span class="hint">${ids.length} visibili su ${pool.length}. Le entità di diagnostica e configurazione sono già escluse; qui decidi tu il resto, una per una — un input boolean che non vuoi vedere non comparirà né fra gli accesi né fra gli spenti.</span>
+        <div class="seg">
+          <button data-roomcard-vis-all="show">Mostra tutto</button>
+          <button data-roomcard-vis-all="hide">Nascondi tutto</button>
+        </div>
         <div class="room-entities" data-keep-scroll="room-entities">${pool.map((id) => {
           const shown = !hidden.has(id);
           const st = this._hass.states[id];
@@ -9023,6 +9250,27 @@ class CyborgDashboard extends HTMLElement {
     const activeVisAll = q("[data-active-vis-all]");
     if (activeVisAll && card) activeVisAll.onclick = () => { card.exclude = []; this._touch(); };
 
+    all("[data-room-group]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.grouping = el.getAttribute("data-room-group");
+        this._touch();
+      };
+    });
+    all("[data-roomcard-vis-all]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const cat = (this._registry && this._registry.category) || {};
+        const pool = (this._registry && this._registry.byArea[card.area]) || [];
+        // "Nascondi tutto" writes the whole pool, not a flag: the card must
+        // keep following its area, so a device added to the room next month
+        // has to arrive VISIBLE and not be silently suppressed by a blanket
+        // rule chosen today.
+        card.hidden = el.getAttribute("data-roomcard-vis-all") === "hide"
+          ? pool.filter((id) => !cat[id]) : [];
+        this._touch();
+      };
+    });
     all("[data-roomcard-vis]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -11028,7 +11276,7 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .li-item{border-radius:11px;border:1px solid transparent;background:rgba(255,255,255,.03);transition:background .2s,border-color .2s}
 .li-item.on{background:color-mix(in srgb,var(--lc,#ffd166) 11%,transparent);border-color:color-mix(in srgb,var(--lc,#ffd166) 30%,transparent)}
 .li-item.open{border-color:color-mix(in srgb,var(--lc,#ffd166) 45%,transparent)}
-.li-row{display:flex;align-items:center;gap:9px;padding:7px 9px}
+.li-row{display:flex;align-items:center;gap:9px;padding:7px 9px;min-height:44px}
 .li-bulb{display:grid;place-items:center;width:34px;height:34px;flex-shrink:0;border-radius:50%;
   background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#93a3b5;transition:all .2s}
 .li-item.on .li-bulb{background:var(--lc,#ffd166);border-color:var(--lc,#ffd166);color:#0a1017;
@@ -11506,6 +11754,11 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .hint.warn ha-icon{--mdc-icon-size:15px;flex:0 0 auto}
 .entity-result-note{font-size:11px;line-height:1.5;opacity:.6;padding:0 4px 8px}
 .entity-result-note strong{opacity:.95;color:#ffb703;font-weight:600}
+.rc-block.on-now>header{color:var(--accent)}
+.rc-block.on-now>header ha-icon{color:var(--accent)}
+.rc-block.off-now>header{opacity:.55}
+.rc-block.off-now .rc-row{opacity:.72}
+.rc-block.off-now .rc-row:hover{opacity:1}
 .room-ent-pos{color:var(--accent);font-size:9px;flex-shrink:0}
 .room-ent.hidden{opacity:.35}
 .room-ent.hidden span{text-decoration:line-through}
@@ -11699,7 +11952,7 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .rc-block>header strong{flex:1;font:10px ui-monospace,monospace;letter-spacing:1.4px;text-transform:uppercase;opacity:.68}
 .rc-block>header em{font-style:normal;font:10px ui-monospace,monospace;opacity:.45}
 .rc-block>header .act-off{--gc:var(--accent)}
-.rc-row{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border-radius:9px;text-align:left;
+.rc-row{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:7px 9px;border-radius:9px;text-align:left;
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
 .rc-row.on{background:color-mix(in srgb,var(--accent) 11%,transparent);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
 .rc-row:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
@@ -11955,7 +12208,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.37.0";
+const CYBORG_BUILD = "0.38.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

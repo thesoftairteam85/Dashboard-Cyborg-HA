@@ -4,6 +4,67 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.38.0] - 2026-08-26
+
+Quello che sta funzionando adesso, e da quanto davvero.
+
+### Accesi e spenti
+- La card **Stanza** si raggruppa per stato: **Accesi** in cima, **Spenti**
+  sotto. Spegni un carico e si sposta da solo nella sezione di sotto, dove lo
+  riaccendi. Il vecchio raggruppamento per tipo resta disponibile per card, dal
+  selettore "Come raggruppare".
+- Fuori dalle due sezioni restano **videocamere, centrale di allarme e letture
+  numeriche**: una telecamera non e' "spenta" perche' e' in idle e un contatto
+  porta non e' un carico da accendere.
+- La classificazione non e' `state == "on"`. Una tapparella conta la
+  **posizione** (su parecchie integrazioni una tapparella ferma a zero riporta
+  ancora `open`); clima, ventole e umidificatori contano `off`/`unavailable`;
+  un media player conta anche `standby`.
+- Nell'editor: **Mostra tutto / Nascondi tutto** e il conteggio dei visibili.
+  Un `input_boolean` nascosto non compare ne' fra gli accesi ne' fra gli spenti.
+- Ogni riga di stanza ha ora **44 px di altezza minima**. Le righe senza il
+  pulsante-icona tondo (clima, sicurezza) collassavano a 33 px: il bersaglio
+  piu' piccolo della pagina, e quello che si tocca di piu'.
+
+### La gerarchia dei carichi vale in tutte le card
+- **Il difetto**: la gerarchia era una mappa `entity -> entity`. Ma una presa
+  intelligente pubblica **due** entita' per un solo carico — `..._potenza` in W
+  e `..._energia` in kWh. Dichiarando "compreso dentro" nell'analisi economica,
+  che ragiona in kWh, il flusso energetico — che disegna watt — non vedeva
+  niente: stessa presa, stesso cavo, due entity_id. La friggitrice finiva
+  **accanto** alla presa che la alimenta invece che sotto.
+- Ora la parentela e' un fatto dell'**apparecchio**: dichiarata su una
+  qualunque delle sue entita', vale per tutte, e il padre viene ritradotto nel
+  sensore della stessa grandezza che la card sta disegnando — watt con watt,
+  kWh con kWh, e a parita' di grandezza si preferisce la stessa unita' (W e kW
+  sono la stessa cosa fisica ma non lo stesso numero).
+- **Schema v12**: la semina della mappa condivisa dalle card riparte una volta.
+  La v10 girava solo per le dashboard piu' vecchie di 10, quindi un padre
+  dichiarato *dopo* quella migrazione non arrivava mai alla mappa condivisa.
+
+### "Acceso da" dice la verita'
+- **Il difetto**: `last_changed` non misura da quando il carico e' acceso.
+  Home Assistant ripristina le entita' all'avvio e le timbra con l'ora del
+  **ripristino**. Verificato sull'impianto: due ore dopo un riavvio, cinque
+  interruttori portavano lo stesso `last_changed` al millisecondo, e la card
+  diceva "da 2 h 44" per tutti — che e' da quanto e' acceso Home Assistant.
+- Il recorder invece non riscrive la storia all'avvio. Una sola chiamata per
+  tutta la card recupera l'orario vero: l'asciugatrice era partita alle 08:25,
+  la cantinetta due giorni prima.
+- Un **blip di rete** — la cantinetta persa per tre decimi di secondo — non
+  azzera il conteggio; uno spegnimento vero si'. Senza recorder si ripiega su
+  `last_changed` invece di lasciare un buco. La storia viene richiesta una
+  volta per entita' e ripetuta solo a un cambio di stato reale: una card che si
+  ridisegna a ogni aggiornamento non deve diventare una raffica di query.
+
+### Verifiche
+- 953 asserzioni frontend, 297 misurate in Chromium, 15 sulla chiave di cache,
+  piu' schema e notifiche.
+- Corretta una trappola nota nel codice nuovo: le righe di storia compresse
+  portano l'epoch in **secondi come numero**, e `Date.parse(numero)` lo
+  converte in stringa e lo legge come anno — la stessa famiglia di
+  `Date.parse(0)` che aveva gia' prodotto "9731 giorni".
+
 ## [0.37.0] - 2026-08-26
 
 I dispositivi che Home Assistant non ha messo in nessuna stanza.
