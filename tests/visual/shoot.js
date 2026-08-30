@@ -1655,6 +1655,79 @@ const DEFAULT_DASH = {
   await phoneEco.screenshot({ path: path.resolve(__dirname, "74-phone-eco-history.png") });
   await phoneEco.close();
 
+  console.log("\n== CONTATORE GENERALE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, openTree: true });
+  await page.waitForTimeout(900);
+
+  const readTree = () => page.evaluate(() => {
+    const el = window.__EL__;
+    const card = el._findCard("flowcard");
+    const walk = (rows, depth) => rows.flatMap((r) => [{ name: r.name, w: Math.round(r.watts),
+      depth, other: !!r.other, main: !!r.main }].concat(walk(r.children || [], depth + 1)));
+    return { tree: walk(el._flowLoads(card.flow, 2180), 0),
+      main: card.flow.main || null };
+  });
+
+  const mainFlat = await readTree();
+  ok("senza generale i carichi sono rami affiancati della casa",
+     mainFlat.tree.filter((r) => r.depth === 0 && !r.other).length >= 3,
+     JSON.stringify(mainFlat.tree.filter((r) => r.depth === 0).map((r) => r.name)));
+
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, flowMain: true, openTree: true });
+  await page.waitForTimeout(900);
+  const withMain = await readTree();
+  const roots = withMain.tree.filter((r) => r.depth === 0 && !r.other);
+  ok("dichiarato il generale, al primo livello resta lui solo",
+     roots.length === 1 && /generale/i.test(roots[0].name),
+     JSON.stringify(withMain.tree.filter((r) => r.depth === 0).map((r) => r.name)));
+  ok("e i carichi scendono di un livello, sotto di lui",
+     withMain.tree.filter((r) => r.depth === 1 && !r.other).length >= 3,
+     JSON.stringify(withMain.tree.filter((r) => r.depth === 1).map((r) => r.name)));
+  ok("quello che il generale legge e i figli non spiegano è dichiarato",
+     withMain.tree.some((r) => r.depth === 1 && r.other && r.w > 0),
+     JSON.stringify(withMain.tree.filter((r) => r.other).map((r) => [r.name, r.w, r.depth])));
+  ok("e i conti tornano: il generale è la somma dei suoi figli",
+     Math.abs(roots[0].w - withMain.tree.filter((r) => r.depth === 1)
+       .reduce((n, r) => n + r.w, 0)) <= 2,
+     roots[0].w + " vs " + withMain.tree.filter((r) => r.depth === 1).reduce((n, r) => n + r.w, 0));
+
+  const drawn = await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll("[data-flow-node], .flow-node, .ef-node"));
+    const svg = document.querySelector("[data-ef-stage], .ef-stage svg, .ef-stage");
+    return { nodes: nodes.length, hasStage: !!svg,
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth };
+  });
+  ok("il diagramma resta disegnato col generale in mezzo", drawn.hasStage);
+  ok("e non provoca scorrimento orizzontale", drawn.scrollW <= drawn.winW + 1,
+     drawn.scrollW + " vs " + drawn.winW);
+  await page.screenshot({ path: path.resolve(__dirname, "75-flow-main.png") });
+
+  // l'editor deve offrirlo, e toglierlo deve rimettere le cose come stavano
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, flowCard: true, flowMain: true, selectFlow: true });
+  await page.evaluate(() => { const el = window.__EL__; el._editing = true; el._signature = ""; el.render(); });
+  await page.waitForTimeout(800);
+  const ed2 = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const pick = document.querySelector('[data-flow-pick="main"]');
+    const clear = document.querySelector('[data-flow-clear="main"]');
+    const before = el._findCard("flowcard").flow.main;
+    if (clear) clear.click();
+    await new Promise((r) => setTimeout(r, 400));
+    return { hasPick: !!pick, hasClear: !!clear, before,
+      after: el._findCard("flowcard").flow.main,
+      roots: el._flowLoads(el._findCard("flowcard").flow, 2180).filter((l) => !l.other).length };
+  });
+  ok("l'editor offre di dichiarare il generale", ed2.hasPick);
+  ok("e di toglierlo", ed2.hasClear && ed2.before && !ed2.after, JSON.stringify(ed2));
+  ok("togliendolo i carichi tornano rami affiancati, niente resta appeso al vuoto",
+     ed2.roots >= 3, String(ed2.roots));
+
   console.log("\n== COMPRESO DENTRO NEL FLUSSO ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
@@ -2483,8 +2556,11 @@ const DEFAULT_DASH = {
   const filled = await page.evaluate(async () => {
     const el = window.__EL__;
     const sel = document.querySelector("[data-trend-fill]");
+    // Il tipo ora e' classe+unita' ("voltage|V"): niente temperature,
+    // niente scorciatoia stanze, niente voci "tutto un dispositivo".
     const target = Array.from(sel.options)
-      .filter((o) => o.value && o.value !== "__rooms" && o.value !== "temperature")
+      .filter((o) => o.value && o.value !== "__rooms"
+        && !o.value.startsWith("temperature") && !o.value.startsWith("dev:"))
       .filter((o) => (parseInt((o.textContent.match(/(\d+)\s*entit/) || [])[1], 10) || 0) >= 2)
       .map((o) => o.value)[0];
     if (!target) return { skipped: true };
@@ -2493,13 +2569,20 @@ const DEFAULT_DASH = {
     await new Promise((r) => setTimeout(r, 200));
     const card = el._sections().flatMap((s2) => s2.items).find((i) => i.id === "tfcard");
     return { target, series: (card.series || []).map((r) => r.entity),
-      classes: (card.series || []).map((r) => el._hass.states[r.entity].attributes.device_class),
+      classes: (card.series || []).map((r) => {
+        const st = el._hass.states[r.entity];
+        return (st.attributes.device_class || "") + "|" + (st.attributes.unit_of_measurement || "");
+      }),
+      units: (card.series || []).map((r) =>
+        el._hass.states[r.entity].attributes.unit_of_measurement || ""),
       reset: sel.value };
   });
   ok("scegliendo un tipo l'elenco si riempie davvero",
      !filled.skipped && filled.series.length >= 2, JSON.stringify(filled));
   ok("e si riempie con quel tipo, non con le temperature",
      filled.classes.every((c) => c === filled.target), JSON.stringify(filled.classes));
+  ok("e tutte le linee hanno la stessa unità, che è il punto di un asse solo",
+     new Set(filled.units).size === 1, JSON.stringify(filled.units));
   ok("il selettore torna a vuoto dopo l'uso", filled.reset === "", filled.reset);
 
   console.log("\n== CENTRALE DI ALLARME ==");

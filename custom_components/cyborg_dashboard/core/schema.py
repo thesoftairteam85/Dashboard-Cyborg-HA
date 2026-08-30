@@ -766,7 +766,11 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
     if result.get("type") == "energyflow":
         flow = result.get("flow")
         flow = dict(flow) if isinstance(flow, dict) else {}
-        for slot in ("grid", "solar", "battery", "home"):
+        # `main` e' il contatore a monte di tutto: dichiarato una volta, ogni
+        # carico che non ha gia' un padre gli finisce sotto. Senza, una casa con
+        # un interruttore generale misurato costringe a ripetere "questo sta
+        # sotto il generale" per ogni singolo carico.
+        for slot in ("grid", "solar", "battery", "home", "main"):
             value = flow.get(slot)
             flow[slot] = value if isinstance(value, str) and value else None
         for slot in ("grid", "solar", "battery"):

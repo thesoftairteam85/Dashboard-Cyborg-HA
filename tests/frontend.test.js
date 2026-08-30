@@ -442,8 +442,11 @@ el._editing = true;
 el._dashboard.pages[0].sections = [fsec];
 el._selected = { kind: "card", sectionId: "s", itemId: "f" };
 el.render();
-ok("editor flusso: 4 slot", (el.innerHTML.match(/class="flow-slot-head"/g) || []).length === 4,
+// quattro sorgenti (solare, rete, batteria, casa) piu' il contatore generale
+ok("editor flusso: 5 slot", (el.innerHTML.match(/class="flow-slot-head"/g) || []).length === 5,
    String((el.innerHTML.match(/class="flow-slot-head"/g) || []).length));
+ok("editor flusso: si puo' dichiarare il contatore generale",
+   el.innerHTML.includes('data-flow-pick="main"') && /CONTATORE GENERALE/.test(el.innerHTML));
 ok("editor flusso: rilevamento automatico", el.innerHTML.includes("data-detect-flow"));
 ok("editor flusso: inverti segno", el.innerHTML.includes("data-flow-invert"));
 ok("editor flusso: nessun picker entita singola", !el.innerHTML.includes("ENTIT\u00c0 SELEZIONATA"));
@@ -554,6 +557,69 @@ ok("figli ordinati per assorbimento", hl[0].children.map(c => c.name).join() ===
 ok("i figli NON gonfiano il misurato (non misurato = 1270-1000)",
    hl.find(l => l.other) && hl.find(l => l.other).watts === 270,
    JSON.stringify(hl.map(l => [l.name, l.watts])));
+
+// --- il contatore generale: una dichiarazione invece di venti
+//
+// Il difetto: chi ha un interruttore generale misurato vedeva il generale e la
+// lavatrice come due rami paralleli della casa — un impianto che non esiste —
+// finche' non dichiarava a mano, carico per carico, "questo sta sotto quello".
+states["sensor.generale"] = S("2180", { friendly_name: "Interruttore generale",
+  device_class: "power", unit_of_measurement: "W" });
+states["sensor.lavatrice_w"] = S("2010", { friendly_name: "Lavatrice",
+  device_class: "power", unit_of_measurement: "W" });
+{
+  const flat = { devices: [
+    { entity: "sensor.generale", name: "Generale" },
+    { entity: "sensor.lavatrice_w", name: "Lavatrice" }] };
+  const before = el._flowLoads(flat, 2180);
+  ok("senza generale dichiarato restano due rami affiancati",
+     before.filter((l) => !l.other).length === 2,
+     JSON.stringify(before.map((l) => l.name)));
+
+  const withMain = Object.assign({ main: "sensor.generale" }, flat);
+  const after = el._flowLoads(withMain, 2180);
+  const roots = after.filter((l) => !l.other);
+  ok("dichiarato il generale, resta un ramo solo",
+     roots.length === 1 && roots[0].entity === "sensor.generale",
+     JSON.stringify(after.map((l) => l.name)));
+  ok("e la lavatrice ci sta sotto",
+     roots[0].children.some((c) => c.entity === "sensor.lavatrice_w"),
+     JSON.stringify(roots[0].children.map((c) => c.name)));
+  ok("il generale non diventa figlio di se stesso",
+     roots[0].parent === null || roots[0].parent === undefined, String(roots[0].parent));
+  ok("quello che il generale legge e i figli non spiegano viene detto",
+     roots[0].children.some((c) => c.other && Math.abs(c.watts - 170) < 1),
+     JSON.stringify(roots[0].children.map((c) => [c.name, c.watts])));
+
+  // Una parentela gia' dichiarata vince: il generale risponde solo per chi
+  // non ha ancora una risposta.
+  const nested = { main: "sensor.generale", devices: [
+    { entity: "sensor.generale", name: "Generale" },
+    { entity: "sensor.quadro", name: "Quadro cucina" },
+    { entity: "sensor.forno", name: "Forno", parent: "sensor.quadro" }] };
+  const nl = el._flowLoads(nested, 2180)[0];
+  ok("il forno resta sotto il quadro, non sotto il generale",
+     nl.children.some((c) => c.entity === "sensor.quadro"
+       && c.children.some((g) => g.entity === "sensor.forno")),
+     JSON.stringify(nl.children.map((c) => [c.name, c.children.map((g) => g.name)])));
+
+  // Il generale non deve essere per forza fra i carichi elencati: e' il tronco.
+  const implied = { main: "sensor.generale", devices: [
+    { entity: "sensor.lavatrice_w", name: "Lavatrice" }] };
+  const il = el._flowLoads(implied, 2180).filter((l) => !l.other);
+  ok("il generale compare anche se non e' fra i carichi elencati",
+     il.length === 1 && il[0].entity === "sensor.generale",
+     JSON.stringify(il.map((l) => l.name)));
+
+  // Un generale che non esiste, o senza lettura di potenza, non deve
+  // inghiottire i carichi in un ramo invisibile.
+  const bogus = { main: "sensor.non_esiste", devices: [
+    { entity: "sensor.lavatrice_w", name: "Lavatrice" }] };
+  ok("un generale inesistente lascia i carichi dove sono",
+     el._flowLoads(bogus, 2180).filter((l) => !l.other).length === 1
+     && el._flowLoads(bogus, 2180)[0].entity === "sensor.lavatrice_w");
+}
+delete states["sensor.generale"]; delete states["sensor.lavatrice_w"];
 
 // a parent that is not itself a monitored load must not swallow its child
 const orphan = { devices: [{ entity: "sensor.forno", name: "Forno", parent: "sensor.inesistente" }] };
@@ -2803,7 +2869,40 @@ console.log("\n== 33. IL CONFRONTO NON È SOLO TEMPERATURE ==");
   ok("il riempimento in blocco è una scelta, non un pulsante temperatura",
      h.includes("data-trend-fill") && !/AGGIUNGI TUTTE LE TEMPERATURE/i.test(h), "");
   ok("fra le opzioni ci sono i tipi reali dell'impianto",
-     h.includes('value="voltage"') && h.includes('value="current"'));
+     h.includes('value="voltage|V"') && h.includes('value="current|A"'), "");
+  // Il difetto: il tipo era la sola device_class, e Home Assistant mette sotto
+  // data_rate sia i MB/s di un disco sia i Mbit/s di una scheda di rete. Su un
+  // asse solo non si confrontano, ed erano una voce unica.
+  states["sensor.disco_rw"] = S("1.5", { friendly_name: "Disco scrittura",
+    device_class: "data_rate", unit_of_measurement: "MB/s", state_class: "measurement" });
+  states["sensor.rete_rx"] = S("12.5", { friendly_name: "Rete RX",
+    device_class: "data_rate", unit_of_measurement: "Mbit/s", state_class: "measurement" });
+  // E una lettura senza nessuna device_class - il carico di una CPU e' un
+  // "%" e basta - prima non compariva affatto nell'elenco.
+  states["sensor.cpu_carico"] = S("7.5", { friendly_name: "Carico CPU",
+    unit_of_measurement: "%", state_class: "measurement" });
+  el._signature = ""; el.render();
+  h = el.innerHTML;
+  ok("dischi e rete sono due tipi diversi, non uno",
+     h.includes('value="data_rate|MB/s"') && h.includes('value="data_rate|Mbit/s"'), "");
+  ok("e l'etichetta dice l'unità, così si capisce quale è quale",
+     /Mbit\/s · 1 entità/.test(h), "");
+  ok("una lettura senza device_class non è più invisibile",
+     h.includes('value="|%"'), "");
+  ok("il carico della CPU è cercabile per nome",
+     el._trendMatches(["sensor.cpu_carico", "sensor.rete_rx"], "carico cpu").join() === "sensor.cpu_carico",
+     JSON.stringify(el._trendMatches(["sensor.cpu_carico", "sensor.rete_rx"], "carico cpu")));
+  ok("la ricerca vuole tutte le parole, in qualunque ordine",
+     el._trendMatches(["sensor.cpu_carico"], "cpu carico").length === 1
+     && el._trendMatches(["sensor.cpu_carico"], "cpu memoria").length === 0);
+  ok("e sceglie fra le grandezze anche solo dall'unità",
+     el._trendMatches(["sensor.disco_rw", "sensor.rete_rx"], "mbit").join() === "sensor.rete_rx",
+     JSON.stringify(el._trendMatches(["sensor.disco_rw", "sensor.rete_rx"], "mbit")));
+  ok("c'è un campo di ricerca, non solo una tendina da mille voci",
+     h.includes("data-trend-find"));
+  delete states["sensor.disco_rw"]; delete states["sensor.rete_rx"];
+  delete states["sensor.cpu_carico"];
+  el._signature = ""; el.render(); h = el.innerHTML;
   ok("e resta la scorciatoia delle stanze, che dà nomi migliori",
      h.includes('value="__rooms"'));
 

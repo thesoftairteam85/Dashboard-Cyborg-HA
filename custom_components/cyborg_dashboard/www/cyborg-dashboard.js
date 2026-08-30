@@ -477,6 +477,51 @@ function dcLabel(key) {
   return DEVICE_CLASS_LABELS[key] || String(key).replace(/_/g, " ");
 }
 
+/**
+ * What a reading actually is: its class AND its unit.
+ *
+ * `device_class` alone is not a quantity. Home Assistant files both the disk
+ * throughput of a server (MB/s) and the speed of a network card (Mbit/s) under
+ * `data_rate`, and both the RAM in use and the size of a partition under
+ * `data_size`. A chart built on the class alone puts megabytes and megabits on
+ * one axis and compares nothing - which is exactly what the card's own hint
+ * promises it will not do.
+ *
+ * The unit alone is not enough either: it leaves out everything Home Assistant
+ * knows about what the number means. So the key is the pair, and a reading with
+ * no class at all - CPU load is a plain % with an icon and nothing else - still
+ * gets one, keyed on the unit. Before this, those readings did not appear in
+ * the list at all: not hidden, simply absent.
+ */
+function quantityKey(st) {
+  if (!st) return null;
+  const dc = st.attributes.device_class || "";
+  const unit = st.attributes.unit_of_measurement || "";
+  if (!dc && !unit) return null;
+  return dc + "|" + unit;
+}
+
+function quantityLabel(key) {
+  const i = String(key).indexOf("|");
+  if (i < 0) return dcLabel(key);
+  const dc = key.slice(0, i), unit = key.slice(i + 1);
+  if (!dc) return unit;
+  return dcLabel(dc) + (unit ? " · " + unit : "");
+}
+
+/**
+ * Does this reading belong to the chosen quantity?
+ *
+ * A card written before the unit was part of the key carries a bare
+ * device_class. It keeps working, and keeps meaning what it meant: every
+ * reading of that class, whatever the unit.
+ */
+function quantityMatches(st, want) {
+  if (!st || !want) return false;
+  if (String(want).indexOf("|") < 0) return st.attributes.device_class === want;
+  return quantityKey(st) === want;
+}
+
 const DOMAIN_LABELS = {
   light: "Luce", switch: "Interruttore", climate: "Clima", cover: "Tapparella",
   fan: "Ventilazione", lock: "Serratura", media_player: "Media",
@@ -4282,6 +4327,45 @@ class CyborgDashboard extends HTMLElement {
       }
     }
 
+    // The main meter: one declaration instead of twenty.
+    //
+    // A flat with a measured main breaker has ONE reading upstream of
+    // everything. Making the owner repeat "this hangs off the main" for every
+    // single load is asking twenty times a question whose answer he already
+    // gave — and until he does, the diagram draws the main breaker and the
+    // washing machine as two independent branches of the house, which is
+    // wiring that does not exist.
+    //
+    // Declared parents still win: this only answers for the loads that have
+    // no answer yet. The main meter itself never becomes its own child, and a
+    // load already sitting under something else is left where it is.
+    if (flow.main) {
+      const mainId = flow.main;
+      for (const l of all) {
+        if (l.entity === mainId || l.parent) continue;
+        l.parent = mainId;
+      }
+      // Il generale deve comparire anche se non e' fra i dispositivi: e' il
+      // tronco, non un ramo. Se non ha una lettura di potenza non si puo'
+      // disegnare, e i carichi restano radici come prima.
+      if (!all.some((l) => l.entity === mainId)) {
+        const mst = this._hass.states[mainId];
+        const mw = mst ? powerWatts(mst) : null;
+        if (mw === null) {
+          for (const l of all) if (l.parent === mainId) l.parent = null;
+        } else {
+          all.push({
+            entity: mainId,
+            name: mst.attributes.friendly_name || mainId,
+            icon: autoIcon(mainId, mst),
+            watts: mw, parent: null, children: [], main: true,
+          });
+        }
+      } else {
+        for (const l of all) if (l.entity === mainId) l.main = true;
+      }
+    }
+
     // A child whose parent is not itself on the diagram cannot be drawn under
     // anything, so it silently became a root and the hierarchy looked ignored —
     // which is exactly what it looked like on screen: four loads in a row.
@@ -4319,6 +4403,21 @@ class CyborgDashboard extends HTMLElement {
     for (const l of all) {
       const parent = l.parent && byId[l.parent];
       if (parent && parent !== l) parent.children.push(l); else loads.push(l);
+    }
+    // Quanto del generale non e' spiegato dai carichi che gli stanno sotto.
+    // E' la stessa domanda del "Non misurato" di casa, un piano piu' giu': se
+    // il generale legge 2,18 kW e i figli ne spiegano 2,03, i restanti 150 W
+    // esistono e vanno detti, non lasciati sparire nella differenza.
+    for (const l of all) {
+      if (!l.main || !l.children.length) continue;
+      const known = l.children.reduce((t, c) => t + c.watts, 0);
+      const gap = l.watts - known;
+      if (gap > Math.max(25, l.watts * 0.05)) {
+        // "Altri carichi" e non "Resto del generale": sotto il nodo c'e' poco
+        // spazio e un'etichetta troncata a "Resto del ge..." non dice niente.
+        l.children.push({ entity: null, name: "Altri carichi",
+          icon: "mdi:help-circle-outline", watts: gap, other: true, children: [] });
+      }
     }
     for (const l of loads) l.children.sort((a, b) => b.watts - a.watts);
     loads.sort((a, b) => b.watts - a.watts);
@@ -6084,6 +6183,31 @@ class CyborgDashboard extends HTMLElement {
     return this._trendSeriesRaw(item);
   }
 
+/**
+   * Which readings match what was typed.
+   *
+   * Every word must appear somewhere, and "somewhere" includes the device
+   * name: "mini pc memoria" has to find the memory sensor even though the
+   * device name and the word "memoria" never sit in the same field. Matching
+   * whole words in any order, rather than one substring, is what makes it
+   * behave the way people type.
+   */
+  _trendMatches(ids, query) {
+    const words = query.split(/\s+/).filter(Boolean);
+    if (!words.length) return ids;
+    const devName = (this._registry && this._registry.deviceName) || {};
+    const entDev = (this._registry && this._registry.entityDevice) || {};
+    const area = (this._registry && this._registry.entityArea) || {};
+    return ids.filter((id) => {
+      const st = this._hass.states[id];
+      if (!st) return false;
+      const hay = (id + " " + (st.attributes.friendly_name || "") + " "
+        + (devName[entDev[id]] || "") + " " + (area[id] || "") + " "
+        + (st.attributes.unit_of_measurement || "")).toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  }
+
   _trendSeries(item) {
     const off = new Set(Array.isArray(item.hidden_series) ? item.hidden_series : []);
     const all = this._trendSeriesRaw(item);
@@ -6111,13 +6235,13 @@ class CyborgDashboard extends HTMLElement {
     }
 
     if (source === "class") {
-      const dc = item.device_class || "temperature";
+      const want = item.device_class || "temperature";
       const cat = (this._registry && this._registry.category) || {};
       const area = (this._registry && this._registry.entityArea) || {};
       if (!this._registry && !this._registryLoading) this._loadRegistry();
       const ids = Object.keys(this._hass.states).filter((id) => {
         const st = this._hass.states[id];
-        return st && !cat[id] && st.attributes.device_class === dc
+        return st && !cat[id] && quantityMatches(st, want)
           && Number.isFinite(parseFloat(st.state));
       });
       // Sort key, in order of importance:
@@ -8467,14 +8591,33 @@ class CyborgDashboard extends HTMLElement {
       // Every device_class that actually exists here, with how many entities
       // carry it: offering the full Home Assistant list would mostly be
       // classes this house does not have.
+      // I tipi sono coppie classe+unita': vedi quantityKey. Cosi' la memoria
+      // (data_size · MiB) si separa dalla dimensione dei dischi, la rete
+      // (data_rate · Mbit/s) dai dischi (MB/s), e il carico della CPU - che
+      // non ha nessuna device_class, solo un "%" - smette di essere invisibile.
       const classes = {};
       for (const id of Object.keys(this._hass.states)) {
         const st = this._hass.states[id];
-        const k = st && st.attributes.device_class;
-        if (!k || !Number.isFinite(parseFloat(st.state))) continue;
+        if (!Number.isFinite(parseFloat(st.state))) continue;
+        const k = quantityKey(st);
+        if (!k) continue;
         classes[k] = (classes[k] || 0) + 1;
       }
-      const classKeys = Object.keys(classes).sort();
+      const classKeys = Object.keys(classes)
+        .sort((a, b) => quantityLabel(a).localeCompare(quantityLabel(b)));
+      // I dispositivi con piu' di una lettura numerica: il modo naturale di
+      // dire "tutto il mini PC" senza sceglierne novanta a mano.
+      const devIds = (this._registry && this._registry.deviceEntities) || {};
+      const devName = (this._registry && this._registry.deviceName) || {};
+      if (!this._registry && !this._registryLoading) this._loadRegistry();
+      const devices = Object.keys(devIds).map((did) => ({
+        id: did, name: devName[did] || did,
+        ids: devIds[did].filter((id) => {
+          const st = this._hass.states[id];
+          return st && Number.isFinite(parseFloat(st.state));
+        }),
+      })).filter((d) => d.ids.length > 1)
+        .sort((a, b) => a.name.localeCompare(b.name));
 
       const modeBar = `<div class="seg">
           <button class="${source === "comfort" ? "active" : ""}" data-trend-source="comfort">Segui le stanze</button>
@@ -8490,8 +8633,18 @@ class CyborgDashboard extends HTMLElement {
           ${source === "comfort"
             ? `<span class="hint">Segue le stesse stanze della card Temperature — sonda esterna compresa — e ne disegna la temperatura. È la modalità giusta per «confronta tutte le stanze»: cambia le stanze lì e il grafico segue.</span>`
             : `<label>TIPO DI GRANDEZZA<select data-prop="device_class">
-                 ${classKeys.map((k) => `<option value="${esc(k)}" ${(card.device_class || "temperature") === k ? "selected" : ""}>${esc(dcLabel(k))} · ${classes[k]} entità</option>`).join("")}
-               </select><span class="hint">Ogni entità numerica di questo tipo diventa una linea, ordinata per stanza — temperature di quattro motori, tensioni di tre fasi, correnti di un quadro. Una sola unità di misura per grafico: mescolare °C e W su un asse solo non confronta niente.</span></label>`}
+                 ${(() => {
+                   // Una card scritta prima della 0.46.0 porta una classe
+                   // senza unita': vuol dire "tutte le unita' di questa
+                   // classe", e continua a valere. Va pero' offerta come
+                   // scelta, altrimenti aprendo l'editor risulterebbe
+                   // selezionata una voce che la card non sta usando.
+                   const cur = card.device_class || "temperature";
+                   const legacy = classKeys.includes(cur) ? "" :
+                     `<option value="${esc(cur)}" selected>${esc(quantityLabel(cur))} · tutte le unità</option>`;
+                   return legacy + classKeys.map((k) => `<option value="${esc(k)}" ${cur === k ? "selected" : ""}>${esc(quantityLabel(k))} · ${classes[k]} entità</option>`).join("");
+                 })()}
+               </select><span class="hint">Ogni entità numerica di questo tipo diventa una linea, ordinata per stanza — temperature di quattro motori, tensioni di tre fasi, correnti di un quadro. <strong>Il tipo comprende l'unità</strong>: MB/s dei dischi e Mbit/s della rete sono due voci diverse, perché su un asse solo non si confrontano.</span></label>`}
           <label>MASSIMO DI LINEE<input type="number" min="1" max="${MAX_TREND_SERIES}" step="1" data-prop="max_series" value="${cap}"></label>
           <span class="hint">${resolved.length} linee adesso${resolved.length >= cap ? " · limite raggiunto, le altre restano fuori" : ""}. Oltre le otto un piano cartesiano smette di confrontare e comincia a nascondere: il tetto è di ${MAX_TREND_SERIES}.</span>
           <div class="eco-dev-list">${resolved.map((row) => `<div class="eco-dev-edit">
@@ -8536,14 +8689,42 @@ class CyborgDashboard extends HTMLElement {
           <select data-trend-fill>
             <option value="">— tutte le grandezze di un tipo —</option>
             <option value="__rooms">Temperature delle stanze (coi nomi delle stanze)</option>
-            ${classKeys.map((k) => `<option value="${esc(k)}">${esc(dcLabel(k))} · ${classes[k]} entità</option>`).join("")}
+            ${classKeys.map((k) => `<option value="${esc(k)}">${esc(quantityLabel(k))} · ${classes[k]} entità</option>`).join("")}
+            ${devices.length ? `<option value="" disabled>── oppure tutto un dispositivo ──</option>` : ""}
+            ${devices.map((d) => `<option value="dev:${esc(d.id)}">${esc(d.name)} · ${d.ids.length} letture</option>`).join("")}
           </select>
-          <span class="hint">Riempie l'elenco in un colpo solo. Resta comunque un elenco tuo: non si aggiorna da solo — per quello servono le altre due modalità.</span>
+          <span class="hint">Riempie l'elenco in un colpo solo — anche <strong>tutte le letture di un dispositivo</strong>, che è il modo di dire «il mini PC» senza sceglierne novanta a mano. Resta comunque un elenco tuo: non si aggiorna da solo — per quello servono le altre due modalità.</span>
         </label>
+        <label>CERCA UNA GRANDEZZA
+          <input type="search" data-trend-find placeholder="mini pc memoria, bagno temperatura…"
+            value="${esc(this._trendFind || "")}">
+        </label>
+        <span class="hint">${(() => {
+          // Un elenco a tendina con mille voci non e' un elenco: e' un muro.
+          // La ricerca guarda il nome, l'entity_id e il dispositivo, cosi'
+          // "mini pc memoria" trova quello che si sta cercando anche se il
+          // nome dell'entita' non contiene nessuna delle due parole insieme.
+          const q2 = (this._trendFind || "").trim().toLowerCase();
+          const free = numeric.filter((id) => !chosen.some((r) => r.entity === id));
+          return q2 ? `${this._trendMatches(free, q2).length} risultati su ${free.length} grandezze.`
+            : `${free.length} grandezze disponibili: scrivi qualche lettera per restringere.`;
+        })()}</span>
         <label>AGGIUNGI UNA GRANDEZZA<select data-trend-add>
           <option value="">— scegli un'entità numerica —</option>
-          ${numeric.filter((id) => !chosen.some((r) => r.entity === id))
-            .map((id) => `<option value="${esc(id)}">${esc(this._hass.states[id].attributes.friendly_name || id)} · ${esc(this._hass.states[id].attributes.unit_of_measurement || "")}</option>`).join("")}
+          ${(() => {
+            const q2 = (this._trendFind || "").trim().toLowerCase();
+            const free = numeric.filter((id) => !chosen.some((r) => r.entity === id));
+            const list = q2 ? this._trendMatches(free, q2) : free;
+            const devName = (this._registry && this._registry.deviceName) || {};
+            const entDev = (this._registry && this._registry.entityDevice) || {};
+            return list.slice(0, 300).map((id) => {
+              const st = this._hass.states[id];
+              const dev = devName[entDev[id]] || "";
+              return `<option value="${esc(id)}">${esc(st.attributes.friendly_name || id)}${
+                dev ? " · " + esc(dev) : ""} · ${esc(st.attributes.unit_of_measurement || "")}</option>`;
+            }).join("") + (list.length > 300
+              ? `<option value="" disabled>…e altre ${list.length - 300}: restringi la ricerca</option>` : "");
+          })()}
         </select></label>`}
       </div>
       <div class="section">
@@ -8970,6 +9151,28 @@ class CyborgDashboard extends HTMLElement {
           </div>`;
       }).join("")}
       ${flow.home ? "" : '<span class="hint">Senza il sensore "Casa" il consumo domestico viene calcolato: solare + prelievo + scarica batteria − immissione − carica batteria.</span>'}
+    </div>
+    <div class="section">
+      <strong>CONTATORE GENERALE</strong>
+      <span class="hint">Il contatore <strong>a monte di tutto</strong>: l'interruttore generale, il quadro principale. Dichiaralo una volta e <strong>ogni carico che non ha già un padre gli finisce sotto</strong>, invece di ripetere «questo sta sotto il generale» per ognuno.</span>
+      ${(() => {
+        const id = flow.main;
+        const st = id && this._hass.states[id];
+        const active = this._flowSlot === "main";
+        const dead = id && !st;
+        return `<div class="flow-slot ${active ? "active" : ""}" style="--nc:#c77dff">
+          <div class="flow-slot-head">
+            <ha-icon icon="mdi:transmission-tower"></ha-icon>
+            <div><strong>Generale</strong>
+              <small>${id ? esc((st && st.attributes.friendly_name) || id) + (dead ? " · non presente in Home Assistant" : "") : "nessuno · i carichi restano rami indipendenti"}</small></div>
+            <button class="mini" data-flow-pick="main">${active ? "CHIUDI" : id ? "CAMBIA" : "COLLEGA"}</button>
+            ${id ? `<button class="mini danger" data-flow-clear="main"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}
+          </div>
+          ${active ? `<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="cerca il sensore di potenza del generale..." autocomplete="off">
+            <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults("power")}</div>` : ""}
+        </div>`;
+      })()}
+      <span class="hint">Serve la <em>potenza</em> del generale, in W o kW. Quello che il generale legge e i suoi figli non spiegano compare come <strong>Resto del generale</strong>: sono i carichi non misurati a valle, e sono un numero vero, non un arrotondamento.</span>
     </div>
     <div class="section">
       <strong>CARICHI MONITORATI</strong>
@@ -10708,12 +10911,33 @@ class CyborgDashboard extends HTMLElement {
         // room temperatures are worth labelling with the ROOM name rather than
         // "Sensore T&U Bagno Temperatura". Everything else is filled generically.
         for (const room of this._comfortRooms({})) push(room.temperature, room.name);
+      } else if (pick.startsWith("dev:")) {
+        // Tutte le letture numeriche di un dispositivo. Le entita' di servizio
+        // - versione firmware, potenza del segnale - restano fuori: Home
+        // Assistant le marca con entity_category e non sono cio' che si
+        // intende quando si dice "il mini PC".
+        //
+        // Ordinate per unita' e poi per nome: se il tetto delle linee taglia,
+        // taglia dentro un'unita' sola invece di lasciare due megabyte e un
+        // megabit spaiati.
+        const cat = (this._registry && this._registry.category) || {};
+        const ids = (((this._registry || {}).deviceEntities || {})[pick.slice(4)] || [])
+          .filter((id) => {
+            const st = this._hass.states[id];
+            return st && !cat[id] && Number.isFinite(parseFloat(st.state));
+          })
+          .sort((a, b) => {
+            const ua = (this._hass.states[a].attributes.unit_of_measurement || "");
+            const ub = (this._hass.states[b].attributes.unit_of_measurement || "");
+            return ua.localeCompare(ub) || a.localeCompare(b);
+          });
+        for (const id of ids) push(id, "");
       } else {
         const area = (this._registry && this._registry.entityArea) || {};
         const cat = (this._registry && this._registry.category) || {};
         const ids = Object.keys(this._hass.states).filter((id) => {
           const st = this._hass.states[id];
-          return st && !cat[id] && st.attributes.device_class === pick
+          return st && !cat[id] && quantityMatches(st, pick)
             && Number.isFinite(parseFloat(st.state));
         }).sort((a, b) => (area[a] || "").localeCompare(area[b] || "") || a.localeCompare(b));
         for (const id of ids) push(id, area[id] ? "" : "");
@@ -10722,9 +10946,26 @@ class CyborgDashboard extends HTMLElement {
       this._trend = {};
       this._touch();
     };
+    const trendFind = q("[data-trend-find]");
+    if (trendFind && card) {
+      // `input` e non `change`: si filtra mentre si scrive. Il ridisegno
+      // rimonta il campo, quindi il cursore va rimesso dove stava, altrimenti
+      // ogni lettera lo sbatterebbe in fondo e scrivere sarebbe impossibile.
+      trendFind.oninput = () => {
+        this._trendFind = trendFind.value;
+        this._trendFindCaret = trendFind.selectionStart;
+        this._touch(true);
+      };
+      if (this._trendFind && document.activeElement !== trendFind
+          && this._trendFindCaret !== undefined) {
+        trendFind.focus();
+        try { trendFind.setSelectionRange(this._trendFindCaret, this._trendFindCaret); } catch (e) { /* niente */ }
+      }
+    }
     const trendAdd = q("[data-trend-add]");
     if (trendAdd && card) trendAdd.onchange = () => {
       if (!trendAdd.value) return;
+      this._trendFind = "";
       card.series = Array.isArray(card.series) ? card.series : [];
       if (card.series.length < MAX_TREND_SERIES && !card.series.some((r) => r.entity === trendAdd.value)) {
         card.series.push({ entity: trendAdd.value, name: "",
@@ -13717,7 +13958,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.45.0";
+const CYBORG_BUILD = "0.46.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

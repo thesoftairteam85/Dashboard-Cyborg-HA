@@ -4,6 +4,63 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.46.0] - 2026-08-30
+
+Il contatore generale, e i grafici che smettono di mescolare megabyte e megabit.
+
+### Contatore generale: una dichiarazione invece di venti
+Chi ha un interruttore generale misurato vedeva **il generale e la lavatrice
+come due rami paralleli della casa** — un impianto che non esiste — finché non
+dichiarava a mano, carico per carico, «questo sta sotto quello».
+
+Ora c'è un campo solo, nell'editor del flusso: **CONTATORE GENERALE**. Dichiarato
+una volta, **ogni carico che non ha già un padre gli finisce sotto**. Le
+parentele dichiarate continuano a vincere: il generale risponde solo per chi non
+ha ancora una risposta.
+
+Sotto il generale compare **Altri carichi**: quello che il generale legge e i
+suoi figli non spiegano. È un numero vero — i carichi non misurati a valle — non
+un arrotondamento fra sensori. Un generale dichiarato ma inesistente, o senza
+lettura di potenza, lascia i carichi dove sono invece di appenderli al vuoto.
+
+### Il tipo di grandezza comprende l'unità
+Home Assistant mette sotto `data_rate` **sia i MB/s di un disco sia i Mbit/s di
+una scheda di rete**, e sotto `data_size` sia la RAM in uso sia la dimensione di
+una partizione. Il grafico «tutte di un tipo» li metteva su un asse solo e non
+confrontava niente — mentre il suggerimento della card prometteva il contrario.
+
+Il tipo è ora la coppia **classe + unità**: `Velocità dati · MB/s` e `Velocità
+dati · Mbit/s` sono due voci distinte. Di conseguenza:
+
+- la **memoria** (`data_size · MiB`) si separa dalla dimensione dei dischi;
+- il **carico della CPU** — che non ha nessuna `device_class`, solo un `%` —
+  smette di essere invisibile: prima non era nascosto, era proprio assente.
+
+Una card scritta prima porta la classe senza unità: continua a valere e a
+significare «tutte le unità di questa classe», ed è offerta come tale
+nell'editor.
+
+### Cercare invece di scorrere
+Il selettore «aggiungi una grandezza» era una tendina con **tutte** le entità
+numeriche dell'impianto. Su un impianto vero non è un elenco, è un muro.
+Ora c'è un **campo di ricerca**: cerca fra nome, entity_id, **dispositivo**,
+stanza e unità, a parole in qualunque ordine — `mini pc memoria` trova quello
+che si sta cercando anche se il nome dell'entità non contiene le due parole
+insieme.
+
+### «Tutto un dispositivo», in un colpo solo
+Il riempimento in blocco offre ora anche **ogni dispositivo con più di una
+lettura numerica**. È il modo di dire «il mini PC» senza sceglierne novanta a
+mano. Le entità di servizio (versione firmware, potenza del segnale) restano
+fuori, e le letture sono ordinate per unità: se il tetto delle linee taglia,
+taglia dentro un'unità sola.
+
+### Verificato
+- 1157 asserzioni nella suite frontend, **416 misurate** in Chromium headless.
+- Il difetto del generale è nei test in entrambe le direzioni: senza, tre rami
+  affiancati; con, un ramo solo e i conti che tornano (il generale è la somma
+  dei suoi figli, «Altri carichi» compreso).
+
 ## [0.45.0] - 2026-08-30
 
 Analisi economica **nel tempo**: grafico di confronto, mese specifico, batteria.

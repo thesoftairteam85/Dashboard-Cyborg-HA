@@ -48,6 +48,9 @@ const states={
  "sensor.lavatrice_potenza":S("820",{friendly_name:"Lavatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.asciugatrice_potenza2":S("310",{friendly_name:"Asciugatrice",device_class:"power",unit_of_measurement:"W"}),
  "sensor.nas_potenza":S("64",{friendly_name:"NAS & Modem",device_class:"power",unit_of_measurement:"W"}),
+ // L'interruttore generale: la lettura a monte di tutto. Vale piu' della somma
+ // dei carichi misurati, perche' a valle c'e' anche quello che non si misura.
+ "sensor.generale_potenza":S("2180",{friendly_name:"Interruttore generale",device_class:"power",unit_of_measurement:"W"}),
  "sensor.casa_kw":S("1.27",{friendly_name:"Consumo Casa",device_class:"power",unit_of_measurement:"kW"}),
  "sensor.v_l1":S("231.4",{friendly_name:"Tensione L1",device_class:"voltage",unit_of_measurement:"V"}),
  "sensor.v_l2":S("256.2",{friendly_name:"Tensione L2",device_class:"voltage",unit_of_measurement:"V"}),
@@ -284,6 +287,7 @@ window.__mount=(dash,opts)=>{
               devices:[{entity:"sensor.lavatrice_potenza",name:"Lavatrice"},
                        {entity:"sensor.asciugatrice_potenza2",name:"Asciugatrice"},
                        {entity:"sensor.nas_potenza",name:"NAS & Modem"}]}});
+          if(opts.flowMain){sec.items[0].flow.main="sensor.generale_potenza";}
           if(opts.selectFlow){el._selected={kind:"card",sectionId:sec.id,itemId:"flowcard"};}
           if(opts.openTree){el._flowOpen={flowcard:true};}
           if(opts.monitor){sec.items.push({id:"moncard",type:"monitor",entity_id:"",name:"",size:"lg",
