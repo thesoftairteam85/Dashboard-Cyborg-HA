@@ -8,7 +8,8 @@ global.customElements = { get: (n) => registry[n], define: (n, c) => { registry[
 global.HTMLElement = class { constructor(){ this._html=""; }
   set innerHTML(v){ this._html = v; } get innerHTML(){ return this._html; }
   querySelector(){ return null; } querySelectorAll(){ return []; }
-  dispatchEvent(){ return true; } closest(){ return null; } };
+  dispatchEvent(){ return true; } closest(){ return null; }
+  addEventListener(){} removeEventListener(){} };
 global.CustomEvent = class { constructor(t,o){ this.type=t; Object.assign(this,o); } };
 global.Event = class { constructor(t){ this.type=t; } };
 
@@ -4049,6 +4050,121 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                     for (let i = 0; i < 12; i++) delete states["sensor.temp_" + i];
                     delete states["sensor.volt_a"]; delete states["update.qualcosa"];
                     ok("stato ripristinato dopo la sezione 45", !states["sensor.temp_0"]);
+                  }
+
+                  console.log("\n== 46. CHIOSCO PER I TABLET A MURO ==");
+                  {
+                    const savedDash = el._dashboard, savedUser = el._hass.user;
+                    const savedIdx = el._pageIndex, savedEditing = el._editing;
+                    el._dashboard = {
+                      theme: { accent: "#00e5ff" },
+                      kiosk: { dim_after: 0, home_after: 0, hide_header: false },
+                      hierarchy: {},
+                      pages: [
+                        { id: "casa", title: "Casa", icon: "mdi:home", type: "sections", kiosk: true,
+                          sections: [
+                            { id: "s1", title: "Luci", kiosk: true, items: [] },
+                            { id: "s2", title: "Diagnostica", kiosk: false, items: [] }] },
+                        { id: "tec", title: "Tecnica", icon: "mdi:cog", type: "sections", kiosk: false,
+                          sections: [{ id: "s3", title: "Rete", kiosk: true, items: [] }] },
+                      ] };
+                    el._pageIndex = 0; el._editing = false; el._kioskPreview = false;
+
+                    // --- chi e' in chiosco e chi no
+                    delete el._hass.user;
+                    ok("senza un utente dichiarato NON si va in chiosco",
+                       el._isKiosk() === false);
+                    el._hass.user = { name: "Oscar", is_admin: true };
+                    ok("un amministratore non e' in chiosco", el._isKiosk() === false);
+                    el._hass.user = { name: "Home User", is_admin: false };
+                    ok("un utente non amministratore lo e'", el._isKiosk() === true);
+
+                    // --- cosa vede
+                    ok("vede solo le pagine abilitate",
+                       el._visiblePages().map((p) => p.id).join() === "casa",
+                       JSON.stringify(el._visiblePages().map((p) => p.id)));
+                    ok("e solo le sezioni abilitate",
+                       el._sections().map((x) => x.id).join() === "s1",
+                       JSON.stringify(el._sections().map((x) => x.id)));
+                    ok("la pagina corrente e' una di quelle abilitate",
+                       el._page() && el._page().id === "casa");
+
+                    el._hass.user = { name: "Oscar", is_admin: true };
+                    ok("l'amministratore le vede tutte",
+                       el._visiblePages().length === 2 && el._sections().length === 2,
+                       el._visiblePages().length + "/" + el._sections().length);
+
+                    // --- l'anteprima mostra esattamente quello che vede il tablet
+                    el._kioskPreview = true;
+                    ok("in anteprima l'amministratore vede quello che vede il tablet",
+                       el._isKiosk() === true && el._visiblePages().length === 1
+                       && el._sections().length === 1);
+                    el._kioskPreview = false;
+                    ok("uscendo dall'anteprima torna tutto", el._visiblePages().length === 2);
+
+                    // --- il caso limite: nessuna pagina abilitata
+                    el._hass.user = { name: "Home User", is_admin: false };
+                    el._dashboard.pages.forEach((p) => { p.kiosk = false; });
+                    ok("con nessuna pagina abilitata non resta una pagina fantasma",
+                       el._visiblePages().length === 0 && el._page() === null);
+                    el.render();
+                    ok("e lo schermo lo dice invece di restare vuoto",
+                       /Nessuna pagina abilitata al chiosco/.test(el.innerHTML),
+                       el.innerHTML.slice(0, 90));
+                    ok("senza offrire nessun comando di modifica",
+                       !/data-toggle-edit/.test(el.innerHTML));
+                    el._dashboard.pages[0].kiosk = true;
+
+                    // --- niente editor per un non amministratore
+                    el._editing = true;
+                    el.render();
+                    const kioskHtml = el.innerHTML;
+                    ok("in chiosco non c'e' il pulsante MODIFICA",
+                       !/data-toggle-edit/.test(kioskHtml));
+                    ok("ne' il salvataggio", !/data-save/.test(kioskHtml));
+                    ok("ne' il pannello di modifica", !/class="editor"/.test(kioskHtml));
+                    ok("ma si dichiara come chiosco", /status kiosk/.test(kioskHtml));
+
+                    el._hass.user = { name: "Oscar", is_admin: true };
+                    el.render();
+                    ok("per l'amministratore l'editor c'e'",
+                       /data-toggle-edit/.test(el.innerHTML) && /class="editor"/.test(el.innerHTML));
+
+                    // --- il velo dello spegnimento
+                    el._hass.user = { name: "Home User", is_admin: false };
+                    el._editing = false;
+                    el.render();
+                    ok("senza spegnimento richiesto non c'e' nessun velo",
+                       !/data-kiosk-dim/.test(el.innerHTML));
+                    el._dashboard.kiosk.dim_after = 5;
+                    el.render();
+                    ok("chiedendolo, il velo compare", /data-kiosk-dim/.test(el.innerHTML));
+                    el._hass.user = { name: "Oscar", is_admin: true };
+                    el.render();
+                    ok("ma non per l'amministratore", !/data-kiosk-dim/.test(el.innerHTML));
+
+                    // --- i comandi restano: e' il punto di tutta la scelta A
+                    el._hass.user = { name: "Home User", is_admin: false };
+                    states["light.sala"] = S("off", { friendly_name: "Luce sala",
+                      supported_color_modes: ["brightness"] });
+                    el._dashboard.pages[0].sections[0].items = [{ id: "c1", type: "entity",
+                      entity_id: "light.sala", name: "", size: "sm", appearance: {},
+                      states: {}, actions: {}, row_action: "toggle" }];
+                    el.render();
+                    ok("da un tablet la card della luce c'e' ancora",
+                       /Luce sala/.test(el.innerHTML)
+                       && /data-card-id="c1"/.test(el.innerHTML),
+                       "la card non c'e'");
+                    ok("ed e' toccabile, non solo mostrata",
+                       /data-card-id="c1"[^>]*data-tap/.test(el.innerHTML),
+                       (el.innerHTML.match(/<article data-card-id="c1"[^>]*/) || [])[0]);
+
+                    delete states["light.sala"];
+                    el._dashboard = savedDash; el._hass.user = savedUser;
+                    el._pageIndex = savedIdx; el._editing = savedEditing;
+                    el._kioskPreview = false;
+                    if (savedUser === undefined) delete el._hass.user;
+                    ok("stato ripristinato dopo la sezione 46", !states["light.sala"]);
                   }
 
                   console.log("\n" + "=".repeat(46));

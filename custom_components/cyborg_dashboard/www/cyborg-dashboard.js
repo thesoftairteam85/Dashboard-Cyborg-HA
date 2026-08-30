@@ -1790,9 +1790,37 @@ class CyborgDashboard extends HTMLElement {
 
   // ---------------------------------------------------------------- data ---
 
+  /**
+   * Wall-tablet mode.
+   *
+   * One dashboard for everybody - the tablet in the bedroom must still be able
+   * to switch on the living-room lights - with the owner deciding page by page
+   * and section by section what shows up there. What separates the two is the
+   * Home Assistant user: a non-admin gets the kiosk, and no editor at all.
+   *
+   * The absence of `hass.user` means ADMIN, never kiosk. Guessing the other way
+   * would lock the owner out of his own editor the first time Home Assistant
+   * delivered the object late, and there would be no way back from inside the
+   * panel. Real access control stays where it belongs - a non-admin account,
+   * `local_only` - and this is the presentation on top of it.
+   */
+  _isKiosk() {
+    if (this._kioskPreview) return true;
+    const user = this._hass && this._hass.user;
+    return !!user && user.is_admin === false;
+  }
+
+  /** Pages a tablet may show. In kiosk an unflagged page is visible. */
+  _visiblePages() {
+    const pages = (this._dashboard && this._dashboard.pages) || [];
+    if (!this._isKiosk()) return pages;
+    return pages.filter((p) => p.kiosk !== false);
+  }
+
   _page() {
     if (!this._dashboard) return null;
-    const pages = this._dashboard.pages;
+    const pages = this._visiblePages();
+    if (!pages.length) return null;
     if (this._pageIndex >= pages.length) this._pageIndex = 0;
     return pages[this._pageIndex];
   }
@@ -1822,7 +1850,11 @@ class CyborgDashboard extends HTMLElement {
   _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
   _rooms() { const p = this._page(); return (p && p.rooms) || []; }
   _room(id) { return this._rooms().find((r) => r.id === id) || null; }
-  _sections() { const p = this._page(); return (p && p.sections) || []; }
+  _sections() {
+    const p = this._page();
+    const all = (p && p.sections) || [];
+    return this._isKiosk() ? all.filter((sec) => sec.kiosk !== false) : all;
+  }
   _section(id) { return this._sections().find((s) => s.id === id) || null; }
   _card(sectionId, itemId) {
     const s = this._section(sectionId);
@@ -8773,6 +8805,11 @@ class CyborgDashboard extends HTMLElement {
         </select>
         ${this._sections().length === 1 ? '<span class="hint">È l\'unica sezione di questa pagina: spostandola, la pagina vuota viene rimossa.</span>' : ""}
       </div>
+      <div class="section">
+        <strong>CHIOSCO</strong>
+        <label class="check"><input type="checkbox" data-sec-kiosk ${section.kiosk !== false ? "checked" : ""}> Questa sezione si vede sui tablet</label>
+        <span class="hint">Togliendola resta visibile a te, non a un utente non amministratore.</span>
+      </div>
       <button class="delete" data-sec-remove data-sec="${esc(section.id)}">ELIMINA SEZIONE</button>
     </aside>`;
   }
@@ -8787,6 +8824,7 @@ class CyborgDashboard extends HTMLElement {
         <label>COLORE TEMA<input type="color" data-theme-prop="accent" value="${esc((this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff")}"></label>
       </div>
       ${this._pageManager()}
+      ${this._kioskEditor(p)}
       ${this._hierarchyEditor()}
       <div class="section">
         <strong>SEZIONI</strong>
@@ -8884,6 +8922,35 @@ class CyborgDashboard extends HTMLElement {
     </div>`;
   }
 
+  /**
+   * Kiosk settings: one dashboard, fewer powers on the tablets.
+   *
+   * There is no second configuration to keep in step - the tablets show the
+   * same pages, so switching a light on in the living room from the bedroom
+   * keeps working - and what changes is only what is on screen and who may
+   * edit it. The separation itself is a Home Assistant user: a non-admin gets
+   * the kiosk. That is a real permission boundary; this panel only decides
+   * what to draw inside it.
+   */
+  _kioskEditor(page) {
+    const cfg = (this._dashboard && this._dashboard.kiosk) || {};
+    const pages = (this._dashboard && this._dashboard.pages) || [];
+    const shown = pages.filter((pg) => pg.kiosk !== false).length;
+    return `<div class="section">
+      <strong>CHIOSCO · TABLET A MURO</strong>
+      <span class="hint">Un utente di Home Assistant <strong>non amministratore</strong> vede la dashboard senza editor: niente MODIFICA, niente maniglie, niente salvataggio. Le pagine restano le stesse, così da un tablet in camera accendi comunque le luci della sala.</span>
+      <label class="check"><input type="checkbox" data-page-kiosk ${page.kiosk !== false ? "checked" : ""}> Questa pagina si vede sui tablet</label>
+      <span class="hint">${shown} pagine su ${pages.length} abilitate.${shown ? "" : " <strong>Nessuna</strong>: un tablet resterebbe senza niente da mostrare."}</span>
+      <div class="two">
+        <label>SCHERMO SCURO DOPO (min)<input type="number" min="0" max="240" data-kiosk-prop="dim_after" value="${cfg.dim_after ?? 0}"></label>
+        <label>TORNA ALLA PRIMA PAGINA DOPO (min)<input type="number" min="0" max="240" data-kiosk-prop="home_after" value="${cfg.home_after ?? 0}"></label>
+      </div>
+      <span class="hint">Zero significa mai. Il tocco che riaccende lo schermo non preme quello che c'era sotto.</span>
+      <button class="secondary wide" data-kiosk-preview><ha-icon icon="mdi:tablet-dashboard"></ha-icon> ANTEPRIMA CHIOSCO</button>
+      <span class="hint">Ti mostra esattamente quello che vede un tablet, senza cambiare niente. Si esce dal pulsante in alto.</span>
+    </div>`;
+  }
+
   /** Sheet chrome shared by every editor variant (handle + close). */
   _editorHead(label, title, closable) {
     return `<div class="editor-handle" data-close-editor></div>
@@ -8940,6 +9007,21 @@ class CyborgDashboard extends HTMLElement {
 
     const p = this._page();
     const theme = this._dashboard.theme || {};
+    const kiosk = this._isKiosk();
+    // Ogni pagina esclusa dal chiosco: si dice, non si mostra uno schermo
+    // vuoto. Nascondere tutto e' una scelta legittima, lasciare un tablet
+    // muto senza spiegazione no.
+    if (kiosk && !this._visiblePages().length) {
+      this.innerHTML = `<style>${this._css()}</style>
+        <div class="shell" style="--accent:${esc(theme.accent || "#00e5ff")}">
+          <div class="bootstrap">
+            <ha-icon icon="mdi:tablet-dashboard"></ha-icon>
+            <h2>Nessuna pagina abilitata al chiosco</h2>
+            <p>Questo utente non è amministratore, e nessuna pagina è marcata come visibile sui tablet. Abilitane almeno una dall'editor della pagina.</p>
+          </div>
+        </div>`;
+      return;
+    }
     const floorplan = this._isFloorplan();
     const sections = floorplan ? [] : this._sections();
     const total = sections.reduce((n, s) => n + s.items.length, 0);
@@ -9000,7 +9082,9 @@ class CyborgDashboard extends HTMLElement {
             ${this._error ? `<span class="status err">${esc(this._error)}</span>` : ""}
             ${this._staleBuild() ? `<span class="status err" title="Il browser sta eseguendo una copia vecchia del pannello">
               <ha-icon icon="mdi:reload-alert"></ha-icon> PANNELLO ${esc(CYBORG_BUILD)} · INTEGRAZIONE ${esc(this._serverVersion())} — SVUOTA LA CACHE</span>` : ""}
-            ${this._editing ? `${floorplan
+            ${kiosk ? `<span class="status kiosk"><ha-icon icon="mdi:tablet-dashboard"></ha-icon> CHIOSCO</span>` : ""}
+            ${this._kioskPreview ? `<button class="secondary" data-kiosk-exit><ha-icon icon="mdi:eye-off-outline"></ha-icon> ESCI DALL'ANTEPRIMA</button>` : ""}
+            ${kiosk ? "" : `${this._editing ? `${floorplan
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
                  : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
                     <button class="secondary" data-add-lights title="Tutte le luci della casa, per stanza"><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
@@ -9011,15 +9095,17 @@ class CyborgDashboard extends HTMLElement {
             <button class="secondary" data-toggle-edit>
               <ha-icon icon="${this._editing ? "mdi:eye-outline" : "mdi:pencil-outline"}"></ha-icon>
               ${this._editing ? "ESCI" : "MODIFICA"}
-            </button>
+            </button>`}
           </div>
         </header>
         ${tabs}
         <div class="workspace ${this._editing ? "editing" : ""}">
           <main>${body}</main>
-          ${this._editing ? `<div class="editor-backdrop" data-editor-backdrop></div>${this._renderEditor()}` : ""}
+          ${this._editing && !kiosk ? `<div class="editor-backdrop" data-editor-backdrop></div>${this._renderEditor()}` : ""}
         </div>
         ${this._renderOverlay()}
+        ${kiosk && ((this._dashboard.kiosk || {}).dim_after > 0)
+          ? '<div class="kiosk-dim" data-kiosk-dim></div>' : ""}
       </div>`;
 
     for (const key of Object.keys(scrolls)) {
@@ -9095,7 +9181,49 @@ class CyborgDashboard extends HTMLElement {
     for (const g of grids) for (const it of Array.from(g.children)) this._packRO.observe(it);
   }
 
+  /**
+   * Dim the screen and go home after a while, on the tablets only.
+   *
+   * A tablet left on a wall stays on the page somebody last opened, at full
+   * brightness, all night. Both timers are the owner's choice and both default
+   * to OFF: a screen that goes dark on its own without having been asked is a
+   * fault, not a feature. The wake listener is registered once and in the
+   * CAPTURE phase, so the tap that wakes the screen does not also press
+   * whatever was under it.
+   */
+  _kioskArm() {
+    if (!this._kioskWake) {
+      this._kioskWake = () => this._kioskTouch();
+      this.addEventListener("pointerdown", this._kioskWake, true);
+      this.addEventListener("keydown", this._kioskWake, true);
+    }
+    this._kioskTouch();
+  }
+
+  _kioskTouch() {
+    if (this._dimT) { clearTimeout(this._dimT); this._dimT = null; }
+    if (this._homeT) { clearTimeout(this._homeT); this._homeT = null; }
+    const veil = this.querySelector("[data-kiosk-dim]");
+    if (veil) veil.classList.remove("on");
+    if (!this._isKiosk()) return;
+    const cfg = (this._dashboard && this._dashboard.kiosk) || {};
+    const dim = Math.max(0, Number(cfg.dim_after) || 0) * 60000;
+    const home = Math.max(0, Number(cfg.home_after) || 0) * 60000;
+    if (dim) {
+      this._dimT = setTimeout(() => {
+        const v = this.querySelector("[data-kiosk-dim]");
+        if (v) v.classList.add("on");
+      }, dim);
+    }
+    if (home) {
+      this._homeT = setTimeout(() => {
+        if (this._pageIndex !== 0) { this._pageIndex = 0; this._touch(); }
+      }, home);
+    }
+  }
+
   _bind() {
+    this._kioskArm();
     const q = (s) => this.querySelector(s);
     const all = (s) => Array.from(this.querySelectorAll(s));
     const card = this._selectedCard();
@@ -9238,6 +9366,53 @@ class CyborgDashboard extends HTMLElement {
     all("[data-page-prop]").forEach((el) => {
       el.onchange = () => this._set(this._page(), el.getAttribute("data-page-prop"), el.value);
     });
+    const pageKiosk = q("[data-page-kiosk]");
+    if (pageKiosk) {
+      pageKiosk.onchange = () => {
+        const pg = this._page();
+        if (!pg) return;
+        pg.kiosk = pageKiosk.checked;
+        this._dirty = true;
+        this._touch();
+      };
+    }
+    const secKiosk = q("[data-sec-kiosk]");
+    if (secKiosk && this._selected && this._selected.kind === "section") {
+      secKiosk.onchange = () => {
+        const sec = this._section(this._selected.sectionId);
+        if (!sec) return;
+        sec.kiosk = secKiosk.checked;
+        this._dirty = true;
+        this._touch();
+      };
+    }
+    all("[data-kiosk-prop]").forEach((el) => {
+      el.onchange = () => {
+        this._dashboard.kiosk = Object.assign({}, this._dashboard.kiosk);
+        const v = parseInt(el.value, 10);
+        this._dashboard.kiosk[el.getAttribute("data-kiosk-prop")] =
+          Number.isFinite(v) ? Math.max(0, Math.min(240, v)) : 0;
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    const kioskPrev = q("[data-kiosk-preview]");
+    if (kioskPrev) {
+      kioskPrev.onclick = () => {
+        // L'anteprima chiude l'editor: guardare quello che vede un tablet
+        // mentre si ha ancora il pannello di modifica aperto non e' quello
+        // che vede un tablet.
+        this._kioskPreview = true;
+        this._editing = false;
+        this._selected = null;
+        this._pageIndex = 0;
+        this._touch();
+      };
+    }
+    const kioskExit = q("[data-kiosk-exit]");
+    if (kioskExit) {
+      kioskExit.onclick = () => { this._kioskPreview = false; this._pageIndex = 0; this._touch(); };
+    }
     all("[data-hier-parent]").forEach((el) => {
       el.onchange = () => {
         this._setParent(el.getAttribute("data-hier-parent"), el.value || null);
@@ -12896,6 +13071,13 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .eb-row.total{margin-top:5px;padding-top:7px;border-top:1px solid rgba(255,255,255,.1)}
 .eb-row.total span{font-weight:650}
 .eb-row.total b{font-size:16px;color:var(--accent)}
+.status.kiosk{background:color-mix(in srgb,#06d6a0 16%,transparent);color:#06d6a0;
+  border-color:color-mix(in srgb,#06d6a0 45%,transparent)}
+/* Il velo si prende il primo tocco: quello che riaccende lo schermo non deve
+   anche premere quello che ci stava sotto. */
+.kiosk-dim{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;
+  transition:opacity .6s ease;z-index:60}
+.kiosk-dim.on{opacity:.93;pointer-events:auto}
 .hier-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:7px;align-items:center;margin-bottom:5px}
 .hier-row .hier-name{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hier-row select{min-height:36px}
@@ -13067,7 +13249,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.43.0";
+const CYBORG_BUILD = "0.44.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

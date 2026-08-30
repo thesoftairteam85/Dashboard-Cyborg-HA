@@ -8,6 +8,10 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v16 pages[].kiosk, sections[].kiosk,    kiosk mode for the wall tablets: one
+    kiosk{}                             dashboard, with the owner deciding
+                                        page by page and section by section
+                                        what a non-admin user sees.
 v15 items[].entities{gruppo}            the monitor card lets the owner pick
                                         which readings appear under each
                                         group, instead of only discovering
@@ -48,7 +52,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -335,6 +339,7 @@ def default_dashboard() -> dict[str, Any]:
     return {
         "version": SCHEMA_VERSION,
         "hierarchy": {},
+        "kiosk": {"dim_after": 0, "home_after": 0, "hide_header": False},
         "vehicles": [],
         "revision": 0,
         "pages": [{
@@ -773,6 +778,7 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
 
 def normalize_section(section: dict[str, Any], index: int) -> dict[str, Any]:
     result = dict(section)
+    result["kiosk"] = _kiosk_flag(result)
     result.setdefault("id", f"sec-{index + 1}")
     result.setdefault("title", f"Sezione {index + 1}")
     result.setdefault("icon", "mdi:shape-outline")
@@ -828,6 +834,7 @@ def normalize_page(page: dict[str, Any], index: int) -> dict[str, Any]:
     # v3 pages carry no "type"; they are all sections pages by definition.
     page_type = result.get("type")
     result["type"] = page_type if page_type in PAGE_TYPES else "sections"
+    result["kiosk"] = _kiosk_flag(result)
 
     if result["type"] == "floorplan":
         result["view"] = normalize_view(result.get("view"))
@@ -856,6 +863,16 @@ def normalize_page(page: dict[str, Any], index: int) -> dict[str, Any]:
     # Drop the legacy flat list once migrated so cards can never render twice.
     result.pop("items", None)
     return result
+
+
+def _kiosk_flag(source: dict[str, Any]) -> bool:
+    """Visible on the wall tablets?
+
+    Defaults to True. A page or a section written before this key existed was
+    visible to everybody, and silently hiding it the day the owner creates the
+    kiosk user would be the dashboard deciding instead of him.
+    """
+    return source.get("kiosk", True) is not False
 
 
 def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -937,6 +954,20 @@ def normalize_dashboard(data: dict[str, Any] | None) -> dict[str, Any]:
             seen.add(node)
             node = hierarchy.get(node)
     result["hierarchy"] = hierarchy
+
+    # ------------------------------------------------------------ chiosco
+    # Un solo cruscotto: i tablet a muro vedono le stesse pagine, con meno
+    # poteri. Lo spegnimento e il ritorno a casa sono in MINUTI, zero = mai.
+    raw_kiosk = data.get("kiosk")
+    raw_kiosk = raw_kiosk if isinstance(raw_kiosk, dict) else {}
+    kiosk: dict[str, Any] = {}
+    for key, default, top in (("dim_after", 0, 240), ("home_after", 0, 240)):
+        try:
+            kiosk[key] = max(0, min(top, int(float(raw_kiosk.get(key, default)))))
+        except (TypeError, ValueError):
+            kiosk[key] = default
+    kiosk["hide_header"] = bool(raw_kiosk.get("hide_header", False))
+    result["kiosk"] = kiosk
 
     vehicles = data.get("vehicles")
     if isinstance(vehicles, list):

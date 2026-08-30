@@ -4,6 +4,52 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.44.0] - 2026-08-30
+
+Modalita' chiosco per i tablet a muro — scelta A: **una dashboard sola**.
+
+### Perche' A
+Dal tablet in camera devi poter accendere le luci della sala. Quindi i tablet
+vedono **le stesse pagine**, non una configurazione separata da tenere
+allineata: cambia solo cosa compare e chi puo' modificare.
+
+### Chi e' in chiosco
+Un utente di Home Assistant **non amministratore**. Quello e' un confine di
+permessi vero; il pannello decide solo cosa disegnare dentro quel confine.
+**L'assenza di `hass.user` vale amministratore, mai chiosco**: indovinare al
+contrario chiuderebbe fuori il proprietario dal suo stesso editor la prima
+volta che Home Assistant consegna l'oggetto in ritardo, e da dentro il pannello
+non ci sarebbe modo di tornare indietro.
+
+### Cosa cambia sul tablet
+- **Niente editor**: nessun MODIFICA, nessun salvataggio, nessuna maniglia di
+  trascinamento, e il pannello di modifica non viene nemmeno costruito.
+- **Pagine e sezioni**: ognuna ha la sua spunta *si vede sui tablet*, decisa da
+  te. Chi non ha la chiave (una pagina scritta prima di oggi) resta **visibile**:
+  nasconderla da sola sarebbe il sistema che decide al posto tuo.
+- **Nessuna pagina abilitata** non lascia uno schermo muto: lo dice a parole.
+- **Schermo scuro dopo N minuti** e **ritorno alla prima pagina dopo N minuti**,
+  entrambi a scelta e entrambi **spenti di fabbrica**: uno schermo che si
+  spegne da solo senza essere stato chiesto e' un guasto, non una funzione.
+  Il tocco che riaccende **non preme** quello che c'era sotto.
+- **ANTEPRIMA CHIOSCO** nell'editor della pagina: vedi esattamente quello che
+  vede un tablet, senza cambiare niente, e si esce dal pulsante in alto.
+- I comandi restano comandi: una card di una luce, su un tablet, si tocca e si
+  accende. Verificato.
+
+### Nota sulla sicurezza
+Il confine reale e' l'utente non amministratore (piu' `local_only` se vuoi
+limitare l'accesso alla rete di casa). La barra laterale ridotta e' cosmetica.
+Un `panel_custom` **non puo'** essere la dashboard predefinita di Home
+Assistant: per far partire un tablet direttamente qui serve una dashboard
+Lovelace con una vista `panel` e una sola card `custom:cyborg-dashboard`.
+
+Schema v16.
+
+### Verifiche
+1080 asserzioni frontend (22 nuove sul chiosco), 368 misurate in Chromium, piu'
+schema, notifiche e chiave di cache.
+
 ## [0.43.0] - 2026-08-26
 
 La bolletta vera: fasce orarie, voci fisse, IVA. Piu' la gerarchia in un posto

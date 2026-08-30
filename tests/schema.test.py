@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 15, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 16, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -795,3 +795,35 @@ assert schema.normalize_dashboard(d15)["pages"][0]["sections"][0]["items"][0]["e
 assert "entities" not in schema.normalize_item({"id": "x", "type": "economy"}, 0)
 
 print("schema: letture scelte a mano nel monitoraggio (v15) ok")
+
+# --- v16: chiosco per i tablet a muro ---------------------------------------
+d16 = schema.normalize_dashboard({"version": 15, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": []}]}]})
+assert d16["version"] == schema.SCHEMA_VERSION
+# Una pagina scritta prima che la chiave esistesse era visibile a tutti:
+# nasconderla il giorno in cui nasce l'utente chiosco sarebbe il sistema che
+# decide al posto del proprietario.
+assert d16["pages"][0]["kiosk"] is True
+assert d16["pages"][0]["sections"][0]["kiosk"] is True
+assert d16["kiosk"] == {"dim_after": 0, "home_after": 0, "hide_header": False}
+
+off = schema.normalize_dashboard({"version": 16,
+    "kiosk": {"dim_after": "5", "home_after": 999, "hide_header": 1},
+    "pages": [{"id": "p", "title": "P", "kiosk": False,
+        "sections": [{"id": "s", "title": "S", "kiosk": False, "items": []}]}]})
+assert off["pages"][0]["kiosk"] is False
+assert off["pages"][0]["sections"][0]["kiosk"] is False
+assert off["kiosk"] == {"dim_after": 5, "home_after": 240, "hide_header": True}, off["kiosk"]
+# valori illeggibili: zero, cioe' "mai", non un timer inventato
+bad = schema.normalize_dashboard({"version": 16, "kiosk": {"dim_after": "abc", "home_after": -9}})
+assert bad["kiosk"]["dim_after"] == 0 and bad["kiosk"]["home_after"] == 0
+assert schema.normalize_dashboard({"version": 16, "kiosk": "niente"})["kiosk"]["dim_after"] == 0
+# la scelta sopravvive a un giro completo di salvataggio
+assert schema.normalize_dashboard(off)["pages"][0]["kiosk"] is False
+assert schema.normalize_dashboard(off)["kiosk"]["dim_after"] == 5
+# anche una pagina mappa 3D porta la sua spunta
+fp = schema.normalize_dashboard({"version": 16, "pages": [
+    {"id": "m", "title": "Mappa", "type": "floorplan", "kiosk": False, "rooms": []}]})
+assert fp["pages"][0]["kiosk"] is False
+
+print("schema: chiosco per i tablet (v16) ok")
