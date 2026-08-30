@@ -4,6 +4,88 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.45.0] - 2026-08-30
+
+Analisi economica **nel tempo**: grafico di confronto, mese specifico, batteria.
+
+### Due difetti corretti prima di aggiungere qualsiasi cosa
+Il pannello leggeva le statistiche come *ultimo `sum` meno primo `sum`*. Due
+conseguenze, entrambe reali:
+
+1. **Il primo bucket della finestra spariva dai totali.** Su trenta giorni era
+   un giorno intero di consumo mai contato; su "oggi" era la prima ora.
+2. **Le fasce orarie erano sbagliate di un'ora.** L'energia veniva attribuita
+   alla fascia dell'ora *precedente*, e le due ore che contano davvero sono
+   proprio i confini: le 8 e le 19. Consumo delle 8, che è F1, veniva
+   fatturato come F2.
+
+Ora si legge il campo **`change`** di `recorder/statistics_during_period`, che
+dichiara quanta energia è passata *dentro* il bucket. È lo stesso campo che
+somma il frontend di Home Assistant per calcolare la crescita di un contatore
+(`calculateStatisticSumGrowth`). `sum` resta solo come ripiego per un recorder
+che non lo restituisse. C'è un test che rimette il difetto e cade.
+
+### Periodi di calendario, non finestre mobili
+"30 giorni" è diventato **"Mese"**, e vuol dire *agosto*, non gli ultimi trenta
+giorni. La bolletta arriva per mese solare: senza questo, il confronto con la
+bolletta — che è lo scopo dichiarato della card — non era possibile. Stessa
+cosa per Giorno, Settimana (che comincia di **lunedì**) e Anno.
+
+Accanto ai quattro tab c'è ora una **navigazione avanti/indietro**:
+`‹ Luglio 2026 ›`. È navigazione, non configurazione: **vive in memoria e non
+finisce nel dashboard salvato**, così un tablet a muro che si riapre non resta
+bloccato su marzo. Cambiare scala la azzera.
+
+### Il grafico storico
+Una colonna per ogni ora / giorno / mese del periodo, disegnata **a mano in
+SVG**: nessuna libreria, nessuna dipendenza che un giorno può sparire.
+
+- **Barra di sinistra: quello che ha consumato la casa**, divisa in azzurro
+  (comprato dalla rete) e ambra (venuto dal sole). *La parte ambra è il
+  risparmio, nel punto in cui è successo.*
+- **Barra di destra: quello che ha prodotto l'impianto**, divisa in ambra
+  (rimasto in casa) e verde (immesso in rete).
+- Le colonne sono prese dal **calendario**, non dai dati: un giorno senza
+  statistiche resta una colonna vuota invece di sparire e far scivolare tutte
+  le altre di un posto.
+- **Toccando una colonna ci si entra dentro**: dall'anno al mese, dal mese al
+  giorno. È il modo naturale di chiedere "e in marzo quanto?".
+- Le etichette sono HTML sotto l'SVG, non testo dentro: l'altezza del grafico è
+  in pixel e non segue la larghezza della card, e i numeri non si stirano.
+
+### Confronto col periodo precedente
+`rispetto a luglio 2026 · consumo −3% · produzione +4% · energia −3,12 €`.
+Il periodo precedente **non è una seconda interrogazione**: è la stessa,
+cominciata una finestra prima e tagliata al confine. Contro un periodo vuoto
+non viene dichiarata nessuna variazione: +1400% contro zero non è
+un'informazione.
+
+### Batteria di accumulo
+Due nuovi contatori facoltativi, **carica** e **scarica** (schema v17), rilevati
+anche dalla Dashboard Energia con un clic. Con l'accumulo collegato:
+
+    consumo di casa = prelievo − immissione + produzione + scarica − carica
+    autoconsumo     = produzione + scarica − carica − immissione
+
+Senza batteria i due termini valgono zero e la formula torna esattamente quella
+di prima. La **perdita di ciclo** (carica maggiore di scarica, tipicamente un
+decimo) non viene nascosta: abbassa l'autoconsumo, che è dove finisce davvero,
+ed è scritta a parole perché nessuno la scambi per un errore di misura.
+
+### Coerenza dei colori
+Le righe sotto il grafico usano ora **gli stessi colori del grafico**: azzurro
+la rete, ambra il sole rimasto in casa, verde quello immesso. Prima l'ambra
+voleva dire "immissione" nelle righe e "sole" nel grafico, nella stessa card.
+La batteria è viola: è l'unica voce che nel grafico non ha una barra propria.
+
+### Verificato
+- `recorder/statistics_during_period` accetta `change` in `types` e `hour`,
+  `day`, `month` in `period` — schema letto dal sorgente di core 2026.8.3.
+- `BatterySourceType`: `stat_energy_from` è la **scarica**, `stat_energy_to` la
+  **carica** — letto dal sorgente, stessa convenzione della rete.
+- 1141 asserzioni nella suite frontend, **405 misurate** in Chromium headless
+  (geometria e stili calcolati, non immagini), più schema, pannello, notifiche.
+
 ## [0.44.0] - 2026-08-30
 
 Modalita' chiosco per i tablet a muro — scelta A: **una dashboard sola**.

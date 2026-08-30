@@ -8,6 +8,12 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v17 items[].battery_in / battery_out    the economy card closes the balance of
+                                        a house with storage: self-consumption
+                                        becomes produced + discharged -
+                                        charged - exported, so energy put
+                                        aside at noon and used at night is no
+                                        longer counted as bought.
 v16 pages[].kiosk, sections[].kiosk,    kiosk mode for the wall tablets: one
     kiosk{}                             dashboard, with the owner deciding
                                         page by page and section by section
@@ -52,7 +58,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -670,7 +676,10 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                 seen.add(node["parent"])
                 node = by_entity[node["parent"]]
         result["devices"] = rows
-        for key in ("grid_import", "grid_export", "solar"):
+        # I due contatori dell'accumulo sono facoltativi: senza, l'autoconsumo
+        # torna a essere prodotto meno immesso, che e' il comportamento giusto
+        # per un impianto senza batteria.
+        for key in ("grid_import", "grid_export", "solar", "battery_in", "battery_out"):
             value = result.get(key)
             result[key] = value if isinstance(value, str) and value else None
         for key, default in (("price_import", 0.25), ("price_export", 0.10)):

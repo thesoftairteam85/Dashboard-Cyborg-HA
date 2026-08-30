@@ -1314,7 +1314,9 @@ const DEFAULT_DASH = {
     })) : [];
     const imported = num((document.querySelector(".eco-row.cost .eco-kwh") || {}).textContent);
     const importedEur = num((document.querySelector(".eco-row.cost .eco-eur") || {}).textContent);
-    const foot = (document.querySelector(".eco-foot span") || {}).textContent || "";
+    // tutto il piede, non solo la prima voce: le voci sono piu' d'una e
+    // l'ordine e' una scelta di grafica, non un contratto.
+    const foot = (document.querySelector(".eco-foot") || {}).textContent || "";
     const card = document.querySelector(".eco").closest(".item").getBoundingClientRect();
     return { bands, rows, imported, importedEur, foot,
       cardRight: Math.round(card.right),
@@ -1407,7 +1409,9 @@ const DEFAULT_DASH = {
     const num = (t) => Number(String(t).replace(/[^\d,.-]/g, "").replace(",", "."));
     return { bands: document.querySelectorAll(".eco-band").length,
       inputs: document.querySelectorAll("[data-band]").length,
-      foot: (document.querySelector(".eco-foot span") || {}).textContent || "",
+      // tutto il piede, non solo la prima voce: le voci sono piu' d'una e
+      // l'ordine e' una scelta di grafica, non un contratto.
+      foot: (document.querySelector(".eco-foot") || {}).textContent || "",
       eur: num((document.querySelector(".eco-row.cost .eco-eur") || {}).textContent) };
   });
   ok("tornando a monoraria le fasce spariscono",
@@ -1450,6 +1454,206 @@ const DEFAULT_DASH = {
      pbill.scrollW + " vs " + pbill.winW);
   await phoneBill.screenshot({ path: path.resolve(__dirname, "71-phone-bill.png") });
   await phoneBill.close();
+
+  console.log("\n== ANALISI ECONOMICA NEL TEMPO ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, economy: true, battery: true });
+  await page.waitForTimeout(1600);
+
+  const readChart = () => page.evaluate(() => {
+    const svg = document.querySelector("[data-eco-svg]");
+    const box = svg ? svg.getBoundingClientRect() : null;
+    const card = document.querySelector(".eco").closest(".item").getBoundingClientRect();
+    const bars = (sel) => Array.from(document.querySelectorAll(sel)).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { x: Math.round(b.x * 10) / 10, w: Math.round(b.width * 10) / 10,
+        h: Math.round(b.height * 10) / 10, top: Math.round(b.top * 10) / 10,
+        bottom: Math.round(b.bottom * 10) / 10,
+        fill: getComputedStyle(r).fill };
+    });
+    const hits = Array.from(document.querySelectorAll("[data-eco-bar]")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { w: Math.round(b.width * 10) / 10, h: Math.round(b.height * 10) / 10 };
+    });
+    const labels = Array.from(document.querySelectorAll(".ecb-lab")).map((t) => ({
+      text: t.textContent, right: Math.round(t.getBoundingClientRect().right),
+      size: Math.round(parseFloat(getComputedStyle(t).fontSize) * 10) / 10 }));
+    const axis = document.querySelector(".ecb-axis");
+    return {
+      hasSvg: !!svg,
+      svgW: box ? Math.round(box.width) : 0, svgH: box ? Math.round(box.height) : 0,
+      cardW: Math.round(card.width), cardRight: Math.round(card.right),
+      grid: bars(".ecb-grid"), self: bars(".ecb-self"),
+      prod: bars(".ecb-prod"), sold: bars(".ecb-sold"),
+      hits, labels,
+      axisY: axis ? Math.round(axis.getBoundingClientRect().top) : 0,
+      legend: Array.from(document.querySelectorAll(".eco-legend span")).map((x) => x.textContent.trim()),
+      nav: (document.querySelector(".eco-nav strong") || {}).textContent || "",
+      fwdDisabled: !!(document.querySelector('[data-eco-step="-1"]') || {}).disabled,
+      cmp: Array.from(document.querySelectorAll(".eco-cmp em")).map((x) => x.textContent.trim()),
+      battRow: (document.querySelector(".eco-row.batt") || {}).textContent || "",
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth,
+    };
+  });
+
+  const ch = await readChart();
+  ok("il grafico storico c'e' ed è disegnato", ch.hasSvg && ch.svgW > 100 && ch.svgH > 40,
+     ch.svgW + "x" + ch.svgH);
+  ok("sta dentro la card, non la sfonda", ch.svgW <= ch.cardW + 1,
+     ch.svgW + " vs " + ch.cardW);
+  ok("non provoca scorrimento orizzontale", ch.scrollW <= ch.winW + 1,
+     ch.scrollW + " vs " + ch.winW);
+  ok("c'è una colonna per ogni giorno del mese finora",
+     ch.hits.length >= 27 && ch.hits.length <= 31, String(ch.hits.length));
+  ok("ogni colonna è toccabile per intero, non solo la barra",
+     ch.hits.every((h) => h.w >= 6 && h.h > 40), JSON.stringify(ch.hits[0]));
+  ok("le barre del prelievo ci sono davvero, con un'altezza misurabile",
+     ch.grid.length >= 20 && ch.grid.every((b) => b.h >= 1),
+     ch.grid.length + " barre");
+  ok("e quelle della produzione", ch.prod.length >= 20, String(ch.prod.length));
+  ok("prelievo e produzione non si sovrappongono: sono due barre affiancate",
+     ch.grid[0].x + ch.grid[0].w <= ch.prod[0].x + 0.6,
+     JSON.stringify([ch.grid[0], ch.prod[0]]));
+  ok("l'autoconsumo sta SOPRA il prelievo nella stessa colonna",
+     ch.self.length > 0 && ch.self[0].bottom <= ch.grid[0].top + 0.6
+     && Math.abs(ch.self[0].x - ch.grid[0].x) < 0.6,
+     JSON.stringify([ch.grid[0], ch.self[0]]));
+  ok("le barre poggiano tutte sulla stessa linea di base",
+     Math.max(...ch.grid.map((b) => b.bottom)) - Math.min(...ch.grid.map((b) => b.bottom)) < 1.5,
+     JSON.stringify(ch.grid.map((b) => b.bottom).slice(0, 4)));
+  ok("nessuna barra sfora la linea di base verso il basso",
+     ch.grid.every((b) => b.bottom <= ch.axisY + 1.5), String(ch.axisY));
+  ok("i colori sono quelli del diagramma di flusso: rete azzurra, sole ambra",
+     /142,\s*202,\s*230/.test(ch.grid[0].fill) && /255,\s*209,\s*102/.test(ch.self[0].fill),
+     ch.grid[0].fill + " / " + ch.self[0].fill);
+  ok("la legenda nomina le tre voci", ch.legend.length === 3
+     && ch.legend.join("|").includes("Dalla rete"), JSON.stringify(ch.legend));
+  ok("le etichette sotto le colonne restano leggibili",
+     ch.labels.length >= 2 && ch.labels.every((l) => l.size >= 6),
+     JSON.stringify(ch.labels.map((l) => l.size)));
+  ok("e non escono dalla card", ch.labels.every((l) => l.right <= ch.cardRight + 2),
+     JSON.stringify([ch.cardRight, ch.labels.map((l) => l.right)]));
+  ok("il periodo è scritto per esteso, non come numero di giorni",
+     /^[A-Z][a-zàèéìòù]+ \d{4}$/.test(ch.nav.trim()), ch.nav);
+  ok("dal periodo corrente non si può andare avanti", ch.fwdDisabled === true);
+  ok("la batteria compare nel bilancio", /Batteria/.test(ch.battRow), ch.battRow);
+  await page.screenshot({ path: path.resolve(__dirname, "72-eco-history.png") });
+
+  // --- indietro di un mese: cambia il titolo, cambiano i numeri, si può tornare
+  const ecoStep = await page.evaluate(async () => {
+    document.querySelector('[data-eco-step="1"]').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    return { nav: (document.querySelector(".eco-nav strong") || {}).textContent || "",
+      fwdDisabled: !!(document.querySelector('[data-eco-step="-1"]') || {}).disabled,
+      bars: document.querySelectorAll("[data-eco-bar]").length,
+      offset: window.__EL__._ecoOffset.ecocard,
+      saved: window.__EL__._findCard("ecocard").offset };
+  });
+  ok("un passo indietro cambia il periodo mostrato",
+     ecoStep.nav.trim() !== ch.nav.trim(), ch.nav + " -> " + ecoStep.nav);
+  ok("e ora si può tornare avanti", ecoStep.fwdDisabled === false);
+  ok("il mese precedente è completo, non troncato a oggi",
+     ecoStep.bars >= 28, String(ecoStep.bars));
+  ok("la navigazione vive in memoria, non nel dashboard salvato",
+     ecoStep.offset === 1 && ecoStep.saved === undefined, JSON.stringify(ecoStep));
+
+  const backNow = await page.evaluate(async () => {
+    document.querySelector('[data-eco-step="-1"]').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    return { nav: (document.querySelector(".eco-nav strong") || {}).textContent || "",
+      offset: window.__EL__._ecoOffset.ecocard };
+  });
+  ok("e tornando avanti si è di nuovo al periodo corrente",
+     backNow.offset === 0 && backNow.nav.trim() === ch.nav.trim(),
+     backNow.nav + " vs " + ch.nav);
+
+  // --- l'anno: dodici colonne, e toccarne una entra in quel mese
+  const year = await page.evaluate(async () => {
+    document.querySelector('[data-eco-period="year"]').click();
+    await new Promise((r) => setTimeout(r, 1400));
+    const labs = Array.from(document.querySelectorAll(".ecb-lab")).map((t) => t.textContent);
+    return { bars: document.querySelectorAll("[data-eco-bar]").length, labs,
+      nav: (document.querySelector(".eco-nav strong") || {}).textContent || "",
+      offset: window.__EL__._ecoOffset.ecocard };
+  });
+  ok("l'anno mostra i mesi trascorsi", year.bars >= 1 && year.bars <= 12, String(year.bars));
+  ok("con le sigle dei mesi sotto le colonne",
+     year.labs.some((l) => /^(GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO|SET|OTT|NOV|DIC)$/.test(l)),
+     JSON.stringify(year.labs));
+  ok("cambiando scala la navigazione riparte da zero", year.offset === 0, String(year.offset));
+  ok("e il titolo diventa l'anno", /^\d{4}$/.test(year.nav.trim()), year.nav);
+
+  const drill = await page.evaluate(async () => {
+    const hits = document.querySelectorAll("[data-eco-bar]");
+    hits[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 1400));
+    return { period: window.__EL__._findCard("ecocard").period,
+      offset: window.__EL__._ecoOffset.ecocard,
+      nav: (document.querySelector(".eco-nav strong") || {}).textContent || "",
+      bars: document.querySelectorAll("[data-eco-bar]").length };
+  });
+  ok("toccando la colonna di gennaio si entra in quel mese",
+     drill.period === "month" && /gennaio/i.test(drill.nav), drill.period + " / " + drill.nav);
+  ok("e il grafico passa ai giorni di quel mese",
+     drill.bars >= 28 && drill.bars <= 31, String(drill.bars));
+  await page.screenshot({ path: path.resolve(__dirname, "73-eco-drill.png") });
+
+  // --- sul telefono
+  const phoneEco = await browser.newPage({ viewport: { width: 390, height: 900 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneEco.on("pageerror", (e) => errors.push("PHONE-ECO: " + e.message));
+  await phoneEco.goto("http://127.0.0.1:8899/harness.html");
+  await phoneEco.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneEco.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneEco.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, economy: true, battery: true });
+  await phoneEco.waitForTimeout(1700);
+  const pch = await phoneEco.evaluate(() => {
+    const svg = document.querySelector("[data-eco-svg]");
+    const b = svg ? svg.getBoundingClientRect() : null;
+    const hits = Array.from(document.querySelectorAll("[data-eco-bar]"))
+      .map((r) => Math.round(r.getBoundingClientRect().width * 10) / 10);
+    const labs = Array.from(document.querySelectorAll(".ecb-lab"))
+      .map((t) => Math.round(parseFloat(getComputedStyle(t).fontSize) * 10) / 10);
+    const nav = document.querySelector(".eco-nav");
+    const btns = Array.from(document.querySelectorAll("[data-eco-step]"))
+      .map((x) => { const r = x.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; });
+    // una cifra in euro spezzata su due righe e' il modo piu' rapido di far
+    // sembrare rotta una card: si misura, non si spera
+    const eur = Array.from(document.querySelectorAll(".eco-row .eco-eur")).map((x) => {
+      const r = x.getBoundingClientRect();
+      const lh = parseFloat(getComputedStyle(x).lineHeight) || 16;
+      return { txt: x.textContent.trim(), lines: Math.round(r.height / lh),
+        right: Math.round(r.right) };
+    });
+    return { w: b ? Math.round(b.width) : 0, h: b ? Math.round(b.height) : 0,
+      hits, labs, btns, eur,
+      navRight: nav ? Math.round(nav.getBoundingClientRect().right) : 0,
+      winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: il grafico c'è e ha un'altezza usabile", pch.h >= 70, pch.w + "x" + pch.h);
+  ok("telefono: nessuno scorrimento orizzontale", pch.scrollW <= pch.winW + 1,
+     pch.scrollW + " vs " + pch.winW);
+  ok("telefono: la barra di navigazione sta nello schermo",
+     pch.navRight <= pch.winW + 1, pch.navRight + " vs " + pch.winW);
+  ok("telefono: le frecce sono grandi abbastanza da toccarle",
+     pch.btns.length === 2 && pch.btns.every((b) => b.w >= 24 && b.h >= 24),
+     JSON.stringify(pch.btns));
+  ok("telefono: le etichette dei giorni non diventano illeggibili",
+     pch.labs.length > 0 && pch.labs.every((sz) => sz >= 5.5),
+     JSON.stringify(pch.labs.slice(0, 4)));
+  ok("telefono: ogni colonna resta toccabile",
+     pch.hits.length > 0 && pch.hits.every((w) => w >= 6), JSON.stringify(pch.hits.slice(0, 4)));
+  ok("telefono: nessuna cifra in euro spezzata su due righe",
+     pch.eur.length >= 3 && pch.eur.every((e) => e.lines <= 1),
+     JSON.stringify(pch.eur));
+  ok("telefono: e nessuna che esce dallo schermo",
+     pch.eur.every((e) => e.right <= pch.winW + 1), JSON.stringify(pch.eur.map((e) => e.right)));
+  await phoneEco.screenshot({ path: path.resolve(__dirname, "74-phone-eco-history.png") });
+  await phoneEco.close();
 
   console.log("\n== COMPRESO DENTRO NEL FLUSSO ==");
   await page.goto("http://127.0.0.1:8899/harness.html");

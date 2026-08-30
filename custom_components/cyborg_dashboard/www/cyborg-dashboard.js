@@ -1241,11 +1241,116 @@ const BAND_COLOR = { f1: "#ff6b6b", f2: "#ffd166", f3: "#06d6a0" };
 const FIXED_EVERY_DAYS = { day: 1, month: 30.436875, year: 365.2425 };
 
 const ECONOMY_PERIODS = [
-  { key: "today", label: "Oggi", days: 1, bucket: "hour" },
-  { key: "week", label: "7 giorni", days: 7, bucket: "day" },
-  { key: "month", label: "30 giorni", days: 30, bucket: "day" },
-  { key: "year", label: "12 mesi", days: 365, bucket: "month" },
+  { key: "today", label: "Giorno", bucket: "hour" },
+  { key: "week", label: "Settimana", bucket: "day" },
+  { key: "month", label: "Mese", bucket: "day" },
+  { key: "year", label: "Anno", bucket: "month" },
 ];
+
+// Scritti a mano invece di toLocaleDateString: il nome del mese deve essere
+// italiano su un tablet configurato in inglese, e deve essere lo stesso nei
+// test, dove l'ICU completo non e' garantito.
+const MONTHS_IT = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+  "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
+const MONTHS_IT_SHORT = ["GEN", "FEB", "MAR", "APR", "MAG", "GIU",
+  "LUG", "AGO", "SET", "OTT", "NOV", "DIC"];
+const WEEKDAYS_IT = ["domenica", "lunedì", "martedì", "mercoledì", "giovedì",
+  "venerdì", "sabato"];
+
+const cap1 = (t) => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+
+/**
+ * The window a period tab actually covers, walked back by `offset` steps.
+ *
+ * Calendar-aligned, not a rolling window: a bill is issued for August, not for
+ * the last thirty days, and the whole point of this card is to be puttable
+ * beside the bill. It also makes "step back one" mean something a person can
+ * name - luglio, giugno - instead of "thirty to sixty days ago".
+ *
+ * Everything is built with the local-date constructor, so the boundaries are
+ * local midnights: the same instants the tariff bands and the meter reader
+ * use. A UTC window would slide the day by an hour twice a year.
+ */
+function economyWindow(key, offset) {
+  const now = new Date();
+  const o = Math.max(0, Math.round(Number(offset) || 0));
+  let start, end, title, short;
+  if (key === "today") {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - o);
+    end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+    title = o === 0 ? "Oggi" : o === 1 ? "Ieri"
+      : cap1(WEEKDAYS_IT[start.getDay()]) + " " + start.getDate() + " " + MONTHS_IT[start.getMonth()];
+    short = start.getDate() + " " + MONTHS_IT_SHORT[start.getMonth()].toLowerCase();
+  } else if (key === "week") {
+    // getDay() vale 0 di domenica: in Italia la settimana comincia di lunedi',
+    // quindi la domenica appartiene alla settimana cominciata sei giorni prima
+    // e non a quella che sta per cominciare.
+    const dow = (now.getDay() + 6) % 7;
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - o * 7);
+    end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+    title = o === 0 ? "Questa settimana"
+      : "Settimana del " + start.getDate() + " " + MONTHS_IT[start.getMonth()];
+    short = "sett. " + start.getDate() + "/" + (start.getMonth() + 1);
+  } else if (key === "year") {
+    start = new Date(now.getFullYear() - o, 0, 1);
+    end = new Date(start.getFullYear() + 1, 0, 1);
+    title = String(start.getFullYear());
+    short = String(start.getFullYear());
+  } else {
+    // Il costruttore accetta un mese negativo e scala l'anno da solo:
+    // new Date(2026, -1, 1) e' dicembre 2025.
+    start = new Date(now.getFullYear(), now.getMonth() - o, 1);
+    end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+    title = cap1(MONTHS_IT[start.getMonth()]) + " " + start.getFullYear();
+    short = MONTHS_IT_SHORT[start.getMonth()];
+  }
+  // Il futuro non ha statistiche: la finestra corrente finisce adesso, e le
+  // quote fisse vanno divise sui giorni davvero trascorsi, non sul mese intero.
+  const stop = end > now ? now : end;
+  const period = ECONOMY_PERIODS.find((p) => p.key === key) || ECONOMY_PERIODS[2];
+  return { key: period.key, bucket: period.bucket, label: period.label,
+    offset: o, start, end, stop, title, short,
+    days: Math.max(0.01, (stop - start) / 86400000),
+    running: end > now };
+}
+
+/** L'istante di una riga di statistica: numero epoch o stringa ISO. */
+function statEpoch(raw) {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * How much energy passed during each bucket.
+ *
+ * `change` is the field that answers exactly this question, and it is what the
+ * Home Assistant frontend itself sums to get the growth over a window. The
+ * difference between the first and the last `sum` - which this used to do -
+ * loses the first bucket of the window by construction: a whole day out of a
+ * month, a whole hour out of a day. `sum` is kept only as a fallback for a
+ * recorder that does not return `change`, and there the first bucket is
+ * genuinely unknowable, so it is dropped rather than invented.
+ */
+function statSeries(rows) {
+  const out = [];
+  let prev = null;
+  for (const r of (rows || [])) {
+    const t = statEpoch(r.start);
+    if (t === null) continue;
+    const sum = num(r.sum);
+    let v = num(r.change);
+    if (v === null) v = (prev !== null && sum !== null) ? sum - prev : null;
+    if (sum !== null) prev = sum;
+    if (v === null) continue;
+    // Un contatore che torna indietro e' un azzeramento, non un consumo
+    // negativo: vale zero, non un numero che sottrae dal totale.
+    out.push({ t, v: v > 0 ? v : 0 });
+  }
+  return out;
+}
+
+const seriesTotal = (rows) => rows.reduce((n, r) => n + r.v, 0);
 
 function eur(v) {
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
@@ -2330,6 +2435,7 @@ class CyborgDashboard extends HTMLElement {
         states: {}, actions: {} };
       if (base.seed === "monitor") Object.assign(card, { grid_entity: null, limit_w: 3300, groups: [], max_per_group: 8 });
       if (base.seed === "economy") Object.assign(card, { grid_import: null, grid_export: null, solar: null,
+        battery_in: null, battery_out: null,
         price_import: 0.25, price_export: 0.10, period: "month" });
       section.items.push(card);
       if (base.seed === "monitor") { /* wired by the user in the card editor */ }
@@ -6997,52 +7103,81 @@ class CyborgDashboard extends HTMLElement {
 
   // ------------------------------------------------- analisi economica ---
 
+  /** Il periodo mostrato adesso da questa card, navigazione compresa. */
+  _ecoWindow(item) {
+    this._ecoOffset = this._ecoOffset || {};
+    return economyWindow(item.period || "month", this._ecoOffset[item.id] || 0);
+  }
+
+  /** Gli identificativi di statistica che questa card interroga. */
+  _ecoIds(item) {
+    const devices = (Array.isArray(item.devices) ? item.devices : [])
+      .map((d) => d.entity).filter(Boolean);
+    const meters = ["grid_import", "grid_export", "solar", "battery_in", "battery_out"]
+      .map((k) => item[k]).filter(Boolean);
+    // Un'entita' puo' essere insieme contatore e riga di dettaglio: chiesta due
+    // volte, il recorder la restituirebbe una volta sola e il resto del codice
+    // si aspetterebbe due chiavi.
+    return Array.from(new Set(meters.concat(devices)));
+  }
+
   /**
-   * Fetch kWh totals for the configured statistics over the chosen window.
+   * Read the window on screen and the one before it, in a single query.
    *
-   * A statistic's `sum` is a monotonically increasing meter, so the energy in
-   * a window is last minus first — not the sum of the buckets, which would
-   * count the whole meter reading over and over.
+   * The previous period is not a second question: it is the same query started
+   * one window earlier and split at the boundary. Asking twice would double the
+   * recorder work - which is the expensive part - to produce numbers the first
+   * answer already contains.
    */
   _loadEconomy(item) {
-    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
-    const devices = Array.isArray(item.devices) ? item.devices : [];
-    const deviceIds = devices.map((d) => d.entity).filter(Boolean);
-    // One statistics call for the meters and every device together: the
-    // recorder query is the expensive part, and asking for twelve statistics
-    // costs barely more than asking for three.
-    const ids = ["grid_import", "grid_export", "solar"].map((k) => item[k])
-      .filter(Boolean).concat(deviceIds);
-    const key = item.id + "|" + period.key + "|" + ids.join(",");
+    const win = this._ecoWindow(item);
+    const ids = this._ecoIds(item);
+    const key = item.id + "|" + win.key + "|" + win.offset + "|" + ids.join(",");
     this._economy = this._economy || {};
     if (this._economy[key] && Date.now() - this._economy[key].ts < 300000) return this._economy[key];
     if (this._economyPending === key) return this._economy[key] || null;
     if (!ids.length) return null;
 
     this._economyPending = key;
-    const end = new Date();
-    const start = new Date(end.getTime() - period.days * 86400000);
+    const prev = economyWindow(win.key, win.offset + 1);
     this._hass.callWS({
       type: "recorder/statistics_during_period",
-      start_time: start.toISOString(),
-      end_time: end.toISOString(),
+      start_time: prev.start.toISOString(),
+      end_time: win.stop.toISOString(),
       statistic_ids: ids,
-      period: period.bucket,
-      types: ["sum"],
+      period: win.bucket,
+      // `change` e' l'energia passata dentro il bucket. `sum` resta solo come
+      // rete di sicurezza per un recorder che non lo restituisse.
+      types: ["sum", "change"],
     }).then((res) => {
-      const total = (id) => {
-        const rows = (res && res[id]) || [];
-        const sums = rows.map((r) => r.sum).filter((n) => Number.isFinite(n));
-        if (sums.length < 2) return sums.length === 1 ? 0 : null;
-        return Math.max(0, sums[sums.length - 1] - sums[0]);
+      const edge = win.start.getTime();
+      const cut = (id) => {
+        const all = statSeries((res && res[id]) || []);
+        return { now: all.filter((r) => r.t >= edge), before: all.filter((r) => r.t < edge) };
       };
-      const perDevice = {};
-      for (const id of deviceIds) perDevice[id] = total(id);
-      this._economy[key] = { ts: Date.now(), period: period.key,
-        imported: item.grid_import ? total(item.grid_import) : null,
-        exported: item.grid_export ? total(item.grid_export) : null,
-        produced: item.solar ? total(item.solar) : null,
-        devices: perDevice };
+      const meter = {}, before = {}, series = {};
+      for (const id of ids) {
+        const { now, before: was } = cut(id);
+        meter[id] = seriesTotal(now);
+        before[id] = seriesTotal(was);
+        series[id] = now;
+      }
+      const of = (k) => (item[k] ? meter[item[k]] : null);
+      const wasOf = (k) => (item[k] ? before[item[k]] : null);
+      const devices = {}, devicesBefore = {};
+      for (const d of (Array.isArray(item.devices) ? item.devices : [])) {
+        if (!d.entity) continue;
+        devices[d.entity] = meter[d.entity];
+        devicesBefore[d.entity] = before[d.entity];
+      }
+      this._economy[key] = { ts: Date.now(), period: win.key, offset: win.offset,
+        imported: of("grid_import"), exported: of("grid_export"), produced: of("solar"),
+        battIn: of("battery_in"), battOut: of("battery_out"),
+        prev: { imported: wasOf("grid_import"), exported: wasOf("grid_export"),
+          produced: wasOf("solar"), battIn: wasOf("battery_in"), battOut: wasOf("battery_out"),
+          title: prev.title, devices: devicesBefore,
+          any: ["grid_import", "grid_export", "solar"].some((k) => (wasOf(k) || 0) > 0) },
+        series, devices };
       this._economyPending = null;
       this._touch(true);
     }).catch((err) => {
@@ -7067,38 +7202,30 @@ class CyborgDashboard extends HTMLElement {
    */
   _loadBands(item) {
     if ((item.tariff_mode || "single") !== "bands" || !item.grid_import) return null;
-    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
-    const key = item.id + "|bands|" + period.key + "|" + item.grid_import;
+    const win = this._ecoWindow(item);
+    const key = item.id + "|bands|" + win.key + "|" + win.offset + "|" + item.grid_import;
     this._bands = this._bands || {};
     if (this._bands[key] && Date.now() - this._bands[key].ts < 300000) return this._bands[key];
     if (this._bandsPending === key) return this._bands[key] || null;
     this._bandsPending = key;
-    const end = new Date();
-    const start = new Date(end.getTime() - period.days * 86400000);
     this._hass.callWS({
       type: "recorder/statistics_during_period",
-      start_time: start.toISOString(),
-      end_time: end.toISOString(),
+      start_time: win.start.toISOString(),
+      end_time: win.stop.toISOString(),
       statistic_ids: [item.grid_import],
       period: "hour",
-      types: ["sum"],
+      types: ["sum", "change"],
     }).then((res) => {
-      const rows = (res && res[item.grid_import]) || [];
       const out = { ts: Date.now(), f1: 0, f2: 0, f3: 0, total: 0, hours: 0 };
-      for (let i = 1; i < rows.length; i++) {
-        const a = num(rows[i - 1].sum), b = num(rows[i].sum);
-        if (a === null || b === null) continue;
-        const delta = b - a;
-        // A meter that goes backwards is a reset, not a negative consumption.
-        if (!(delta > 0)) continue;
-        const raw = rows[i - 1].start;
-        // `start` arrives as an epoch in milliseconds (a NUMBER) on this core,
-        // and Date.parse of a number reads it as a year - the same trap as
-        // Date.parse(0). Both shapes are handled explicitly.
-        const t = typeof raw === "number" ? raw : Date.parse(raw);
-        if (!Number.isFinite(t)) continue;
-        out[tariffBand(new Date(t))] += delta;
-        out.total += delta;
+      // L'energia di una riga e' passata dentro [start, end): la fascia e'
+      // quella dell'ora che comincia in `start`. Attribuirla alla riga
+      // precedente - come faceva la 0.43.0 - sposta indietro di un'ora ogni
+      // consumo, e le due ore che contano davvero sono proprio i confini
+      // delle fasce: le 8 e le 19.
+      for (const row of statSeries((res && res[item.grid_import]) || [])) {
+        if (!(row.v > 0)) continue;
+        out[tariffBand(new Date(row.t))] += row.v;
+        out.total += row.v;
         out.hours++;
       }
       this._bands[key] = out;
@@ -7128,13 +7255,41 @@ class CyborgDashboard extends HTMLElement {
     }, 0);
   }
 
-  _economyFigures(item, data) {
+  /**
+   * The energy balance of the house, battery included.
+   *
+   * Home Assistant models a storage system as two meters - what went in and
+   * what came out - so household consumption is
+   *
+   *   prelievo - immissione + produzione + scarica - carica
+   *
+   * and the share of it that never had to be bought is that same figure minus
+   * what was actually drawn from the grid, which reduces to
+   *
+   *   produzione + scarica - carica - immissione
+   *
+   * With no battery both terms are zero and the formula collapses to the old
+   * one, so an install without storage reads exactly as before. The round-trip
+   * loss of the battery - carica greater than scarica, typically a tenth - is
+   * not hidden: it lowers the self-consumption, which is where it really lands,
+   * and is stated on its own line so nobody mistakes it for a metering error.
+   */
+  _economyFigures(item, data, win) {
+    const w = win || this._ecoWindow(item);
     const pOut = Number(item.price_export) || 0;
     const imported = data.imported || 0;
     const exported = data.exported || 0;
     const produced = data.produced || 0;
-    // what the plant kept at home is production minus what went to the grid
-    const selfUsed = Math.max(0, produced - exported);
+    // I due contatori valgono solo se sono stati dichiarati: numeri arrivati
+    // per altre strade non devono cambiare il bilancio di un impianto che una
+    // batteria non ce l'ha.
+    const declared = !!(item.battery_in || item.battery_out);
+    const battIn = declared ? (data.battIn || 0) : 0;
+    const battOut = declared ? (data.battOut || 0) : 0;
+    const hasBattery = declared && (battIn > 0 || battOut > 0);
+    const selfUsed = Math.max(0, produced + battOut - battIn - exported);
+    const consumption = Math.max(0, imported + selfUsed);
+    const battLoss = Math.max(0, battIn - battOut);
 
     // Multifascia: il prezzo effettivo e' la media pesata sulle fasce in cui
     // l'energia e' stata davvero consumata. Si applica al totale prelevato che
@@ -7160,8 +7315,7 @@ class CyborgDashboard extends HTMLElement {
 
     const cost = imported * pIn;
     const revenue = exported * pOut;
-    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
-    const fixed = this._fixedTotal(item, period.days);
+    const fixed = this._fixedTotal(item, w.days);
     const vat = Math.max(0, Number(item.vat) || 0);
     // L'IVA si applica a energia e quote fisse; l'immissione viene sottratta
     // dopo, perche' il ritiro dedicato non e' una voce su cui il cliente paga
@@ -7171,17 +7325,191 @@ class CyborgDashboard extends HTMLElement {
 
     // the counterfactual an installer is actually asked about: the same house
     // consumption billed entirely at the import tariff
-    const withoutPv = (imported + selfUsed) * pIn;
+    const withoutPv = consumption * pIn;
     const net = cost - revenue;
-    return { imported, exported, produced, selfUsed, cost, revenue, withoutPv, net,
+
+    // Il confronto con il periodo precedente. Vale solo se li' c'era qualcosa:
+    // una variazione del +1400% contro un mese vuoto non e' un'informazione.
+    const p = data.prev || null;
+    let cmp = null;
+    if (p && p.any) {
+      const pImported = p.imported || 0, pExported = p.exported || 0;
+      const pProduced = p.produced || 0;
+      const pSelf = Math.max(0, pProduced + (p.battOut || 0) - (p.battIn || 0) - pExported);
+      const pct = (now, was) => (was > 0 ? ((now - was) / was) * 100 : null);
+      cmp = { title: p.title,
+        consumption: pct(consumption, pImported + pSelf),
+        imported: pct(imported, pImported),
+        produced: pct(produced, pProduced),
+        costDelta: cost - pImported * pIn };
+    }
+
+    return { imported, exported, produced, selfUsed, consumption, cost, revenue, withoutPv, net,
+      battIn, battOut, battLoss, hasBattery,
       saved: withoutPv - net, hasPv: produced > 0 || exported > 0,
       pIn, byBand, bandsPending: (item.tariff_mode === "bands") && !usable,
-      bandsError: !!(bands && bands.error),
+      bandsError: !!(bands && bands.error), cmp,
       fixed, vat, taxed, billed, hasBill: fixed > 0 || vat > 0 || !!byBand };
   }
 
+  /**
+   * The calendar slots the chart draws, taken from the window and not from the
+   * data: a day the recorder has nothing for must appear as an empty column,
+   * not disappear and slide every later column one place to the left.
+   *
+   * The cursor is advanced with setDate / setMonth on a local Date, so the
+   * twice-yearly 23- and 25-hour days still land on the next local midnight
+   * instead of drifting an hour.
+   */
+  _ecoBuckets(win) {
+    const out = [];
+    const c = new Date(win.start.getTime());
+    const stop = win.stop.getTime();
+    // Un tetto contro una finestra assurda: 372 e' un anno di giorni con
+    // margine, e nessun periodo di questa card ne produce di piu'.
+    while (c.getTime() < stop && out.length < 372) {
+      const from = new Date(c.getTime());
+      if (win.bucket === "hour") c.setHours(c.getHours() + 1);
+      else if (win.bucket === "month") c.setMonth(c.getMonth() + 1);
+      else c.setDate(c.getDate() + 1);
+      out.push({ at: from, from: from.getTime(), to: Math.min(c.getTime(), stop),
+        imported: 0, exported: 0, produced: 0, battIn: 0, battOut: 0 });
+    }
+    return out;
+  }
+
+  /** Dove porta il tocco su una colonna: un livello piu' in basso, su quel bucket. */
+  _ecoDrill(win, at) {
+    const now = new Date();
+    if (win.key === "year") {
+      const off = (now.getFullYear() - at.getFullYear()) * 12 + (now.getMonth() - at.getMonth());
+      return off >= 0 ? { period: "month", offset: off } : null;
+    }
+    if (win.key === "month" || win.key === "week") {
+      const a = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const b = new Date(at.getFullYear(), at.getMonth(), at.getDate());
+      // La divisione fra due mezzanotti locali vale 23 o 25 ore due volte
+      // l'anno: l'arrotondamento e' quello che tiene il conto dei giorni.
+      const off = Math.round((a - b) / 86400000);
+      return off >= 0 ? { period: "today", offset: off } : null;
+    }
+    return null;
+  }
+
+  /** L'etichetta sotto una colonna. */
+  _ecoBucketLabel(win, at) {
+    if (win.bucket === "hour") return String(at.getHours()).padStart(2, "0");
+    if (win.bucket === "month") return MONTHS_IT_SHORT[at.getMonth()];
+    return String(at.getDate());
+  }
+
+  /**
+   * Consumed against produced, bucket by bucket, drawn by hand in SVG.
+   *
+   * Two bars per slot. The left one is what the house actually used, split
+   * into the part bought from the grid and the part that came off the roof:
+   * the yellow portion IS the saving, in the place where it happened, which is
+   * the question an owner asks in front of a bill. The right one is what the
+   * plant produced, split into what stayed home and what was sold.
+   *
+   * No charting library: a dependency that can disappear from GitHub is a
+   * dependency that can take this card with it, and a bar chart is arithmetic
+   * plus rectangles.
+   */
+  _economyChart(item, data, win) {
+    const buckets = this._ecoBuckets(win);
+    if (!buckets.length) return "";
+    const series = (data && data.series) || {};
+    const fill = (key, field) => {
+      const id = item[key];
+      const rows = (id && series[id]) || [];
+      let i = 0;
+      for (const row of rows) {
+        // L'ultimo bucket assorbe tutto quello che comincia da li' in poi:
+        // la finestra corrente finisce "adesso", e un'ora ancora in corso non
+        // deve sparire dal grafico solo perche' non e' finita.
+        while (i < buckets.length - 1 && row.t >= buckets[i].to) i++;
+        if (row.t >= buckets[i].from) buckets[i][field] += row.v;
+      }
+    };
+    fill("grid_import", "imported");
+    fill("grid_export", "exported");
+    fill("solar", "produced");
+    fill("battery_in", "battIn");
+    fill("battery_out", "battOut");
+
+    let max = 0, anything = 0;
+    for (const b of buckets) {
+      b.self = Math.max(0, b.produced + b.battOut - b.battIn - b.exported);
+      b.used = b.imported + b.self;
+      b.sold = Math.min(b.produced, b.exported);
+      max = Math.max(max, b.used, b.produced);
+      anything += b.used + b.produced;
+    }
+    if (!(anything > 0)) {
+      return `<div class="eco-chart empty"><ha-icon icon="mdi:chart-bar"></ha-icon>
+        <span>Nessuna statistica per ${esc(win.title.toLowerCase())}.</span></div>`;
+    }
+    if (!(max > 0)) max = 1;
+
+    // Il disegno vive in un viewBox alto 100 unita' e steso in larghezza
+    // (preserveAspectRatio="none"): l'altezza del grafico e' cosi' decisa dal
+    // CSS in pixel veri, invece di seguire la larghezza della card e diventare
+    // una torre su un monitor largo. Dentro l'SVG non c'e' nessun testo, e per
+    // questo lo stiramento non fa danni: le etichette sono HTML sotto, dove
+    // hanno un corpo in pixel che non cambia con la card.
+    const W = 1000, H = 100, PAD = 6;
+    const n = buckets.length;
+    const slot = W / n;
+    const group = Math.min(slot * 0.78, 44);
+    const bw = Math.max(1.6, group / 2 - Math.min(2, group * 0.06));
+    const step = Math.max(1, Math.ceil(n / 12));
+    const h = (v) => (v > 0 ? Math.max(1, (v / max) * (H - PAD)) : 0);
+    const drillable = !!this._ecoDrill(win, buckets[0].at);
+
+    const cols = buckets.map((b, i) => {
+      const cx = i * slot + slot / 2;
+      const xL = cx - group / 2, xR = cx + group / 2 - bw;
+      const hImp = h(b.imported), hSelf = h(b.self), hSold = h(b.sold);
+      const hProd = h(b.produced);
+      const label = this._ecoBucketLabel(win, b.at);
+      return `<g class="ecb">
+        <rect class="ecb-hit" x="${(i * slot).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${H}"
+          data-eco-bar="${i}" data-eco-card="${esc(item.id)}"><title>${esc(label)} · casa ${
+            esc(b.used.toFixed(2))} kWh${b.produced > 0 ? ` · prodotti ${esc(b.produced.toFixed(2))} kWh` : ""}</title></rect>
+        ${b.imported > 0 ? `<rect class="ecb-grid" x="${xL.toFixed(1)}" y="${(H - hImp).toFixed(2)}"
+          width="${bw.toFixed(1)}" height="${hImp.toFixed(2)}"></rect>` : ""}
+        ${b.self > 0 ? `<rect class="ecb-self" x="${xL.toFixed(1)}" y="${(H - hImp - hSelf).toFixed(2)}"
+          width="${bw.toFixed(1)}" height="${hSelf.toFixed(2)}"></rect>` : ""}
+        ${b.produced > 0 ? `<rect class="ecb-prod" x="${xR.toFixed(1)}" y="${(H - hProd).toFixed(2)}"
+          width="${bw.toFixed(1)}" height="${hProd.toFixed(2)}"></rect>` : ""}
+        ${b.sold > 0 ? `<rect class="ecb-sold" x="${xR.toFixed(1)}" y="${(H - hProd).toFixed(2)}"
+          width="${bw.toFixed(1)}" height="${hSold.toFixed(2)}"></rect>` : ""}
+      </g>`;
+    }).join("");
+
+    return `<div class="eco-chart${drillable ? " drill" : ""}">
+      <div class="ecc-plot">
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" data-eco-svg role="img"
+          aria-label="Consumo e produzione, ${esc(win.title.toLowerCase())}">
+          <line class="ecb-axis" x1="0" y1="${H}" x2="${W}" y2="${H}" vector-effect="non-scaling-stroke"></line>
+          ${cols}
+        </svg>
+      </div>
+      <div class="ecc-labels" style="--n:${n}">${buckets.map((b, i) =>
+        `<span class="ecb-lab">${i % step === 0 ? esc(this._ecoBucketLabel(win, b.at)) : ""}</span>`).join("")}</div>
+      <div class="eco-legend">
+        <span><i class="lg-grid"></i>Dalla rete</span>
+        <span><i class="lg-self"></i>Dal sole, in casa</span>
+        <span><i class="lg-sold"></i>Immessi in rete</span>
+      </div>
+      <span class="hint">A sinistra quello che ha consumato la casa, a destra quello che ha prodotto l'impianto. Massimo della scala ${
+        esc(max.toFixed(1))} kWh${drillable ? " · tocca una colonna per entrarci dentro" : ""}.</span>
+    </div>`;
+  }
+
   _economyBody(item) {
-    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
+    const win = this._ecoWindow(item);
     if (!item.grid_import && !item.solar) {
       return `<div class="ov-empty"><ha-icon icon="mdi:cash-remove"></ha-icon>
         <span>Collega almeno il contatore di energia prelevata dalla rete (kWh) nell'editor della card.</span></div>`;
@@ -7195,24 +7523,43 @@ class CyborgDashboard extends HTMLElement {
       return `<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
         <span>${esc(data.message)}. Servono entità con statistiche a lungo termine (state_class: total_increasing).</span></div>`;
     }
-    const f = this._economyFigures(item, data);
+    const f = this._economyFigures(item, data, win);
     const bar = (v, max) => `${max > 0 ? Math.max(2, Math.min(100, (v / max) * 100)) : 0}%`;
     const maxE = Math.max(f.imported, f.exported, f.selfUsed, 0.001);
+    const pct = (v) => (v === null || !Number.isFinite(v) ? null
+      : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(0) + "%");
 
     return `<div class="eco">
         <div class="eco-tabs">${ECONOMY_PERIODS.map((p) =>
-          `<button class="eco-tab ${p.key === period.key ? "on" : ""}" data-eco-period="${p.key}">${esc(p.label)}</button>`).join("")}</div>
+          `<button class="eco-tab ${p.key === win.key ? "on" : ""}" data-eco-period="${p.key}">${esc(p.label)}</button>`).join("")}</div>
+
+        <div class="eco-nav">
+          <button class="mini" data-eco-step="1" title="Periodo precedente"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+          <strong>${esc(win.title)}</strong>
+          <button class="mini" data-eco-step="-1" ${win.offset ? "" : "disabled"}
+            title="Periodo successivo"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+        </div>
 
         <div class="eco-hero ${f.net < 0 ? "credit" : ""}">
-          <span>SPESA NETTA · ${esc(period.label.toUpperCase())}</span>
+          <span>SPESA NETTA${win.running ? " · IN CORSO" : ""}</span>
           <strong>${esc(eur(f.net))}<i>€</i></strong>
           ${f.hasPv ? `<em>senza fotovoltaico: ${esc(eur(f.withoutPv))} €</em>` : ""}
         </div>
 
+        ${f.cmp ? `<div class="eco-cmp">
+          <span>rispetto a <strong>${esc(f.cmp.title.toLowerCase())}</strong></span>
+          ${pct(f.cmp.consumption) ? `<em class="${f.cmp.consumption > 0 ? "up" : "down"}">consumo ${esc(pct(f.cmp.consumption))}</em>` : ""}
+          ${pct(f.cmp.produced) ? `<em class="${f.cmp.produced > 0 ? "down" : "up"}">produzione ${esc(pct(f.cmp.produced))}</em>` : ""}
+          <em class="${f.cmp.costDelta > 0 ? "up" : "down"}">energia ${f.cmp.costDelta >= 0 ? "+" : "−"}${esc(eur(Math.abs(f.cmp.costDelta)))} €</em>
+        </div>` : ""}
+
         ${f.hasPv ? `<div class="eco-saved">
           <ha-icon icon="mdi:piggy-bank-outline"></ha-icon>
-          <div><strong>${esc(eur(f.saved))} €</strong><span>risparmiati grazie all'impianto</span></div>
+          <div><strong>${esc(eur(f.saved))} €</strong><span>risparmiati grazie all'impianto${
+            f.hasBattery ? ", batteria compresa" : ""}</span></div>
         </div>` : ""}
+
+        ${this._economyChart(item, data, win)}
 
         <div class="eco-rows">
           <div class="eco-row cost">
@@ -7245,24 +7592,34 @@ class CyborgDashboard extends HTMLElement {
             <span class="eco-kwh">${esc(f.exported.toFixed(1))} kWh</span>
             <span class="eco-eur">+${esc(eur(f.revenue))} €</span>
           </div>` : ""}
+          ${f.hasBattery ? `<div class="eco-row batt">
+            <span class="eco-k"><ha-icon icon="mdi:home-battery"></ha-icon> Batteria</span>
+            <span class="eco-bar"><i style="width:${bar(f.battOut, maxE)}"></i></span>
+            <span class="eco-kwh">${esc(f.battOut.toFixed(1))} kWh</span>
+            <span class="eco-eur">+${esc(eur(f.battOut * f.pIn))} €</span>
+          </div>` : ""}
         </div>
+        ${f.hasBattery ? `<span class="hint">La batteria ha restituito ${esc(f.battOut.toFixed(1))} kWh a fronte di ${
+          esc(f.battIn.toFixed(1))} caricati${f.battLoss > 0.05 ? `: ${esc(f.battLoss.toFixed(1))} kWh (${
+          Math.round((f.battLoss / Math.max(f.battIn, 0.001)) * 100)}%) restano nel rendimento di ciclo, non sono un errore di misura. Sono già scontati dall'autoconsumo` : ""}.</span>` : ""}
 
         ${f.hasBill ? `<div class="eco-bill">
           <header><ha-icon icon="mdi:receipt-text-outline"></ha-icon><strong>Totale stimato in bolletta</strong>
-            <em>${esc(period.label.toLowerCase())}</em></header>
+            <em>${esc(win.title.toLowerCase())}${win.running ? ", finora" : ""}</em></header>
           <div class="eb-row"><span>Energia prelevata</span><b>${esc(eur(f.cost))} €</b></div>
           ${(Array.isArray(item.fixed) ? item.fixed : []).filter((r) => num(r.amount) !== null && num(r.amount) !== 0)
             .map((r) => `<div class="eb-row sub"><span>${esc(r.label)}<i>${esc(eur(num(r.amount)))} € ${
               r.every === "day" ? "al giorno" : r.every === "year" ? "all'anno" : "al mese"}</i></span>
-              <b>${esc(eur((num(r.amount) / (FIXED_EVERY_DAYS[r.every] || FIXED_EVERY_DAYS.month)) * period.days))} €</b></div>`).join("")}
+              <b>${esc(eur((num(r.amount) / (FIXED_EVERY_DAYS[r.every] || FIXED_EVERY_DAYS.month)) * win.days))} €</b></div>`).join("")}
           ${f.vat > 0 ? `<div class="eb-row"><span>IVA ${esc(f.vat)}%</span><b>${esc(eur(f.taxed - f.cost - f.fixed))} €</b></div>` : ""}
           ${f.revenue > 0 ? `<div class="eb-row credit"><span>Immissione in rete</span><b>−${esc(eur(f.revenue))} €</b></div>` : ""}
           <div class="eb-row total"><span>Totale</span><b>${esc(eur(f.billed))} €</b></div>
         </div>` : ""}
 
-        ${this._economyDevices(item, data)}
+        ${this._economyDevices(item, data, f)}
 
         <div class="eco-foot">
+          <span>casa ${esc(f.consumption.toFixed(1))} kWh</span>
           <span>${item.tariff_mode === "bands"
             ? `multifascia · media ${esc(eur(f.pIn))} €/kWh`
             : `prelievo ${esc(eur(Number(item.price_import) || 0))} €/kWh`}</span>
@@ -7283,7 +7640,7 @@ class CyborgDashboard extends HTMLElement {
    * loads are a minority of the total, and the honest number is the one an
    * installer can defend in front of the customer.
    */
-  _economyDevices(item, data) {
+  _economyDevices(item, data, f) {
     const devices = Array.isArray(item.devices) ? item.devices : [];
     if (!devices.length) {
       return `<div class="eco-devices empty">
@@ -7292,7 +7649,10 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
     }
     const kwh = (data && data.devices) || {};
-    const pIn = Number(item.price_import) || 0;
+    // Con la tariffa multifascia il prezzo unico non e' quello che si paga:
+    // il dettaglio per dispositivo deve usare la stessa media pesata del
+    // resto della card, altrimenti la somma delle righe non torna col totale.
+    const pIn = (f && Number.isFinite(f.pIn)) ? f.pIn : (Number(item.price_import) || 0);
     const pOut = Number(item.price_export) || 0;
 
     const rows = devices.map((d) => {
@@ -7336,7 +7696,10 @@ class CyborgDashboard extends HTMLElement {
     const roots = loads.filter((r) => !r.nested);
     const measured = roots.reduce((n, r) => n + r.kwh, 0);
     const generated = sources.reduce((n, r) => n + r.kwh, 0);
-    const houseTotal = (data.imported || 0) + Math.max(0, (data.produced || 0) - (data.exported || 0));
+    // Il consumo di casa tiene conto della batteria: se lo ricalcolassi qui
+    // senza, la quota "non misurato" cambierebbe fra due punti della stessa card.
+    const houseTotal = (f && Number.isFinite(f.consumption)) ? f.consumption
+      : (data.imported || 0) + Math.max(0, (data.produced || 0) - (data.exported || 0));
     const unmeasured = Math.max(0, houseTotal - measured);
     const maxRow = Math.max(measured, generated, 0.001);
 
@@ -7658,6 +8021,9 @@ class CyborgDashboard extends HTMLElement {
         ${pick("grid_import", "ENERGIA PRELEVATA DALLA RETE", /preliev|import|rete|grid|consum/i)}
         ${pick("grid_export", "ENERGIA IMMESSA IN RETE", /immess|immiss|export|vendut/i)}
         ${pick("solar", "ENERGIA PRODOTTA DAL FOTOVOLTAICO", /solar|fotovolt|\bpv\b|produz/i)}
+        ${pick("battery_in", "ENERGIA CARICATA IN BATTERIA", /batter|accumul|charg|carica/i)}
+        ${pick("battery_out", "ENERGIA SCARICATA DALLA BATTERIA", /batter|accumul|dischar|scaric/i)}
+        <span class="hint">I due contatori della batteria sono facoltativi. Con l'accumulo collegato, l'autoconsumo smette di essere <em>prodotto meno immesso</em> e diventa <em>prodotto più scaricato meno caricato meno immesso</em>: senza, l'energia messa da parte di giorno e usata di sera risulterebbe comprata dalla rete.</span>
         <button class="secondary wide" data-eco-detect><ha-icon icon="mdi:auto-fix"></ha-icon> RILEVA DALLA DASHBOARD ENERGIA</button>
       </div>
       <div class="section">
@@ -7669,6 +8035,8 @@ class CyborgDashboard extends HTMLElement {
           <label>IMMISSIONE €/kWh<input type="number" step="0.001" min="0" data-prop="price_export" value="${card.price_export ?? 0.1}"></label>
         </div>
         <label>PERIODO PREDEFINITO<select data-prop="period">
+          <!-- I periodi sono di calendario: "Mese" e' agosto, non gli ultimi
+               trenta giorni, perche' la bolletta arriva per mese solare. -->
           ${ECONOMY_PERIODS.map((p) => `<option value="${p.key}" ${(card.period || "month") === p.key ? "selected" : ""}>${esc(p.label)}</option>`).join("")}
         </select></label>
       </div>
@@ -8522,6 +8890,13 @@ class CyborgDashboard extends HTMLElement {
       if (src.type === "solar" && src.stat_energy_from) {
         if (!card.solar) card.solar = src.stat_energy_from;
         solarStats.push({ stat: src.stat_energy_from, name: src.name || "" });
+      }
+      // L'accumulo: Home Assistant lo modella con due contatori distinti,
+      // energia entrata ed energia uscita, ed e' esattamente cio' che serve
+      // per chiudere il bilancio di casa.
+      if (src.type === "battery") {
+        if (!card.battery_in && src.stat_energy_to) card.battery_in = src.stat_energy_to;
+        if (!card.battery_out && src.stat_energy_from) card.battery_out = src.stat_energy_from;
       }
     }
     if (priceIn !== null) card.price_import = priceIn;
@@ -10928,6 +11303,10 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => {
         if (!card) return;
         card.period = el.getAttribute("data-eco-period");
+        // Cambiare scala azzera la navigazione: "tre indietro" da mese vuol
+        // dire maggio, da anno vorrebbe dire il 2023, e nessuno lo ha chiesto.
+        this._ecoOffset = this._ecoOffset || {};
+        this._ecoOffset[card.id] = 0;
         this._touch();
       };
     });
@@ -10937,10 +11316,46 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => {
         const target = el.closest(".item");
         const id = target && target.getAttribute("data-card-id");
-        for (const sec of this._sections()) {
-          const it = sec.items.find((x) => x.id === id);
-          if (it) { it.period = el.getAttribute("data-eco-period"); this._touch(true); return; }
-        }
+        const it = id ? this._findCard(id) : null;
+        if (!it) return;
+        it.period = el.getAttribute("data-eco-period");
+        this._ecoOffset = this._ecoOffset || {};
+        this._ecoOffset[id] = 0;
+        this._touch(true);
+      };
+    });
+    // Avanti e indietro nel tempo. L'indice vive in memoria e non nel
+    // dashboard salvato: e' navigazione, non configurazione, e una dashboard
+    // da parete che riapre bloccata su marzo sarebbe un difetto.
+    all("[data-eco-step]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const target = el.closest(".item");
+        const id = (target && target.getAttribute("data-card-id")) || (card && card.id);
+        if (!id) return;
+        this._ecoOffset = this._ecoOffset || {};
+        const next = (this._ecoOffset[id] || 0) + parseInt(el.getAttribute("data-eco-step"), 10);
+        // Il futuro non esiste nelle statistiche: zero e' il fondo corsa.
+        this._ecoOffset[id] = Math.max(0, next);
+        this._touch(true);
+      };
+    });
+    // Toccare una colonna scende di un livello: dall'anno al mese, dal mese
+    // al giorno. E' il modo naturale di chiedere "e in marzo quanto?".
+    all("[data-eco-bar]").forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute("data-eco-card");
+        const it = this._findCard(id) || (card && card.id === id ? card : null);
+        if (!it) return;
+        const win = this._ecoWindow(it);
+        const bucket = this._ecoBuckets(win)[parseInt(el.getAttribute("data-eco-bar"), 10)];
+        if (!bucket) return;
+        const to = this._ecoDrill(win, bucket.at);
+        if (!to) return;
+        it.period = to.period;
+        this._ecoOffset = this._ecoOffset || {};
+        this._ecoOffset[id] = to.offset;
+        this._touch(true);
       };
     });
     const ecoDetect = q("[data-eco-detect]");
@@ -12196,6 +12611,50 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .eco-tabs{display:flex;gap:4px}
 .eco-tab{flex:1;padding:7px 4px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.04em;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.5}
 .eco-tab.on{opacity:1;color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.eco-nav{display:flex;align-items:center;justify-content:center;gap:10px}
+.eco-nav>strong{flex:1;text-align:center;font:700 12.5px Inter,system-ui,sans-serif;letter-spacing:.02em}
+.eco-nav .mini[disabled]{opacity:.22;pointer-events:none}
+/* Il confronto col periodo precedente: verde quando la variazione e'
+   favorevole al portafoglio, ambra quando non lo e'. */
+.eco-cmp{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;justify-content:center;
+  font-size:10.5px;opacity:.85}
+.eco-cmp>span{opacity:.55}
+.eco-cmp>em{font-style:normal;font-weight:700;padding:2px 7px;border-radius:99px;
+  background:color-mix(in srgb,currentColor 13%,transparent)}
+.eco-cmp>em.up{color:#ffd166}
+.eco-cmp>em.down{color:#06d6a0}
+.eco-chart{display:flex;flex-direction:column;gap:5px}
+/* L'altezza del grafico e' in pixel, non in proporzione alla larghezza: una
+   card larga il doppio non deve diventare un grafico alto il doppio. */
+.ecc-plot{height:168px}
+.ecc-plot>svg{width:100%;height:100%;display:block}
+/* Le etichette sono HTML e non testo dentro l'SVG: nello stesso numero di
+   colonne dei bucket, quindi cadono esattamente sotto la loro barra, e con un
+   corpo in pixel che non si stira con la card. */
+.ecc-labels{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));
+  font:600 9px ui-monospace,monospace;letter-spacing:-.02em;opacity:.45}
+.ecc-labels>span{text-align:center;overflow:hidden;white-space:nowrap}
+.eco-chart.empty{flex-direction:row;align-items:center;gap:8px;padding:14px 12px;
+  border:1px dashed var(--divider-color);border-radius:12px;font-size:11px;opacity:.6}
+.ecb-axis{stroke:var(--divider-color);stroke-width:1.5}
+@media(max-width:820px){.ecc-plot{height:132px}.ecc-labels{font-size:8px}}
+.ecb-hit{fill:transparent}
+.eco-chart.drill .ecb-hit{cursor:pointer}
+.eco-chart.drill .ecb:hover .ecb-hit{fill:color-mix(in srgb,var(--accent) 10%,transparent)}
+/* Gli stessi colori del diagramma di flusso: rete azzurra, sole ambra. Una
+   barra di casa mezza azzurra e mezza ambra dice da sola quanta parte del
+   consumo non e' stata comprata. */
+.ecb-grid{fill:#8ecae6}
+.ecb-self{fill:#ffd166}
+.ecb-prod{fill:#ffd166}
+.ecb-sold{fill:#06d6a0}
+.eco-legend{display:flex;flex-wrap:wrap;gap:4px 12px;justify-content:center;font-size:10px;opacity:.6}
+.eco-legend>span{display:inline-flex;align-items:center;gap:5px}
+.eco-legend i{width:9px;height:9px;border-radius:2.5px;display:block}
+.eco-legend .lg-grid{background:#8ecae6}
+.eco-legend .lg-self{background:#ffd166}
+.eco-legend .lg-sold{background:#06d6a0}
+.eco-row.batt .eco-bar i{background:#c77dff}
 .eco-hero{text-align:center;padding:6px 0 2px}
 .eco-hero>span{display:block;font:10px ui-monospace,monospace;letter-spacing:2px;opacity:.45}
 .eco-hero>strong{display:block;margin-top:4px;font:750 40px Inter,system-ui,sans-serif;letter-spacing:-.04em;line-height:1;color:#ffd166}
@@ -12212,13 +12671,19 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .eco-k ha-icon{--mdc-icon-size:15px;flex-shrink:0}
 .eco-bar{height:7px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden}
 .eco-bar i{display:block;height:100%;border-radius:99px;transition:width .4s ease}
-.eco-row.cost .eco-bar i,.eco-row.cost .eco-k ha-icon{background:#ff8fa3;color:#ff8fa3}
-.eco-row.self .eco-bar i,.eco-row.self .eco-k ha-icon{background:#06d6a0;color:#06d6a0}
-.eco-row.rev .eco-bar i,.eco-row.rev .eco-k ha-icon{background:#ffd166;color:#ffd166}
+/* Gli stessi colori del grafico qui sopra: azzurro cio' che viene dalla rete,
+   ambra cio' che viene dal sole ed e' rimasto in casa, verde cio' che e'
+   finito in rete. Due colori diversi per la stessa cosa nella stessa card
+   sarebbero peggio di nessun colore. La batteria e' viola perche' e' l'unica
+   voce che nel grafico non ha una barra propria. */
+.eco-row.cost .eco-bar i,.eco-row.cost .eco-k ha-icon{background:#8ecae6;color:#8ecae6}
+.eco-row.self .eco-bar i,.eco-row.self .eco-k ha-icon{background:#ffd166;color:#ffd166}
+.eco-row.rev .eco-bar i,.eco-row.rev .eco-k ha-icon{background:#06d6a0;color:#06d6a0}
+.eco-row.batt .eco-k ha-icon{color:#c77dff}
 .eco-kwh{font:11px ui-monospace,monospace;opacity:.5;text-align:right}
 .eco-eur{font:750 13px Inter,system-ui,sans-serif;text-align:right;font-variant-numeric:tabular-nums}
-.eco-row.cost .eco-eur{color:#ff8fa3}
-.eco-row.self .eco-eur,.eco-row.rev .eco-eur{color:#06d6a0}
+.eco-row.cost .eco-eur{color:#ffd166}
+.eco-row.self .eco-eur,.eco-row.rev .eco-eur,.eco-row.batt .eco-eur{color:#06d6a0}
 /* ---------------------------------------------------------------- luci -- */
 .li{margin-top:12px;display:flex;flex-direction:column;gap:10px}
 .li-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -12355,7 +12820,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .ede-txt small{display:block;font:9px ui-monospace,monospace;opacity:.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .eco-dev-edit .mini.on{color:#06d6a0;border-color:color-mix(in srgb,#06d6a0 45%,transparent)}
 .eco-foot{display:flex;flex-wrap:wrap;gap:12px;padding-top:9px;border-top:1px solid color-mix(in srgb,var(--accent) 14%,transparent);font:10px ui-monospace,monospace;letter-spacing:.5px;opacity:.4}
-@media(max-width:560px){.eco-row{grid-template-columns:1fr 62px 60px}.eco-bar{display:none}}
+/* Sul telefono la barra sparisce e restano le due colonne dei numeri: quella
+   degli euro deve stare larga abbastanza da non spezzare "+27,93 €" su due
+   righe, che e' il modo piu' rapido di far sembrare rotta una card. */
+@media(max-width:560px){.eco-row{grid-template-columns:1fr 60px 70px}.eco-bar{display:none}}
 .mon{margin-top:12px;display:flex;flex-direction:column;gap:12px}
 .mg{display:flex;flex-direction:column;align-items:center;gap:2px}
 .mg-svg{width:100%;max-width:280px;height:auto;display:block}
@@ -13249,7 +13717,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.44.0";
+const CYBORG_BUILD = "0.45.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

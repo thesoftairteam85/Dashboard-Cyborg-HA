@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 16, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 17, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -827,3 +827,38 @@ fp = schema.normalize_dashboard({"version": 16, "pages": [
 assert fp["pages"][0]["kiosk"] is False
 
 print("schema: chiosco per i tablet (v16) ok")
+
+
+# ---------------------------------------------------------------------------
+# v17: i due contatori dell'accumulo nella card economica.
+#
+# Sono facoltativi: una casa senza batteria deve continuare a normalizzare
+# esattamente come prima, con le due chiavi presenti e vuote invece che
+# assenti, cosi' il frontend non deve distinguere "non configurato" da "chiave
+# che non esiste".
+def _eco(**kw):
+    item = {"id": "ec", "type": "economy"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+eco = _eco()
+for key in ("grid_import", "grid_export", "solar", "battery_in", "battery_out"):
+    assert key in eco, key
+    assert eco[key] is None, (key, eco[key])
+eco = _eco(battery_in="sensor.carica", battery_out="sensor.scarica")
+assert eco["battery_in"] == "sensor.carica"
+assert eco["battery_out"] == "sensor.scarica"
+# qualunque cosa non sia una stringa piena diventa "non collegato"
+for junk in ("", None, 0, 7, [], {"a": 1}, True):
+    assert _eco(battery_in=junk)["battery_in"] is None, junk
+# e la scelta sopravvive a un giro completo di salvataggio
+dash17 = schema.normalize_dashboard({"version": 16, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "ec", "type": "economy", "battery_in": "sensor.carica",
+         "battery_out": "sensor.scarica"}]}]}]})
+assert dash17["version"] == 17, dash17["version"]
+kept = dash17["pages"][0]["sections"][0]["items"][0]
+assert kept["battery_in"] == "sensor.carica", kept
+assert kept["battery_out"] == "sensor.scarica", kept
+print("schema: contatori della batteria nella card economica ok")

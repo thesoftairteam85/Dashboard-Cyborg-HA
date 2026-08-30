@@ -148,7 +148,8 @@ const hass={states,
     if(m.type==="cyborg_dashboard/notifications/clear") return {cleared:true};
     if(m.type==="energy/get_prefs") return {energy_sources:[
       {type:"grid",stat_energy_from:"sensor.energia_rete",stat_energy_to:"sensor.energia_immessa",number_energy_price:0.31},
-      {type:"solar",stat_energy_from:"sensor.energia_pv"}],
+      {type:"solar",stat_energy_from:"sensor.energia_pv"},
+      {type:"battery",stat_energy_from:"sensor.energia_batt_out",stat_energy_to:"sensor.energia_batt_in"}],
       device_consumption:[{stat_consumption:"sensor.energia_pdc",name:"Pompa di calore"},
         {stat_consumption:"sensor.energia_lavatrice",name:"Lavatrice"},
         {stat_consumption:"sensor.energia_forno",name:"Forno"}]};
@@ -156,6 +157,7 @@ const hass={states,
       // a statistic's sum is a monotonic meter: the harness returns a first
       // and a last bucket so the panel computes last-minus-first as it does live
       const TOT={"sensor.energia_rete":[1000,1310],"sensor.energia_immessa":[400,486],
+        "sensor.energia_batt_in":[200,236],"sensor.energia_batt_out":[180,212],
         "sensor.energia_pv":[900,1082],"sensor.energia_pdc":[500,612],
         "sensor.energia_lavatrice":[120,141],"sensor.energia_forno":[60,74]};
       const out={};
@@ -169,17 +171,40 @@ const hass={states,
           const s0=Date.parse(m.start_time), s1=Date.parse(m.end_time);
           const rows=[]; let acc=t[0];
           for(let ms=s0; ms<=s1; ms+=3600000){
-            rows.push({start:ms,sum:acc});
             const h=new Date(ms).getHours();
-            acc += (h>=8&&h<19) ? 0.9 : (h>=7&&h<23) ? 0.5 : 0.2;
+            // `change` e' l'energia dell'ora che COMINCIA qui: e' il campo che
+            // decide in quale fascia finisce, ed e' quello che il pannello legge.
+            const ch=(h>=8&&h<19) ? 0.9 : (h>=7&&h<23) ? 0.5 : 0.2;
+            acc += ch;
+            rows.push({start:ms,sum:acc,change:ch});
           }
           out[id]=rows;
         }
         return out;
       }
-      for(const id of m.statistic_ids||[]){
-        const t=TOT[id]; if(!t) continue;
-        out[id]=[{start:m.start_time,sum:t[0]},{start:m.end_time,sum:t[1]}];
+      // Giorno per giorno (o mese per mese): il pannello chiede il campo
+      // `change`, che e' l'energia passata DENTRO il bucket, ed e' quello che
+      // il grafico storico disegna. Due sole righe agli estremi - come faceva
+      // prima questo finto recorder - non sono un caso realistico: il vero
+      // recorder restituisce una riga per bucket.
+      {
+        const s0=Date.parse(m.start_time), s1=Date.parse(m.end_time);
+        const stepOf=(d)=>{const n=new Date(d);
+          if(m.period==="month"){n.setMonth(n.getMonth()+1);}else{n.setDate(n.getDate()+1);}
+          return n.getTime();};
+        for(const id of m.statistic_ids||[]){
+          const t=TOT[id]; if(!t) continue;
+          // conta i bucket per ripartire il totale storico su tutti quanti
+          const marks=[]; for(let ms=s0; ms<s1; ms=stepOf(ms)) marks.push(ms);
+          if(!marks.length) { out[id]=[]; continue; }
+          // Peso deterministico, niente Math.random: le immagini e i conti
+          // devono venire uguali a ogni giro.
+          const w=marks.map((ms,i)=>0.6+0.4*Math.abs(Math.sin(i*1.7+id.length)));
+          const wsum=w.reduce((n,x)=>n+x,0);
+          // il periodo mostrato e' la seconda meta' della finestra chiesta
+          const tot=(t[1]-t[0])*2;
+          out[id]=marks.map((ms,i)=>({start:ms,change:Math.round(tot*w[i]/wsum*100)/100}));
+        }
       }
       return out;
     }
@@ -308,6 +333,12 @@ window.__mount=(dash,opts)=>{
                      {entity:"sensor.energia_lavatrice",name:"Lavatrice",icon:"",kind:"load"},
                      {entity:"sensor.energia_forno",name:"Forno",icon:"",kind:"load"},
                      {entity:"sensor.energia_pv",name:"Fotovoltaico",icon:"",kind:"source"}]});
+          if(opts.battery){
+            const c=sec.items[0];
+            c.battery_in="sensor.energia_batt_in";
+            c.battery_out="sensor.energia_batt_out";
+          }
+          if(opts.ecoPeriod){sec.items[0].period=opts.ecoPeriod;}
           if(opts.tariffBands){
             const c=sec.items[0];
             c.tariff_mode="bands";

@@ -857,27 +857,52 @@ el._touch();
 ok("una mutazione marca le modifiche", el._dirty === true);
 
 // economy
+// Una finestra fissa e chiusa: i conti delle quote fisse e delle fasce non
+// devono cambiare risultato a seconda del giorno in cui gira la suite.
+const winTest = (key) => ({ key: key || "month", bucket: key === "year" ? "month" : "day",
+  label: "Mese", offset: 0,
+  start: new Date(2026, 7, 1), end: new Date(2026, 8, 1), stop: new Date(2026, 8, 1),
+  title: "Agosto 2026", short: "AGO", days: 30, running: false });
+globalThis.winTest = winTest;
 const ecoCard = { id: "eco", type: "economy", entity_id: "", appearance: {}, states: {}, actions: {},
   grid_import: "sensor.imp", grid_export: "sensor.exp", solar: "sensor.pvkwh",
   price_import: 0.25, price_export: 0.10, period: "month" };
 const ecoSec = { id: "es", title: "Economia", icon: "mdi:cash", accent: "#ffd166", items: [ecoCard] };
-const fig = el._economyFigures(ecoCard, { imported: 100, exported: 40, produced: 150 });
+const fig = el._economyFigures(ecoCard, { imported: 100, exported: 40, produced: 150 }, winTest());
 ok("autoconsumo = produzione - immissione", fig.selfUsed === 110, String(fig.selfUsed));
 ok("costo = prelievo x tariffa", fig.cost === 25, String(fig.cost));
 ok("ricavo = immissione x tariffa", Math.abs(fig.revenue - 4) < 1e-9, String(fig.revenue));
 ok("netto = costo - ricavo", Math.abs(fig.net - 21) < 1e-9, String(fig.net));
 ok("senza fotovoltaico = (prelievo + autoconsumo) x tariffa", Math.abs(fig.withoutPv - 52.5) < 1e-9, String(fig.withoutPv));
 ok("risparmio = senza PV - netto", Math.abs(fig.saved - 31.5) < 1e-9, String(fig.saved));
-const noPv = el._economyFigures(ecoCard, { imported: 100, exported: 0, produced: 0 });
+const noPv = el._economyFigures(ecoCard, { imported: 100, exported: 0, produced: 0 }, winTest());
 ok("senza impianto nessun risparmio dichiarato", noPv.hasPv === false && noPv.saved === 0);
-ok("prezzi a zero non rompono il calcolo", el._economyFigures({}, { imported: 10, exported: 1, produced: 5 }).net === 0);
+ok("prezzi a zero non rompono il calcolo", el._economyFigures({}, { imported: 10, exported: 1, produced: 5 }, winTest()).net === 0);
+
+// --- la batteria chiude il bilancio di casa
+const battCard = Object.assign({}, ecoCard, { battery_in: "sensor.bin", battery_out: "sensor.bout" });
+const battFig = el._economyFigures(battCard,
+  { imported: 100, exported: 40, produced: 150, battIn: 30, battOut: 27 }, winTest());
+ok("con la batteria l'autoconsumo aggiunge la scarica e toglie la carica",
+   Math.abs(battFig.selfUsed - (150 + 27 - 30 - 40)) < 1e-9, String(battFig.selfUsed));
+ok("il consumo di casa e' prelievo piu' autoconsumo",
+   Math.abs(battFig.consumption - (100 + 107)) < 1e-9, String(battFig.consumption));
+ok("la perdita di ciclo e' dichiarata, non nascosta",
+   Math.abs(battFig.battLoss - 3) < 1e-9, String(battFig.battLoss));
+ok("e la card sa di avere una batteria", battFig.hasBattery === true);
+ok("senza contatori di batteria il calcolo resta quello di prima",
+   el._economyFigures(ecoCard, { imported: 100, exported: 40, produced: 150, battIn: 30, battOut: 27 },
+     winTest()).selfUsed === 110);
+ok("i contatori dichiarati ma fermi non accendono la riga batteria",
+   el._economyFigures(battCard, { imported: 100, exported: 0, produced: 0, battIn: 0, battOut: 0 },
+     winTest()).hasBattery === false);
 
 el._economy = { }; el._economyPending = null;
 el._hass.callWS = async () => ({});
 const ecoEmpty = el._renderCard({ id: "e2", type: "economy", entity_id: "", appearance: {}, states: {}, actions: {} }, ecoSec);
 ok("senza contatori spiega cosa collegare", ecoEmpty.includes("prelevata dalla rete"));
 
-el._economy = { [ecoCard.id + "|month|sensor.imp,sensor.exp,sensor.pvkwh"]:
+el._economy = { [ecoCard.id + "|month|0|sensor.imp,sensor.exp,sensor.pvkwh"]:
   { ts: Date.now(), imported: 100, exported: 40, produced: 150 } };
 const ecoHtml = el._renderCard(ecoCard, ecoSec);
 ok("mostra la spesa netta", ecoHtml.includes("SPESA NETTA") && ecoHtml.includes("21,00"));
@@ -885,6 +910,11 @@ ok("mostra il confronto senza fotovoltaico", ecoHtml.includes("senza fotovoltaic
 ok("mostra il risparmio", ecoHtml.includes("31,50") && ecoHtml.includes("risparmiati"));
 ok("mostra le tre voci", ecoHtml.includes("Prelievo") && ecoHtml.includes("Autoconsumo") && ecoHtml.includes("Immissione"));
 ok("selettore di periodo", (ecoHtml.match(/data-eco-period=/g) || []).length === 4);
+ok("e la navigazione avanti/indietro nel tempo",
+   (ecoHtml.match(/data-eco-step=/g) || []).length === 2);
+ok("al periodo corrente non si puo' andare avanti", /data-eco-step="-1" disabled/.test(ecoHtml));
+ok("il periodo mostrato e' scritto per esteso, non un numero di giorni",
+   /class="eco-nav">[\s\S]*?<strong>[A-Z][a-z]+/.test(ecoHtml));
 ok("economia: nessun undefined", !/>undefined</.test(ecoHtml) && !ecoHtml.includes("[object"));
 ok("economia: div bilanciati", (ecoHtml.match(/<div/g) || []).length === (ecoHtml.match(/<\/div>/g) || []).length);
 ok("valuta in formato italiano", ecoHtml.includes(",") && !ecoHtml.includes("21.00"));
@@ -3849,7 +3879,8 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
               fixed: [], vat: 0 };
             const data = { imported: 100, exported: 0, produced: 0, devices: {} };
 
-            let fig = el._economyFigures(card, data);
+            const W = globalThis.winTest();
+            let fig = el._economyFigures(card, data, W);
             ok("monoraria: cento kWh a 0,25 fanno 25 euro", Math.abs(fig.cost - 25) < 0.001,
                String(fig.cost));
             ok("senza voci fisse e senza IVA il totale e' l'energia",
@@ -3859,7 +3890,7 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
             // voci fisse riproporzionate al periodo
             card.fixed = [{ label: "Canone RAI", amount: 90, every: "year" },
                           { label: "Quota fissa", amount: 12, every: "month" }];
-            fig = el._economyFigures(card, data);
+            fig = el._economyFigures(card, data, W);
             const atteso = 90 / 365.2425 * 30 + 12 / 30.436875 * 30;
             ok("le voci fisse vengono riproporzionate ai trenta giorni",
                Math.abs(fig.fixed - atteso) < 0.01, fig.fixed.toFixed(3) + " vs " + atteso.toFixed(3));
@@ -3870,12 +3901,12 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                Math.abs(fig.billed - (25 + atteso)) < 0.01, String(fig.billed));
 
             card.vat = 10;
-            fig = el._economyFigures(card, data);
+            fig = el._economyFigures(card, data, W);
             ok("l'IVA si applica a energia e quote fisse",
                Math.abs(fig.billed - (25 + atteso) * 1.1) < 0.01, String(fig.billed));
             // l'immissione si sottrae DOPO l'IVA
             const dataPv = { imported: 100, exported: 40, produced: 60, devices: {} };
-            fig = el._economyFigures(card, dataPv);
+            fig = el._economyFigures(card, dataPv, W);
             ok("l'immissione viene sottratta dopo l'IVA, non tassata",
                Math.abs(fig.billed - ((25 + atteso) * 1.1 - 4)) < 0.01, String(fig.billed));
             card.vat = 0; card.fixed = [];
@@ -3886,20 +3917,32 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
             el._hass.callWS = (m) => {
               if (m.type !== "recorder/statistics_during_period") return Promise.resolve({});
               ok("chiede le statistiche ORA per ora", m.period === "hour", m.period);
-              // 4 ore: lunedi 10 (F1), lunedi 20 (F2), lunedi 2 (F3), domenica 12 (F3)
+              ok("e chiede anche il campo change, non solo sum",
+                 Array.isArray(m.types) && m.types.includes("change"), JSON.stringify(m.types));
+              // `change` e' l'energia passata DENTRO l'ora che comincia in
+              // `start`. Niente `sum`: se il conto torna lo stesso, vuol dire
+              // che il campo giusto viene letto e non la differenza fra due
+              // letture consecutive.
+              //
+              // Le righe delle 7 e delle 8 di lunedi sono messe apposta: le 8
+              // sono il confine fra F2 e F1. La 0.43.0 attribuiva l'energia
+              // all'ora PRECEDENTE, e quei due kWh finivano in F2 invece che
+              // in F1. Se qualcuno rimette quello sbaglio, questo test cade.
               const mk = (y, mo, d, h) => new Date(y, mo - 1, d, h, 0, 0).getTime();
               return Promise.resolve({ "sensor.rete_energia": [
-                { start: mk(2026, 8, 24, 10), sum: 0 },
-                { start: mk(2026, 8, 24, 20), sum: 10 },   // 10 kWh in F1
-                { start: mk(2026, 8, 24, 2), sum: 30 },    // 20 kWh in F2
-                { start: mk(2026, 8, 30, 12), sum: 60 },   // 30 kWh in F3
-                { start: mk(2026, 8, 30, 13), sum: 100 },  // 40 kWh in F3
+                { start: mk(2026, 8, 24, 2), change: 28 },    // lun 02 -> F3
+                { start: mk(2026, 8, 24, 7), change: 1 },     // lun 07 -> F2
+                { start: mk(2026, 8, 24, 8), change: 2 },     // lun 08 -> F1
+                { start: mk(2026, 8, 24, 10), change: 8 },    // lun 10 -> F1
+                { start: mk(2026, 8, 24, 20), change: 19 },   // lun 20 -> F2
+                { start: mk(2026, 8, 30, 12), change: 30 },   // dom 12 -> F3
+                { start: mk(2026, 8, 30, 13), change: 12 },   // dom 13 -> F3
               ] });
             };
             ok("finche' non risponde la card lo dice invece di mentire",
-               el._economyFigures(card, data).bandsPending === true);
+               el._economyFigures(card, data, W).bandsPending === true);
             setTimeout(() => {
-              const fb = el._economyFigures(card, data);
+              const fb = el._economyFigures(card, data, W);
               ok("le fasce sono state riconosciute",
                  !!fb.byBand, JSON.stringify(fb.byBand && fb.byBand.map((b) => [b.key, b.kwh])));
               const kwh = Object.fromEntries(fb.byBand.map((b) => [b.key, b.kwh]));
@@ -3912,6 +3955,12 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
               ok("e il prezzo medio effettivo viene mostrato",
                  Math.abs(fb.pIn - 0.252) < 0.0001, String(fb.pIn));
               ok("che non e' il prezzo monorario", Math.abs(fb.pIn - 0.25) > 0.001);
+              ok("i due kWh delle 8 stanno in F1, non nella fascia dell'ora prima",
+                 Math.abs(kwh.f1 - 10) < 0.01 && Math.abs(kwh.f2 - 20) < 0.01,
+                 kwh.f1 + "/" + kwh.f2);
+              ok("e il conto torna senza aver letto nemmeno un `sum`",
+                 Math.abs(kwh.f1 + kwh.f2 + kwh.f3 - 100) < 0.01,
+                 String(kwh.f1 + kwh.f2 + kwh.f3));
 
               // un contatore che si azzera non deve diventare consumo negativo
               el._bands = {}; el._hass.callWS = (m) => {
@@ -3923,9 +3972,9 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                   { start: mk(2026, 8, 24, 12), sum: 5 },
                 ] });
               };
-              el._economyFigures(card, data);
+              el._economyFigures(card, data, W);
               setTimeout(() => {
-                const fr = el._economyFigures(card, data);
+                const fr = el._economyFigures(card, data, W);
                 ok("un contatore azzerato non produce consumo negativo",
                    fr.byBand && fr.byBand.every((b) => b.kwh >= 0),
                    JSON.stringify(fr.byBand && fr.byBand.map((b) => b.kwh)));
@@ -4167,9 +4216,190 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                     ok("stato ripristinato dopo la sezione 46", !states["light.sala"]);
                   }
 
-                  console.log("\n" + "=".repeat(46));
-                  console.log(pass + " passati, " + fail + " falliti");
-                  process.exit(fail ? 1 : 0);
+                  console.log("\n== 47. L'ANALISI ECONOMICA NEL TEMPO ==");
+                  {
+                    const savedWS2 = el._hass.callWS;
+                    const savedDash2 = el._dashboard;
+
+                    // --- finestre di calendario, non di trenta giorni
+                    const now = new Date();
+                    const wm = economyWindow("month", 0);
+                    ok("il mese comincia il primo, a mezzanotte locale",
+                       wm.start.getDate() === 1 && wm.start.getHours() === 0
+                       && wm.start.getMonth() === now.getMonth(),
+                       wm.start.toString());
+                    ok("e finisce il primo del mese dopo",
+                       wm.end.getDate() === 1
+                       && (wm.end.getMonth() === (now.getMonth() + 1) % 12));
+                    ok("il mese in corso e' dichiarato in corso", wm.running === true);
+                    ok("e si ferma adesso, non nel futuro", wm.stop <= new Date(Date.now() + 1000));
+                    const wm1 = economyWindow("month", 1);
+                    ok("un passo indietro e' il mese prima",
+                       wm1.end.getTime() === wm.start.getTime(), wm1.title + " -> " + wm.title);
+                    ok("un mese chiuso non e' in corso", wm1.running === false);
+                    ok("il titolo e' il nome del mese in italiano, non una data",
+                       /^[A-Z][a-zàèéìòù]+ \d{4}$/.test(wm1.title), wm1.title);
+                    const wm13 = economyWindow("month", 12);
+                    ok("dodici passi indietro sono lo stesso mese dell'anno prima",
+                       wm13.start.getMonth() === wm.start.getMonth()
+                       && wm13.start.getFullYear() === wm.start.getFullYear() - 1,
+                       wm13.title);
+                    ok("scavalcare gennaio non rompe l'anno",
+                       economyWindow("month", now.getMonth() + 1).start.getFullYear()
+                       === now.getFullYear() - 1);
+
+                    const ww = economyWindow("week", 0);
+                    ok("la settimana comincia di lunedi", ww.start.getDay() === 1, String(ww.start.getDay()));
+                    ok("e dura sette giorni",
+                       Math.round((ww.end - ww.start) / 86400000) === 7);
+                    const wd = economyWindow("today", 1);
+                    ok("un giorno indietro si chiama Ieri", wd.title === "Ieri", wd.title);
+                    ok("e le sue ore si contano dalla mezzanotte", wd.start.getHours() === 0);
+                    const wy = economyWindow("year", 0);
+                    ok("l'anno comincia il primo gennaio",
+                       wy.start.getMonth() === 0 && wy.start.getDate() === 1);
+                    ok("un offset negativo non manda nel futuro",
+                       economyWindow("month", -5).start.getTime() === wm.start.getTime());
+
+                    // --- quanta energia dice una riga di statistica
+                    const mkr = (h, ch, sum) => ({ start: new Date(2026, 7, 3, h).getTime(),
+                      change: ch, sum });
+                    const ser = statSeries([mkr(0, 2, 2), mkr(1, 3, 5), mkr(2, 4, 9)]);
+                    ok("con `change` si legge anche il primo intervallo",
+                       ser.length === 3 && ser[0].v === 2, JSON.stringify(ser.map((r) => r.v)));
+                    ok("e il totale e' la somma dei tre",
+                       ser.reduce((n, r) => n + r.v, 0) === 9);
+                    const serSum = statSeries([{ start: 1, sum: 2 }, { start: 2, sum: 5 }, { start: 3, sum: 9 }]);
+                    ok("senza `change` si ripiega sulle differenze fra i `sum`",
+                       serSum.length === 2 && serSum[0].v === 3 && serSum[1].v === 4,
+                       JSON.stringify(serSum.map((r) => r.v)));
+                    const serReset = statSeries([{ start: 1, sum: 50 }, { start: 2, sum: 0 }, { start: 3, sum: 5 }]);
+                    ok("un contatore azzerato vale zero, non un numero negativo",
+                       serReset.every((r) => r.v >= 0), JSON.stringify(serReset.map((r) => r.v)));
+                    ok("una riga senza istante valido viene scartata",
+                       statSeries([{ start: "non una data", change: 9 }]).length === 0);
+                    ok("un istante in ISO viene capito come uno epoch",
+                       statSeries([{ start: "2026-08-03T00:00:00+00:00", change: 1 }]).length === 1);
+
+                    // --- una sola interrogazione per due periodi
+                    const card47 = { id: "eco47", type: "economy", entity_id: "", name: "Eco",
+                      size: "xl", appearance: {}, states: {}, actions: {}, devices: [],
+                      grid_import: "sensor.i47", grid_export: null, solar: "sensor.s47",
+                      battery_in: null, battery_out: null,
+                      price_import: 0.25, price_export: 0.10, period: "month",
+                      tariff_mode: "single", bands: {}, fixed: [], vat: 0 };
+                    el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [{ id: "p", title: "P",
+                      icon: "mdi:home", type: "sections", sections: [{ id: "s47", title: "S",
+                      items: [card47] }] }] };
+                    el._pageIndex = 0;
+                    el._economy = {}; el._economyPending = null; el._ecoOffset = {};
+                    let asked = null;
+                    const wcur = economyWindow("month", 0), wprev = economyWindow("month", 1);
+                    el._hass.callWS = (m) => {
+                      if (m.type !== "recorder/statistics_during_period") return Promise.resolve({});
+                      asked = m;
+                      const mid = (w, day) => new Date(w.start.getFullYear(), w.start.getMonth(), day).getTime();
+                      return Promise.resolve({
+                        "sensor.i47": [
+                          { start: mid(wprev, 2), change: 40 },
+                          { start: mid(wcur, 1), change: 10 },
+                          { start: mid(wcur, 2), change: 15 },
+                        ],
+                        "sensor.s47": [
+                          { start: mid(wprev, 2), change: 5 },
+                          { start: mid(wcur, 1), change: 20 },
+                        ] });
+                    };
+                    ok("finche' non risponde non inventa numeri", el._loadEconomy(card47) === null);
+                    setTimeout(() => {
+                      ok("una sola chiamata copre il periodo e quello prima",
+                         asked && new Date(asked.start_time).getTime() === wprev.start.getTime(),
+                         asked && asked.start_time);
+                      ok("e chiede il campo change",
+                         asked && asked.types.includes("change"), asked && JSON.stringify(asked.types));
+                      ok("il bucket del mese e' il giorno", asked && asked.period === "day", asked && asked.period);
+                      const d47 = el._loadEconomy(card47);
+                      ok("il prelievo del periodo somma solo le sue righe",
+                         d47 && Math.abs(d47.imported - 25) < 1e-9, d47 && String(d47.imported));
+                      ok("quello del periodo prima resta separato",
+                         Math.abs(d47.prev.imported - 40) < 1e-9, String(d47.prev.imported));
+                      ok("e il confronto sa come si chiama il periodo prima",
+                         d47.prev.title === wprev.title, d47.prev.title);
+                      ok("la serie per bucket e' pronta per il grafico",
+                         Array.isArray(d47.series["sensor.i47"]) && d47.series["sensor.i47"].length === 2,
+                         JSON.stringify(d47.series["sensor.i47"]));
+
+                      const f47 = el._economyFigures(card47, d47, wcur);
+                      ok("il confronto col periodo precedente compare",
+                         !!f47.cmp && Math.abs(f47.cmp.imported - (-37.5)) < 0.01,
+                         f47.cmp && String(f47.cmp.imported));
+                      const f47v = el._economyFigures(card47,
+                        Object.assign({}, d47, { prev: { any: false } }), wcur);
+                      ok("contro un periodo vuoto non si dichiara nessuna variazione",
+                         f47v.cmp === null);
+
+                      // --- il grafico
+                      const svg = el._economyChart(card47, d47, wcur);
+                      const buckets = el._ecoBuckets(wcur);
+                      ok("c'e' una colonna per ogni giorno del periodo",
+                         (svg.match(/data-eco-bar=/g) || []).length === buckets.length,
+                         (svg.match(/data-eco-bar=/g) || []).length + " vs " + buckets.length);
+                      ok("i giorni sono quelli veri del mese, non trenta fissi",
+                         buckets.length === Math.round((wcur.stop - wcur.start) / 86400000)
+                         || buckets.length === Math.ceil((wcur.stop - wcur.start) / 86400000),
+                         String(buckets.length));
+                      ok("le barre del prelievo ci sono", /class="ecb-grid"/.test(svg));
+                      ok("e quelle della produzione", /class="ecb-prod"/.test(svg));
+                      ok("la legenda spiega i colori",
+                         /Dalla rete/.test(svg) && /Dal sole, in casa/.test(svg));
+                      ok("il grafico non ha undefined", !/undefined/.test(svg));
+                      ok("i div del grafico sono bilanciati",
+                         (svg.match(/<div/g) || []).length === (svg.match(/<\/div>/g) || []).length);
+                      const vuoto = el._economyChart(card47, { series: {} }, wcur);
+                      ok("senza dati lo dice invece di disegnare il nulla",
+                         /Nessuna statistica/.test(vuoto) && !/data-eco-bar/.test(vuoto));
+
+                      // --- scendere di livello toccando una colonna
+                      const wyy = economyWindow("year", 0);
+                      const g = el._ecoDrill(wyy, new Date(wyy.start.getFullYear(), 2, 1));
+                      ok("dall'anno si scende sul mese",
+                         g && g.period === "month"
+                         && g.offset === (new Date().getMonth() - 2), JSON.stringify(g));
+                      const wmm = economyWindow("month", 1);
+                      const g2 = el._ecoDrill(wmm, new Date(wmm.start.getFullYear(), wmm.start.getMonth(), 3));
+                      ok("dal mese si scende sul giorno",
+                         g2 && g2.period === "today" && g2.offset > 0, JSON.stringify(g2));
+                      ok("dal giorno non si scende oltre",
+                         el._ecoDrill(economyWindow("today", 0), new Date()) === null);
+                      ok("una colonna nel futuro non e' navigabile",
+                         el._ecoDrill(wyy, new Date(new Date().getFullYear() + 1, 0, 1)) === null);
+
+                      // --- la navigazione
+                      el._ecoOffset = { eco47: 2 };
+                      ok("la card guarda il periodo che le e' stato chiesto",
+                         el._ecoWindow(card47).offset === 2);
+                      ok("e la navigazione NON finisce nel dashboard salvato",
+                         card47.offset === undefined && el._dashboard.pages[0]
+                           .sections[0].items[0].offset === undefined);
+                      el._ecoOffset = {};
+
+                      // --- le etichette sotto le colonne
+                      ok("in un anno le colonne portano il mese",
+                         el._ecoBucketLabel(wyy, new Date(2026, 0, 1)) === "GEN");
+                      ok("in un mese portano il giorno",
+                         el._ecoBucketLabel(wcur, new Date(2026, 7, 9)) === "9");
+                      ok("in un giorno portano l'ora con due cifre",
+                         el._ecoBucketLabel(economyWindow("today", 0), new Date(2026, 7, 9, 5)) === "05");
+
+                      el._hass.callWS = savedWS2;
+                      el._dashboard = savedDash2;
+                      el._economy = {}; el._economyPending = null; el._ecoOffset = {};
+                      ok("stato ripristinato dopo la sezione 47", el._hass.callWS === savedWS2);
+                      console.log("\n" + "=".repeat(46));
+                      console.log(pass + " passati, " + fail + " falliti");
+                      process.exit(fail ? 1 : 0);
+                    }, 0);
+                  }
                 }, 30);
               }, 30);
             }, 30);
