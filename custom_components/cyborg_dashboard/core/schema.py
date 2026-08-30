@@ -8,6 +8,14 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v15 items[].entities{gruppo}            the monitor card lets the owner pick
+                                        which readings appear under each
+                                        group, instead of only discovering
+                                        them by device_class.
+v14 items[].tariff_mode / bands /       the economy card can bill by ARERA
+    fixed / vat                         time bands instead of a single price,
+                                        and carries the standing charges that
+                                        make a real bill comparable.
 v13 items[].hidden_series               lines switched off by hand on a trend
                                         chart, and theme.pack for the
                                         interlocking card layout.
@@ -40,7 +48,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -665,6 +673,46 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                 result[key] = max(0.0, round(float(result.get(key, default)), 4))
             except (TypeError, ValueError):
                 result[key] = default
+        # Monoraria o multifascia. Il prezzo unico resta `price_import`, quindi
+        # non ci sono due verita' per lo stesso numero: le tre fasce vivono in
+        # `bands` e valgono solo quando il modo e' "bands".
+        mode = result.get("tariff_mode")
+        result["tariff_mode"] = mode if mode in ("single", "bands") else "single"
+        raw_bands = result.get("bands")
+        raw_bands = raw_bands if isinstance(raw_bands, dict) else {}
+        bands: dict[str, float] = {}
+        for key, default in (("f1", 0.30), ("f2", 0.27), ("f3", 0.24)):
+            try:
+                bands[key] = max(0.0, round(float(raw_bands.get(key, default)), 4))
+            except (TypeError, ValueError):
+                bands[key] = default
+        result["bands"] = bands
+        # Le voci fisse: canone, quota di commercializzazione, quota potenza.
+        # Senza queste il totale della card non e' confrontabile con la
+        # bolletta, che e' lo scopo dichiarato.
+        fixed = result.get("fixed")
+        rows_fixed: list[dict[str, Any]] = []
+        if isinstance(fixed, list):
+            for row in fixed:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    amount = round(float(row.get("amount", 0)), 4)
+                except (TypeError, ValueError):
+                    continue
+                every = row.get("every")
+                rows_fixed.append({
+                    "label": str(row.get("label") or "Voce fissa")[:48],
+                    "amount": amount,
+                    "every": every if every in ("day", "month", "year") else "month",
+                })
+                if len(rows_fixed) >= 12:
+                    break
+        result["fixed"] = rows_fixed
+        try:
+            result["vat"] = max(0.0, min(100.0, round(float(result.get("vat", 0)), 2)))
+        except (TypeError, ValueError):
+            result["vat"] = 0.0
         period = result.get("period")
         result["period"] = period if period in ("today", "week", "month", "year") else "month"
     if result.get("type") == "camera":
@@ -687,6 +735,20 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["max_per_group"] = max(3, min(30, int(result.get("max_per_group", 8))))
         except (TypeError, ValueError):
             result["max_per_group"] = 8
+        # Le entita' scelte a mano, gruppo per gruppo. Una lista vuota o
+        # assente significa "trovale da sole": e' la differenza fra "non ho
+        # ancora scelto" e "ho scelto queste", e va conservata, perche' un
+        # gruppo con la lista vuota tornerebbe automatico da solo.
+        picked = result.get("entities")
+        clean_pick: dict[str, list[str]] = {}
+        if isinstance(picked, dict):
+            for group, ids in picked.items():
+                if not isinstance(group, str) or not isinstance(ids, list):
+                    continue
+                rows = [i for i in ids if isinstance(i, str) and "." in i][:60]
+                if rows:
+                    clean_pick[group[:32]] = rows
+        result["entities"] = clean_pick
     if result.get("type") == "energyflow":
         flow = result.get("flow")
         flow = dict(flow) if isinstance(flow, dict) else {}

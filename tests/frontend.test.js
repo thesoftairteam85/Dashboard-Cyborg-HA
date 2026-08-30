@@ -3792,9 +3792,272 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
             ok("stato ripristinato dopo la sezione 43", !states["sensor.q_potenza"]);
           }
 
-          console.log("\n" + "=".repeat(46));
-          console.log(pass + " passati, " + fail + " falliti");
-          process.exit(fail ? 1 : 0);
+          console.log("\n== 44. FASCE ORARIE E BOLLETTA ==");
+          {
+            // Definizione ARERA verificata su due fonti indipendenti, non a
+            // memoria: F1 lun-ven 8-19; F2 lun-ven 7-8 e 19-23 piu' sabato
+            // 7-23; F3 le notti lun-sab, la domenica e i festivi nazionali.
+            const at = (y, m, d, h) => new Date(y, m - 1, d, h, 30);
+            // 2026: 24 agosto lunedi, 29 sabato, 30 domenica
+            ok("lunedi alle 10 e' F1", tariffBand(at(2026, 8, 24, 10)) === "f1", tariffBand(at(2026, 8, 24, 10)));
+            ok("lunedi alle 7 e' F2", tariffBand(at(2026, 8, 24, 7)) === "f2");
+            ok("lunedi alle 19 e' F2", tariffBand(at(2026, 8, 24, 19)) === "f2");
+            ok("lunedi alle 18 e' ancora F1", tariffBand(at(2026, 8, 24, 18)) === "f1");
+            ok("lunedi alle 23 e' F3", tariffBand(at(2026, 8, 24, 23)) === "f3");
+            ok("lunedi alle 3 di notte e' F3", tariffBand(at(2026, 8, 24, 3)) === "f3");
+            ok("venerdi alle 10 e' F1", tariffBand(at(2026, 8, 28, 10)) === "f1");
+            ok("sabato alle 10 e' F2, non F1", tariffBand(at(2026, 8, 29, 10)) === "f2",
+               tariffBand(at(2026, 8, 29, 10)));
+            ok("sabato alle 23 e' F3", tariffBand(at(2026, 8, 29, 23)) === "f3");
+            ok("sabato alle 6 e' F3", tariffBand(at(2026, 8, 29, 6)) === "f3");
+            ok("domenica e' F3 tutto il giorno",
+               [0, 8, 12, 18, 22].every((h) => tariffBand(at(2026, 8, 30, h)) === "f3"));
+
+            // i festivi nazionali valgono F3 anche se cadono di mercoledi
+            ok("Natale e' F3 anche a mezzogiorno", tariffBand(at(2026, 12, 25, 12)) === "f3");
+            ok("Ferragosto e' F3", tariffBand(at(2026, 8, 15, 12)) === "f3");
+            ok("il 25 aprile e' F3", tariffBand(at(2026, 4, 25, 10)) === "f3");
+            ok("il 2 giugno e' F3", tariffBand(at(2026, 6, 2, 10)) === "f3");
+            ok("un 25 marzo qualunque non e' festivo",
+               tariffBand(at(2026, 3, 25, 10)) === "f1", tariffBand(at(2026, 3, 25, 10)));
+
+            // Pasqua: l'unico festivo mobile. Pasqua 2026 = 5 aprile,
+            // quindi Pasquetta = lunedi 6 aprile.
+            const e26 = easterSunday(2026);
+            ok("Pasqua 2026 e' il 5 aprile",
+               e26.getMonth() === 3 && e26.getDate() === 5,
+               e26.toDateString());
+            ok("Pasqua 2027 e' il 28 marzo",
+               easterSunday(2027).getMonth() === 2 && easterSunday(2027).getDate() === 28,
+               easterSunday(2027).toDateString());
+            ok("Pasqua 2024 e' il 31 marzo",
+               easterSunday(2024).getMonth() === 2 && easterSunday(2024).getDate() === 31,
+               easterSunday(2024).toDateString());
+            ok("Pasquetta e' F3 anche se e' un lunedi lavorativo",
+               tariffBand(at(2026, 4, 6, 10)) === "f3", tariffBand(at(2026, 4, 6, 10)));
+            ok("il martedi dopo Pasquetta torna F1",
+               tariffBand(at(2026, 4, 7, 10)) === "f1");
+
+            // --- il calcolo della bolletta
+            const savedWS = el._hass.callWS;
+            const card = { id: "eco1", type: "economy", entity_id: "", name: "Economia", size: "xl",
+              appearance: {}, states: {}, actions: {}, devices: [],
+              grid_import: "sensor.rete_energia", grid_export: null, solar: null,
+              price_import: 0.25, price_export: 0.10, period: "month",
+              tariff_mode: "single", bands: { f1: 0.30, f2: 0.27, f3: 0.24 },
+              fixed: [], vat: 0 };
+            const data = { imported: 100, exported: 0, produced: 0, devices: {} };
+
+            let fig = el._economyFigures(card, data);
+            ok("monoraria: cento kWh a 0,25 fanno 25 euro", Math.abs(fig.cost - 25) < 0.001,
+               String(fig.cost));
+            ok("senza voci fisse e senza IVA il totale e' l'energia",
+               Math.abs(fig.billed - 25) < 0.001, String(fig.billed));
+            ok("e la card non mostra il riquadro bolletta", fig.hasBill === false);
+
+            // voci fisse riproporzionate al periodo
+            card.fixed = [{ label: "Canone RAI", amount: 90, every: "year" },
+                          { label: "Quota fissa", amount: 12, every: "month" }];
+            fig = el._economyFigures(card, data);
+            const atteso = 90 / 365.2425 * 30 + 12 / 30.436875 * 30;
+            ok("le voci fisse vengono riproporzionate ai trenta giorni",
+               Math.abs(fig.fixed - atteso) < 0.01, fig.fixed.toFixed(3) + " vs " + atteso.toFixed(3));
+            ok("il canone annuo su trenta giorni sono circa sette euro e mezzo",
+               Math.abs(90 / 365.2425 * 30 - 7.39) < 0.05, String(90 / 365.2425 * 30));
+            ok("e ora il riquadro bolletta compare", fig.hasBill === true);
+            ok("il totale somma energia e quote fisse",
+               Math.abs(fig.billed - (25 + atteso)) < 0.01, String(fig.billed));
+
+            card.vat = 10;
+            fig = el._economyFigures(card, data);
+            ok("l'IVA si applica a energia e quote fisse",
+               Math.abs(fig.billed - (25 + atteso) * 1.1) < 0.01, String(fig.billed));
+            // l'immissione si sottrae DOPO l'IVA
+            const dataPv = { imported: 100, exported: 40, produced: 60, devices: {} };
+            fig = el._economyFigures(card, dataPv);
+            ok("l'immissione viene sottratta dopo l'IVA, non tassata",
+               Math.abs(fig.billed - ((25 + atteso) * 1.1 - 4)) < 0.01, String(fig.billed));
+            card.vat = 0; card.fixed = [];
+
+            // --- multifascia
+            card.tariff_mode = "bands";
+            el._bands = {};
+            el._hass.callWS = (m) => {
+              if (m.type !== "recorder/statistics_during_period") return Promise.resolve({});
+              ok("chiede le statistiche ORA per ora", m.period === "hour", m.period);
+              // 4 ore: lunedi 10 (F1), lunedi 20 (F2), lunedi 2 (F3), domenica 12 (F3)
+              const mk = (y, mo, d, h) => new Date(y, mo - 1, d, h, 0, 0).getTime();
+              return Promise.resolve({ "sensor.rete_energia": [
+                { start: mk(2026, 8, 24, 10), sum: 0 },
+                { start: mk(2026, 8, 24, 20), sum: 10 },   // 10 kWh in F1
+                { start: mk(2026, 8, 24, 2), sum: 30 },    // 20 kWh in F2
+                { start: mk(2026, 8, 30, 12), sum: 60 },   // 30 kWh in F3
+                { start: mk(2026, 8, 30, 13), sum: 100 },  // 40 kWh in F3
+              ] });
+            };
+            ok("finche' non risponde la card lo dice invece di mentire",
+               el._economyFigures(card, data).bandsPending === true);
+            setTimeout(() => {
+              const fb = el._economyFigures(card, data);
+              ok("le fasce sono state riconosciute",
+                 !!fb.byBand, JSON.stringify(fb.byBand && fb.byBand.map((b) => [b.key, b.kwh])));
+              const kwh = Object.fromEntries(fb.byBand.map((b) => [b.key, b.kwh]));
+              ok("dieci kWh finiscono in F1", Math.abs(kwh.f1 - 10) < 0.01, String(kwh.f1));
+              ok("venti in F2", Math.abs(kwh.f2 - 20) < 0.01, String(kwh.f2));
+              ok("settanta in F3", Math.abs(kwh.f3 - 70) < 0.01, String(kwh.f3));
+              // 10*0.30 + 20*0.27 + 70*0.24 = 3 + 5.4 + 16.8 = 25.2
+              ok("il costo e' la somma delle tre fasce, non il prezzo unico",
+                 Math.abs(fb.cost - 25.2) < 0.01, String(fb.cost));
+              ok("e il prezzo medio effettivo viene mostrato",
+                 Math.abs(fb.pIn - 0.252) < 0.0001, String(fb.pIn));
+              ok("che non e' il prezzo monorario", Math.abs(fb.pIn - 0.25) > 0.001);
+
+              // un contatore che si azzera non deve diventare consumo negativo
+              el._bands = {}; el._hass.callWS = (m) => {
+                if (m.type !== "recorder/statistics_during_period") return Promise.resolve({});
+                const mk = (y, mo, d, h) => new Date(y, mo - 1, d, h).getTime();
+                return Promise.resolve({ "sensor.rete_energia": [
+                  { start: mk(2026, 8, 24, 10), sum: 50 },
+                  { start: mk(2026, 8, 24, 11), sum: 0 },   // reset del contatore
+                  { start: mk(2026, 8, 24, 12), sum: 5 },
+                ] });
+              };
+              el._economyFigures(card, data);
+              setTimeout(() => {
+                const fr = el._economyFigures(card, data);
+                ok("un contatore azzerato non produce consumo negativo",
+                   fr.byBand && fr.byBand.every((b) => b.kwh >= 0),
+                   JSON.stringify(fr.byBand && fr.byBand.map((b) => b.kwh)));
+
+                // se il recorder non risponde si torna al prezzo unico, dicendolo
+                el._bands = {};
+                el._hass.callWS = () => Promise.reject(new Error("niente statistiche"));
+                el._economyFigures(card, data);
+                setTimeout(() => {
+                  const fe = el._economyFigures(card, data);
+                  ok("senza statistiche orarie si ripiega sul prezzo unico",
+                     fe.byBand === null && Math.abs(fe.cost - 25) < 0.001, String(fe.cost));
+                  ok("e la card lo dichiara", fe.bandsError === true);
+
+                  el._hass.callWS = savedWS; el._bands = {};
+                  ok("stato ripristinato dopo la sezione 44", true);
+
+                  console.log("\n== 45. QUALI LETTURE VEDERE NEL MONITORAGGIO ==");
+                  {
+                    // Il difetto: la card trovava le letture da sola in base al
+                    // device_class e non c'era NESSUN modo di dire quali vedere.
+                    // La lista a mano esisteva gia' nel codice, ma senza un
+                    // comando che la scrivesse e senza che lo schema la salvasse.
+                    for (let i = 0; i < 12; i++) {
+                      states["sensor.temp_" + i] = S(String(20 + i), {
+                        friendly_name: "Temp " + String.fromCharCode(65 + i),
+                        device_class: "temperature", unit_of_measurement: "°C" });
+                    }
+                    states["sensor.volt_a"] = S("236", { friendly_name: "Tensione A",
+                      device_class: "voltage", unit_of_measurement: "V" });
+                    states["update.qualcosa"] = S("42", { friendly_name: "Update",
+                      device_class: "temperature" });
+
+                    const mon = { id: "mon1", type: "monitor", entity_id: "", name: "Monitoraggio",
+                      size: "xl", appearance: {}, states: {}, actions: {},
+                      grid_entity: null, limit_w: 3300, groups: ["temperature"],
+                      max_per_group: 8, limits: {}, entities: {} };
+                    const gTemp = MONITOR_GROUPS_TEST.find((g) => g.key === "temperature");
+
+                    const cands = el._monitorCandidates(gTemp);
+                    const mine = Array.from({ length: 12 }, (_, i) => "sensor.temp_" + i);
+                    ok("i candidati comprendono tutte le letture di quel tipo",
+                       mine.every((id) => cands.includes(id)),
+                       JSON.stringify(mine.filter((id) => !cands.includes(id))));
+                    ok("le entita' di aggiornamento restano fuori",
+                       !cands.includes("update.qualcosa"));
+                    ok("e sono in ordine di nome",
+                       cands.indexOf("sensor.temp_0") < cands.indexOf("sensor.temp_1"));
+
+                    // automatico: il tetto per gruppo taglia
+                    let rows = el._monitorRows(gTemp, mon);
+                    ok("in automatico il tetto per gruppo taglia l'elenco",
+                       rows.length === 8, String(rows.length));
+
+                    // scelte a mano: il tetto non deve nascondere niente
+                    mon.entities = { temperature: cands.slice(0, 11) };
+                    rows = el._monitorRows(gTemp, mon);
+                    ok("scegliendole a mano il tetto non nasconde piu' niente",
+                       rows.length === 11, String(rows.length));
+                    ok("e sono proprio quelle scelte",
+                       rows.every((r) => mon.entities.temperature.includes(r.id)));
+
+                    mon.entities = { temperature: ["sensor.temp_3", "sensor.temp_7"] };
+                    rows = el._monitorRows(gTemp, mon);
+                    ok("due scelte danno due righe",
+                       rows.length === 2 && rows.map((r) => r.id).sort().join() === "sensor.temp_3,sensor.temp_7",
+                       JSON.stringify(rows.map((r) => r.id)));
+
+                    // un gruppo scelto non tocca gli altri
+                    const gVolt = MONITOR_GROUPS_TEST.find((g) => g.key === "voltage");
+                    ok("l'altro gruppo resta automatico",
+                       el._monitorRows(gVolt, mon).some((r2) => r2.id === "sensor.volt_a"),
+                       JSON.stringify(el._monitorRows(gVolt, mon).map((r2) => r2.id)));
+
+                    // lista vuota = automatico, non "niente"
+                    mon.entities = { temperature: [] };
+                    ok("una lista vuota vale automatico, non zero righe",
+                       el._monitorRows(gTemp, mon).length === 8,
+                       String(el._monitorRows(gTemp, mon).length));
+
+                    // --- l'editor
+                    const savedSel = el._selected, savedEditing = el._editing, savedDash = el._dashboard;
+                    el._dashboard = { hierarchy: {}, pages: [{ id: "p", sections: [{ id: "s", items: [mon] }] }] };
+                    mon.entities = {};
+                    const edHtml = () => el._cardEditorBody
+                      ? el._cardEditorBody(mon) : el._renderCardEditor(mon);
+                    const html = edHtml();
+                    ok("l'editor elenca ogni lettura del gruppo con il suo occhio",
+                       (html.match(/data-mon-pick="temperature\|/g) || []).length === cands.length,
+                       String((html.match(/data-mon-pick="temperature\|/g) || []).length));
+                    ok("e dice che il gruppo e' in automatico",
+                       /automatico<\/em>/.test(html), "manca la dicitura");
+                    ok("in automatico non offre il pulsante per tornare automatico",
+                       !/data-mon-auto="temperature"/.test(html));
+
+                    // il primo tocco converte il gruppo in "scelto da me"
+                    mon.entities = { temperature: cands.filter((x) => x !== "sensor.temp_5") };
+                    const html2 = edHtml();
+                    ok("spegnendone una il gruppo diventa scelto da te",
+                       /scelte da te<\/em>/.test(html2));
+                    ok("e compare il modo di tornare automatico",
+                       /data-mon-auto="temperature"/.test(html2));
+                    ok("la riga spenta si vede che e' spenta",
+                       /room-ent hidden[\s\S]{0,220}?sensor\.temp_5/.test(html2)
+                       || /sensor\.temp_5[\s\S]{0,80}?eye-off/.test(html2),
+                       "riga non marcata");
+                    ok("il conteggio dice quante su quante",
+                       html2.includes((cands.length - 1) + " su " + cands.length),
+                       (html2.match(/\d+ su \d+/) || [])[0]);
+
+                    // un'entita' scelta che sparisce da HA resta togliibile
+                    mon.entities = { temperature: ["sensor.temp_1", "sensor.sparita"] };
+                    const html3 = edHtml();
+                    ok("un'entita' sparita da Home Assistant resta nell'elenco",
+                       /data-mon-pick="temperature\|sensor\.sparita"/.test(html3));
+                    ok("ed e' marcata come assente", /assente/.test(html3));
+
+                    ok("editor monitoraggio: nessun undefined",
+                       !/>undefined</.test(html3) && !html3.includes("[object"));
+
+                    el._selected = savedSel; el._editing = savedEditing; el._dashboard = savedDash;
+                    for (let i = 0; i < 12; i++) delete states["sensor.temp_" + i];
+                    delete states["sensor.volt_a"]; delete states["update.qualcosa"];
+                    ok("stato ripristinato dopo la sezione 45", !states["sensor.temp_0"]);
+                  }
+
+                  console.log("\n" + "=".repeat(46));
+                  console.log(pass + " passati, " + fail + " falliti");
+                  process.exit(fail ? 1 : 0);
+                }, 30);
+              }, 30);
+            }, 30);
+          }
         }, 30);
       }, 30);
     }

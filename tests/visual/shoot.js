@@ -1288,6 +1288,169 @@ const DEFAULT_DASH = {
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.resolve(__dirname, "60-map-lit.png") });
 
+  console.log("\n== BOLLETTA A FASCE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, economy: true, tariffBands: true });
+  await page.waitForTimeout(1600);
+
+  const bill = await page.evaluate(() => {
+    const num = (t) => Number(String(t).replace(/[^\d,.-]/g, "").replace(",", "."));
+    const bands = Array.from(document.querySelectorAll(".eco-band")).map((b) => ({
+      label: b.querySelector(".eb-lab").textContent.trim(),
+      kwh: num(b.querySelector(".eb-kwh").textContent),
+      pct: num(b.querySelector(".eb-pct").textContent),
+      eur: num(b.querySelector(".eb-eur").textContent),
+      color: getComputedStyle(b.querySelector("i")).backgroundColor,
+      right: Math.round(b.getBoundingClientRect().right),
+    }));
+    const box = document.querySelector(".eco-bill");
+    const rows = box ? Array.from(box.querySelectorAll(".eb-row")).map((r) => ({
+      k: r.querySelector("span").textContent.replace(/\s+/g, " ").trim(),
+      v: num(r.querySelector("b").textContent),
+      total: r.classList.contains("total"),
+    })) : [];
+    const imported = num((document.querySelector(".eco-row.cost .eco-kwh") || {}).textContent);
+    const importedEur = num((document.querySelector(".eco-row.cost .eco-eur") || {}).textContent);
+    const foot = (document.querySelector(".eco-foot span") || {}).textContent || "";
+    const card = document.querySelector(".eco").closest(".item").getBoundingClientRect();
+    return { bands, rows, imported, importedEur, foot,
+      cardRight: Math.round(card.right),
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth };
+  });
+
+  ok("la card mostra le tre fasce", bill.bands.length === 3,
+     JSON.stringify(bill.bands.map((b) => b.label)));
+  ok("con i nomi giusti",
+     /F1/.test(bill.bands[0].label) && /F2/.test(bill.bands[1].label) && /F3/.test(bill.bands[2].label),
+     JSON.stringify(bill.bands.map((b) => b.label)));
+  ok("e tre colori diversi",
+     new Set(bill.bands.map((b) => b.color)).size === 3,
+     JSON.stringify(bill.bands.map((b) => b.color)));
+  // il conto deve tornare: i kWh delle fasce sommano il prelievo
+  ok("i kWh delle fasce sommano il prelievo",
+     Math.abs(bill.bands.reduce((n, b) => n + b.kwh, 0) - bill.imported) < 0.4,
+     bill.bands.reduce((n, b) => n + b.kwh, 0).toFixed(1) + " vs " + bill.imported);
+  ok("e gli euro delle fasce sommano il costo del prelievo",
+     Math.abs(bill.bands.reduce((n, b) => n + b.eur, 0) - bill.importedEur) < 0.15,
+     bill.bands.reduce((n, b) => n + b.eur, 0).toFixed(2) + " vs " + bill.importedEur);
+  ok("le percentuali fanno cento",
+     Math.abs(bill.bands.reduce((n, b) => n + b.pct, 0) - 100) <= 2,
+     String(bill.bands.reduce((n, b) => n + b.pct, 0)));
+  ok("il piede dichiara che la tariffa e' multifascia",
+     /multifascia/.test(bill.foot), bill.foot);
+
+  ok("compare il riquadro della bolletta", bill.rows.length >= 4,
+     JSON.stringify(bill.rows.map((r) => r.k)));
+  ok("con dentro le voci fisse dichiarate",
+     bill.rows.some((r) => /Canone RAI/.test(r.k)) && bill.rows.some((r) => /Quota potenza/.test(r.k)),
+     JSON.stringify(bill.rows.map((r) => r.k)));
+  ok("e l'IVA", bill.rows.some((r) => /IVA/.test(r.k)), JSON.stringify(bill.rows.map((r) => r.k)));
+  const totale = bill.rows.find((r) => r.total);
+  ok("c'e' una riga totale", !!totale, JSON.stringify(bill.rows));
+  // il totale deve essere la somma di quello che c'e' sopra
+  const sopra = bill.rows.filter((r) => !r.total)
+    .reduce((n, r) => n + (/Immissione/.test(r.k) ? -r.v : r.v), 0);
+  ok("il totale e' davvero la somma delle righe sopra",
+     Math.abs(totale.v - sopra) < 0.06, totale.v + " vs " + sopra.toFixed(2));
+  ok("e il totale con le quote fisse e' piu' alto della sola energia",
+     totale.v > bill.importedEur, totale.v + " vs " + bill.importedEur);
+  ok("niente deborda",
+     bill.bands.every((b) => b.right <= bill.cardRight + 1) && bill.scrollW <= bill.winW + 1);
+  await page.screenshot({ path: path.resolve(__dirname, "69-bill-bands.png") });
+
+  console.log("\n== EDITOR DELLA TARIFFA ==");
+  // La card economia non finisce per forza nella prima sezione: si usa la
+  // stessa opzione del banco di prova che la seleziona, invece di indovinare.
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, economy: true, tariffBands: true,
+      editing: true, selectEconomy: true });
+  await page.waitForTimeout(1400);
+  const ed = await page.evaluate(() => {
+    const modes = Array.from(document.querySelectorAll("[data-tariff-mode]")).map((b) => ({
+      v: b.getAttribute("data-tariff-mode"), on: b.classList.contains("active") }));
+    const bandInputs = Array.from(document.querySelectorAll("[data-band]")).map((i) => ({
+      k: i.getAttribute("data-band"), v: i.value }));
+    const fixRows = Array.from(document.querySelectorAll(".fix-row")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { right: Math.round(b.right),
+        label: (r.querySelector('[data-fix$="|label"]') || {}).value,
+        amount: (r.querySelector('[data-fix$="|amount"]') || {}).value,
+        every: (r.querySelector('[data-fix$="|every"]') || {}).value };
+    });
+    const panel = document.querySelector(".editor").getBoundingClientRect();
+    return { modes, bandInputs, fixRows, panelRight: Math.round(panel.right),
+      canAdd: !!document.querySelector("[data-fix-add]") };
+  });
+  ok("l'editor offre monoraria e multifascia", ed.modes.length === 2,
+     JSON.stringify(ed.modes));
+  ok("e sa quale delle due e' attiva",
+     ed.modes.filter((m) => m.on).length === 1 && ed.modes.find((m) => m.on).v === "bands",
+     JSON.stringify(ed.modes));
+  ok("in multifascia compaiono i tre prezzi",
+     ed.bandInputs.length === 3 && ed.bandInputs.every((b) => Number(b.v) > 0),
+     JSON.stringify(ed.bandInputs));
+  ok("le voci fisse sono modificabili una per una",
+     ed.fixRows.length === 2 && ed.fixRows[0].label === "Canone RAI"
+     && ed.fixRows[0].every === "year", JSON.stringify(ed.fixRows));
+  ok("e se ne possono aggiungere altre", ed.canAdd);
+  ok("le righe delle voci fisse non escono dal pannello",
+     ed.fixRows.every((r) => r.right <= ed.panelRight + 1),
+     JSON.stringify([ed.panelRight, ed.fixRows.map((r) => r.right)]));
+
+  // tornando a monoraria i tre prezzi spariscono e il conto cambia
+  const back = await page.evaluate(async () => {
+    document.querySelector('[data-tariff-mode="single"]').click();
+    await new Promise((r) => setTimeout(r, 700));
+    const num = (t) => Number(String(t).replace(/[^\d,.-]/g, "").replace(",", "."));
+    return { bands: document.querySelectorAll(".eco-band").length,
+      inputs: document.querySelectorAll("[data-band]").length,
+      foot: (document.querySelector(".eco-foot span") || {}).textContent || "",
+      eur: num((document.querySelector(".eco-row.cost .eco-eur") || {}).textContent) };
+  });
+  ok("tornando a monoraria le fasce spariscono",
+     back.bands === 0 && back.inputs === 0, JSON.stringify(back));
+  ok("e il piede torna a dichiarare il prezzo unico",
+     /prelievo/.test(back.foot) && !/multifascia/.test(back.foot), back.foot);
+  ok("il costo cambia, perche' cambia il modo di calcolarlo",
+     Math.abs(back.eur - bill.importedEur) > 0.05,
+     back.eur + " vs " + bill.importedEur);
+  await page.screenshot({ path: path.resolve(__dirname, "70-tariff-editor.png") });
+
+  const phoneBill = await browser.newPage({ viewport: { width: 390, height: 900 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneBill.on("pageerror", (e) => errors.push("PHONE-BILL: " + e.message));
+  await phoneBill.goto("http://127.0.0.1:8899/harness.html");
+  await phoneBill.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneBill.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneBill.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, economy: true, tariffBands: true });
+  await phoneBill.waitForTimeout(1600);
+  const pbill = await phoneBill.evaluate(() => {
+    const bands = Array.from(document.querySelectorAll(".eco-band")).map((b) => {
+      const r = b.getBoundingClientRect();
+      return { right: Math.round(r.right), h: Math.round(r.height),
+        clipped: Array.from(b.children).some((c) => c.scrollWidth > c.clientWidth + 1) };
+    });
+    const rows = Array.from(document.querySelectorAll(".eco-bill .eb-row")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { right: Math.round(b.right) };
+    });
+    return { bands, rows, winW: window.innerWidth, scrollW: document.documentElement.scrollWidth };
+  });
+  ok("telefono: le tre fasce ci sono", pbill.bands.length === 3, String(pbill.bands.length));
+  ok("telefono: non escono dallo schermo",
+     pbill.bands.every((b) => b.right <= pbill.winW + 1) && pbill.rows.every((r) => r.right <= pbill.winW + 1),
+     JSON.stringify([pbill.winW, pbill.bands.map((b) => b.right)]));
+  ok("telefono: nessuna riga della bolletta e' troncata",
+     pbill.bands.every((b) => !b.clipped), JSON.stringify(pbill.bands));
+  ok("telefono: nessuno scorrimento orizzontale", pbill.scrollW <= pbill.winW + 1,
+     pbill.scrollW + " vs " + pbill.winW);
+  await phoneBill.screenshot({ path: path.resolve(__dirname, "71-phone-bill.png") });
+  await phoneBill.close();
+
   console.log("\n== COMPRESO DENTRO NEL FLUSSO ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

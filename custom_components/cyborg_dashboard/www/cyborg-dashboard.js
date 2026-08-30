@@ -1181,6 +1181,65 @@ const COMPOSITE_META = {
  * produzione — so the numbers can never disagree with each other.
  * ======================================================================== */
 
+/**
+ * Easter Sunday, Meeus/Jones/Butcher, Gregorian calendar.
+ *
+ * Needed for one day a year: Easter Monday is the only movable national
+ * holiday in Italy, and a national holiday is billed entirely in F3. Getting
+ * it wrong misprices a whole working-day-shaped Monday once a year, which is
+ * exactly the kind of quiet error that makes a bill comparison useless.
+ */
+function easterSunday(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4;
+  const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+//: Italian national holidays, month/day. The patron saint's day is local, not
+//: national, so it is deliberately absent: ARERA's bands know nothing about it.
+const IT_HOLIDAYS = [[1, 1], [1, 6], [4, 25], [5, 1], [6, 2], [8, 15],
+  [11, 1], [12, 8], [12, 25], [12, 26]];
+
+function isItalianHoliday(d) {
+  const m = d.getMonth() + 1, day = d.getDate();
+  for (const [hm, hd] of IT_HOLIDAYS) if (hm === m && hd === day) return true;
+  const easter = easterSunday(d.getFullYear());
+  const monday = new Date(easter.getFullYear(), easter.getMonth(), easter.getDate() + 1);
+  return monday.getMonth() === d.getMonth() && monday.getDate() === d.getDate();
+}
+
+/**
+ * Which ARERA band an hour falls in. Verified against two independent
+ * published definitions, not from memory:
+ *   F1  lun-ven 08:00-19:00, festivi esclusi
+ *   F2  lun-ven 07:00-08:00 e 19:00-23:00; sabato 07:00-23:00; festivi esclusi
+ *   F3  lun-sab 23:00-07:00, piu' domenica e festivi per l'intera giornata
+ * The hour is read in LOCAL time on purpose: the bands are wall-clock, so a
+ * UTC reading would shift every band by an hour for half the year.
+ */
+function tariffBand(d) {
+  const dow = d.getDay(), h = d.getHours();
+  if (dow === 0 || isItalianHoliday(d)) return "f3";
+  if (h < 7 || h >= 23) return "f3";
+  if (dow === 6) return "f2";
+  return h >= 8 && h < 19 ? "f1" : "f2";
+}
+
+const BAND_LABEL = { f1: "F1 · ore di punta", f2: "F2 · ore intermedie", f3: "F3 · fuori punta" };
+const BAND_COLOR = { f1: "#ff6b6b", f2: "#ffd166", f3: "#06d6a0" };
+
+//: How many days one standing charge covers. The month is the mean Gregorian
+//: month and the year the mean Gregorian year: a bill spread over "30 giorni"
+//: must not drift because February is short.
+const FIXED_EVERY_DAYS = { day: 1, month: 30.436875, year: 365.2425 };
+
 const ECONOMY_PERIODS = [
   { key: "today", label: "Oggi", days: 1, bucket: "hour" },
   { key: "week", label: "7 giorni", days: 7, bucket: "day" },
@@ -6475,14 +6534,26 @@ class CyborgDashboard extends HTMLElement {
   // ------------------------------------------------------ monitoraggio ---
 
   /** Readings for one diagnostic group, auto-discovered by device_class. */
+  /** Every reading of this kind Home Assistant publishes, by name. */
+  _monitorCandidates(group) {
+    return Object.keys(this._hass.states)
+      .filter((id) => {
+        const st = this._hass.states[id];
+        return st && st.attributes.device_class === group.key
+          && !id.startsWith("update.") && Number.isFinite(parseFloat(st.state));
+      })
+      .sort((a, b) => {
+        const an = this._hass.states[a].attributes.friendly_name || a;
+        const bn = this._hass.states[b].attributes.friendly_name || b;
+        return String(an).localeCompare(String(bn));
+      });
+  }
+
   _monitorRows(group, item) {
     const limits = monitorLimits(group, item);
     const manual = item.entities && item.entities[group.key];
-    const ids = Array.isArray(manual) && manual.length
-      ? manual
-      : Object.keys(this._hass.states).filter((id) =>
-          this._hass.states[id].attributes.device_class === group.key
-          && !id.startsWith("update."));
+    const chosen = Array.isArray(manual) && manual.length;
+    const ids = chosen ? manual : this._monitorCandidates(group);
     const rows = [];
     for (const id of ids) {
       const st = this._hass.states[id];
@@ -6501,7 +6572,10 @@ class CyborgDashboard extends HTMLElement {
     // anything out of tolerance floats to the top: on a dense diagnostic panel
     // the point is spotting the one bad reading, not reading all forty
     rows.sort((a, b) => (b.alarm - a.alarm) || (b.warn - a.warn) || a.name.localeCompare(b.name));
-    return rows.slice(0, item.max_per_group || 8);
+    // Il tetto per gruppo serve a domare una scoperta automatica che potrebbe
+    // restituirne quaranta. Su un elenco scelto a mano sarebbe un modo per
+    // nascondere in silenzio qualcosa che e' stato chiesto espressamente.
+    return chosen ? rows : rows.slice(0, item.max_per_group || 8);
   }
 
   /** Semicircular gauge of the present draw against the contractual limit. */
@@ -6948,22 +7022,130 @@ class CyborgDashboard extends HTMLElement {
     return null;
   }
 
+  /**
+   * How the imported kWh split across the three bands.
+   *
+   * Only the hourly statistics can answer this: a daily bucket cannot say
+   * whether those kWh were burnt at eleven in the morning or at midnight.
+   * Home Assistant keeps hourly long-term statistics indefinitely, so the
+   * question is answerable for the whole history, but the answer costs one
+   * row per hour - 8760 of them over a year - so it is fetched only when the
+   * card is actually billing by band, and cached for five minutes like the
+   * rest of the economy data.
+   */
+  _loadBands(item) {
+    if ((item.tariff_mode || "single") !== "bands" || !item.grid_import) return null;
+    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
+    const key = item.id + "|bands|" + period.key + "|" + item.grid_import;
+    this._bands = this._bands || {};
+    if (this._bands[key] && Date.now() - this._bands[key].ts < 300000) return this._bands[key];
+    if (this._bandsPending === key) return this._bands[key] || null;
+    this._bandsPending = key;
+    const end = new Date();
+    const start = new Date(end.getTime() - period.days * 86400000);
+    this._hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      statistic_ids: [item.grid_import],
+      period: "hour",
+      types: ["sum"],
+    }).then((res) => {
+      const rows = (res && res[item.grid_import]) || [];
+      const out = { ts: Date.now(), f1: 0, f2: 0, f3: 0, total: 0, hours: 0 };
+      for (let i = 1; i < rows.length; i++) {
+        const a = num(rows[i - 1].sum), b = num(rows[i].sum);
+        if (a === null || b === null) continue;
+        const delta = b - a;
+        // A meter that goes backwards is a reset, not a negative consumption.
+        if (!(delta > 0)) continue;
+        const raw = rows[i - 1].start;
+        // `start` arrives as an epoch in milliseconds (a NUMBER) on this core,
+        // and Date.parse of a number reads it as a year - the same trap as
+        // Date.parse(0). Both shapes are handled explicitly.
+        const t = typeof raw === "number" ? raw : Date.parse(raw);
+        if (!Number.isFinite(t)) continue;
+        out[tariffBand(new Date(t))] += delta;
+        out.total += delta;
+        out.hours++;
+      }
+      this._bands[key] = out;
+      this._bandsPending = null;
+      this._touch(true);
+    }).catch(() => {
+      this._bands[key] = { ts: Date.now(), error: true, f1: 0, f2: 0, f3: 0, total: 0, hours: 0 };
+      this._bandsPending = null;
+      this._touch(true);
+    });
+    return null;
+  }
+
+  /**
+   * The standing charges, prorated to the period on screen.
+   *
+   * A bill is not only kWh: canone, quota di commercializzazione, quota
+   * potenza. Without them the card's total cannot be put beside the real bill,
+   * which is the whole point of asking for them.
+   */
+  _fixedTotal(item, days) {
+    const rows = Array.isArray(item.fixed) ? item.fixed : [];
+    return rows.reduce((n, r) => {
+      const amount = num(r.amount);
+      if (amount === null) return n;
+      return n + (amount / (FIXED_EVERY_DAYS[r.every] || FIXED_EVERY_DAYS.month)) * days;
+    }, 0);
+  }
+
   _economyFigures(item, data) {
-    const pIn = Number(item.price_import) || 0;
     const pOut = Number(item.price_export) || 0;
     const imported = data.imported || 0;
     const exported = data.exported || 0;
     const produced = data.produced || 0;
     // what the plant kept at home is production minus what went to the grid
     const selfUsed = Math.max(0, produced - exported);
+
+    // Multifascia: il prezzo effettivo e' la media pesata sulle fasce in cui
+    // l'energia e' stata davvero consumata. Si applica al totale prelevato che
+    // il resto della card gia' usa, invece di sostituirlo: le statistiche orarie
+    // e quelle giornaliere possono coprire finestre leggermente diverse, e due
+    // totali diversi nella stessa card sarebbero peggio di un prezzo medio.
+    const bands = this._loadBands(item);
+    const usable = bands && !bands.error && bands.total > 0 ? bands : null;
+    const bandPrices = (item.bands || {});
+    let pIn = Number(item.price_import) || 0;
+    let byBand = null;
+    if (usable) {
+      const gross = ["f1", "f2", "f3"].reduce((n, k) => n + usable[k] * (Number(bandPrices[k]) || 0), 0);
+      pIn = gross / usable.total;
+      const scale = imported / usable.total;
+      byBand = ["f1", "f2", "f3"].map((k) => ({
+        key: k, label: BAND_LABEL[k], color: BAND_COLOR[k],
+        kwh: usable[k] * scale, price: Number(bandPrices[k]) || 0,
+        eur: usable[k] * scale * (Number(bandPrices[k]) || 0),
+        share: usable[k] / usable.total,
+      }));
+    }
+
     const cost = imported * pIn;
     const revenue = exported * pOut;
+    const period = ECONOMY_PERIODS.find((p) => p.key === (item.period || "month")) || ECONOMY_PERIODS[2];
+    const fixed = this._fixedTotal(item, period.days);
+    const vat = Math.max(0, Number(item.vat) || 0);
+    // L'IVA si applica a energia e quote fisse; l'immissione viene sottratta
+    // dopo, perche' il ritiro dedicato non e' una voce su cui il cliente paga
+    // l'IVA. Con IVA a zero - il valore di fabbrica - non cambia niente.
+    const taxed = (cost + fixed) * (1 + vat / 100);
+    const billed = taxed - revenue;
+
     // the counterfactual an installer is actually asked about: the same house
     // consumption billed entirely at the import tariff
     const withoutPv = (imported + selfUsed) * pIn;
     const net = cost - revenue;
     return { imported, exported, produced, selfUsed, cost, revenue, withoutPv, net,
-      saved: withoutPv - net, hasPv: produced > 0 || exported > 0 };
+      saved: withoutPv - net, hasPv: produced > 0 || exported > 0,
+      pIn, byBand, bandsPending: (item.tariff_mode === "bands") && !usable,
+      bandsError: !!(bands && bands.error),
+      fixed, vat, taxed, billed, hasBill: fixed > 0 || vat > 0 || !!byBand };
   }
 
   _economyBody(item) {
@@ -7007,11 +7189,23 @@ class CyborgDashboard extends HTMLElement {
             <span class="eco-kwh">${esc(f.imported.toFixed(1))} kWh</span>
             <span class="eco-eur">${esc(eur(f.cost))} €</span>
           </div>
+          ${f.byBand ? `<div class="eco-bands">
+            ${f.byBand.filter((b) => b.kwh > 0.05).map((b) => `<div class="eco-band" style="--bc:${esc(b.color)}">
+              <i></i>
+              <span class="eb-lab">${esc(b.label)}</span>
+              <span class="eb-kwh">${esc(b.kwh.toFixed(1))} kWh</span>
+              <span class="eb-pct">${Math.round(b.share * 100)}%</span>
+              <span class="eb-eur">${esc(eur(b.eur))} €</span>
+            </div>`).join("")}
+          </div>` : ""}
+          ${f.bandsPending ? `<div class="eco-band-wait">${f.bandsError
+            ? "Statistiche orarie non disponibili: la bolletta e' calcolata al prezzo unico."
+            : "Lettura delle statistiche ora per ora…"}</div>` : ""}
           ${f.selfUsed > 0 ? `<div class="eco-row self">
             <span class="eco-k"><ha-icon icon="mdi:home-lightning-bolt-outline"></ha-icon> Autoconsumo</span>
             <span class="eco-bar"><i style="width:${bar(f.selfUsed, maxE)}"></i></span>
             <span class="eco-kwh">${esc(f.selfUsed.toFixed(1))} kWh</span>
-            <span class="eco-eur">+${esc(eur(f.selfUsed * (Number(item.price_import) || 0)))} €</span>
+            <span class="eco-eur">+${esc(eur(f.selfUsed * f.pIn))} €</span>
           </div>` : ""}
           ${f.exported > 0 ? `<div class="eco-row rev">
             <span class="eco-k"><ha-icon icon="mdi:transmission-tower-export"></ha-icon> Immissione</span>
@@ -7021,10 +7215,25 @@ class CyborgDashboard extends HTMLElement {
           </div>` : ""}
         </div>
 
+        ${f.hasBill ? `<div class="eco-bill">
+          <header><ha-icon icon="mdi:receipt-text-outline"></ha-icon><strong>Totale stimato in bolletta</strong>
+            <em>${esc(period.label.toLowerCase())}</em></header>
+          <div class="eb-row"><span>Energia prelevata</span><b>${esc(eur(f.cost))} €</b></div>
+          ${(Array.isArray(item.fixed) ? item.fixed : []).filter((r) => num(r.amount) !== null && num(r.amount) !== 0)
+            .map((r) => `<div class="eb-row sub"><span>${esc(r.label)}<i>${esc(eur(num(r.amount)))} € ${
+              r.every === "day" ? "al giorno" : r.every === "year" ? "all'anno" : "al mese"}</i></span>
+              <b>${esc(eur((num(r.amount) / (FIXED_EVERY_DAYS[r.every] || FIXED_EVERY_DAYS.month)) * period.days))} €</b></div>`).join("")}
+          ${f.vat > 0 ? `<div class="eb-row"><span>IVA ${esc(f.vat)}%</span><b>${esc(eur(f.taxed - f.cost - f.fixed))} €</b></div>` : ""}
+          ${f.revenue > 0 ? `<div class="eb-row credit"><span>Immissione in rete</span><b>−${esc(eur(f.revenue))} €</b></div>` : ""}
+          <div class="eb-row total"><span>Totale</span><b>${esc(eur(f.billed))} €</b></div>
+        </div>` : ""}
+
         ${this._economyDevices(item, data)}
 
         <div class="eco-foot">
-          <span>prelievo ${esc(eur(Number(item.price_import) || 0))} €/kWh</span>
+          <span>${item.tariff_mode === "bands"
+            ? `multifascia · media ${esc(eur(f.pIn))} €/kWh`
+            : `prelievo ${esc(eur(Number(item.price_import) || 0))} €/kWh`}</span>
           ${(Number(item.price_export) || 0) > 0 ? `<span>immissione ${esc(eur(Number(item.price_export) || 0))} €/kWh</span>` : ""}
           ${f.produced > 0 ? `<span>prodotti ${esc(f.produced.toFixed(1))} kWh</span>` : ""}
         </div>
@@ -7421,7 +7630,8 @@ class CyborgDashboard extends HTMLElement {
       </div>
       <div class="section">
         <strong>TARIFFE</strong>
-        <span class="hint">Il prezzo di prelievo è quello che paghi; quello di immissione è il ritiro dedicato o lo scambio riconosciuto.</span>
+        <span class="hint">Il prezzo di prelievo è quello che paghi; quello di immissione è il ritiro dedicato o lo scambio riconosciuto.${
+          card.tariff_mode === "bands" ? " <strong>Con la tariffa multifascia il prezzo di prelievo qui sotto non viene usato</strong>: valgono i tre prezzi F1/F2/F3." : ""}</span>
         <div class="two">
           <label>PRELIEVO €/kWh<input type="number" step="0.001" min="0" data-prop="price_import" value="${card.price_import ?? 0.25}"></label>
           <label>IMMISSIONE €/kWh<input type="number" step="0.001" min="0" data-prop="price_export" value="${card.price_export ?? 0.1}"></label>
@@ -7430,6 +7640,7 @@ class CyborgDashboard extends HTMLElement {
           ${ECONOMY_PERIODS.map((p) => `<option value="${p.key}" ${(card.period || "month") === p.key ? "selected" : ""}>${esc(p.label)}</option>`).join("")}
         </select></label>
       </div>
+      ${this._tariffEditor(card)}
       <div class="section">
         <strong>DETTAGLIO PER DISPOSITIVO</strong>
         <span class="hint">Ogni riga è un contatore di energia in kWh: quanto ha consumato quel dispositivo nel periodo, e quanto è costato. Un dispositivo marcato come <strong>produce</strong> viene valorizzato alla tariffa di immissione invece che a quella di prelievo.</span>
@@ -7505,6 +7716,41 @@ class CyborgDashboard extends HTMLElement {
              <ha-icon icon="${esc(g.icon)}"></ha-icon>${esc(g.label)}</button>`).join("")}
         </div>
         <label>MASSIMO PER GRUPPO<input type="number" min="3" max="30" data-prop="max_per_group" value="${card.max_per_group || 8}"></label>
+        <span class="hint">Vale solo per i gruppi lasciati in automatico: dove scegli tu, compare quello che hai scelto, senza tetti.</span>
+      </div>
+      <div class="section">
+        <strong>QUALI LETTURE VEDERE</strong>
+        <span class="hint">Ogni gruppo parte in automatico. Toccando un occhio decidi tu quell'elenco: da quel momento il gruppo mostra le entità che hai scelto e nient'altro, e con <em>AUTOMATICO</em> torna come prima.</span>
+        ${MONITOR_GROUPS.filter((g) => chosen.includes(g.key)).map((g) => {
+          const cands = this._monitorCandidates(g);
+          const manual = (card.entities || {})[g.key];
+          const isManual = Array.isArray(manual) && manual.length;
+          const on = new Set(isManual ? manual : cands);
+          // Un'entita' scelta a mano che poi sparisce da Home Assistant deve
+          // restare visibile qui, o non ci sarebbe modo di toglierla.
+          const rows = cands.slice();
+          if (isManual) for (const id of manual) if (!rows.includes(id)) rows.push(id);
+          return `<div class="lim-group">
+            <div class="lim-head"><ha-icon icon="${esc(g.icon)}"></ha-icon><strong>${esc(g.label)}</strong>
+              <em>${on.size} su ${cands.length}${isManual ? " · scelte da te" : " · automatico"}</em>
+              ${isManual ? `<button class="mini" data-mon-auto="${esc(g.key)}">AUTOMATICO</button>` : ""}
+            </div>
+            <div class="room-entities" data-keep-scroll="mon-${esc(g.key)}">${rows.length
+              ? rows.map((id) => {
+                const st = this._hass.states[id];
+                const shown = on.has(id);
+                return `<div class="room-ent${shown ? "" : " hidden"}">
+                  <ha-icon icon="${esc(autoIcon(id, st || { attributes: {} }))}"></ha-icon>
+                  <span>${esc((st && st.attributes.friendly_name) || id)}</span>
+                  ${st ? `<em class="room-ent-pos">${esc(st.state)}${esc(st.attributes.unit_of_measurement || "")}</em>`
+                       : `<em class="room-ent-pos" title="Non più in Home Assistant">assente</em>`}
+                  <button class="mini" data-mon-pick="${esc(g.key)}|${esc(id)}" title="${shown ? "Nascondi" : "Mostra"}">
+                    <ha-icon icon="${shown ? "mdi:eye" : "mdi:eye-off-outline"}"></ha-icon></button>
+                </div>`;
+              }).join("")
+              : '<div class="entity-result-empty">Nessuna lettura di questo tipo in Home Assistant.</div>'}</div>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessun gruppo attivo: accendine uno qui sopra.</div>'}
       </div>
       <div class="section">
         <strong>SOGLIE</strong>
@@ -8362,6 +8608,48 @@ class CyborgDashboard extends HTMLElement {
     ${evSection}`;
   }
 
+  /**
+   * Tariffa e voci fisse: quello che serve per mettere la card accanto alla
+   * bolletta vera invece che accanto a una stima.
+   */
+  _tariffEditor(card) {
+    const bands = card.bands || {};
+    const fixed = Array.isArray(card.fixed) ? card.fixed : [];
+    const isBands = card.tariff_mode === "bands";
+    return `<div class="section">
+      <strong>COME TI FATTURANO L'ENERGIA</strong>
+      <div class="seg">
+        <button class="${isBands ? "" : "active"}" data-tariff-mode="single">Monoraria</button>
+        <button class="${isBands ? "active" : ""}" data-tariff-mode="bands">Multifascia F1/F2/F3</button>
+      </div>
+      <span class="hint">${isBands
+        ? "Il sistema legge le statistiche ora per ora e capisce da solo in quale fascia hai consumato: F1 lun-ven 8-19, F2 lun-ven 7-8 e 19-23 piu' il sabato 7-23, F3 le notti, la domenica e i festivi nazionali (Pasquetta compresa)."
+        : "Un prezzo solo, valido a qualunque ora."}</span>
+      ${isBands ? `<div class="tariff-bands">
+        <label>F1 €/kWh<input type="number" step="0.001" min="0" data-band="f1" value="${bands.f1 ?? 0.30}"></label>
+        <label>F2 €/kWh<input type="number" step="0.001" min="0" data-band="f2" value="${bands.f2 ?? 0.27}"></label>
+        <label>F3 €/kWh<input type="number" step="0.001" min="0" data-band="f3" value="${bands.f3 ?? 0.24}"></label>
+      </div>` : ""}
+      <label>IVA %<input type="number" step="0.5" min="0" max="100" data-prop="vat" value="${card.vat ?? 0}"></label>
+      <span class="hint">Lasciala a zero se i prezzi che hai inserito sono gia' comprensivi. L'IVA si applica a energia e quote fisse; l'immissione viene sottratta dopo.</span>
+    </div>
+    <div class="section">
+      <strong>VOCI FISSE</strong>
+      <span class="hint">Canone, quota di commercializzazione, quota potenza annua. Vengono riproporzionate al periodo mostrato: senza queste il totale non e' confrontabile con la bolletta.</span>
+      ${fixed.map((r, i) => `<div class="fix-row">
+        <input type="text" data-fix="${i}|label" value="${esc(r.label || "")}" placeholder="descrizione">
+        <input type="number" step="0.01" data-fix="${i}|amount" value="${esc(r.amount ?? 0)}">
+        <select data-fix="${i}|every">
+          <option value="day" ${r.every === "day" ? "selected" : ""}>al giorno</option>
+          <option value="month" ${r.every === "year" ? "" : r.every === "day" ? "" : "selected"}>al mese</option>
+          <option value="year" ${r.every === "year" ? "selected" : ""}>all'anno</option>
+        </select>
+        <button class="mini danger" data-fix-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>`).join("") || '<div class="entity-result-empty">Nessuna voce fissa.</div>'}
+      ${fixed.length < 12 ? `<button class="mini" data-fix-add><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI VOCE</button>` : ""}
+    </div>`;
+  }
+
   _renderCardEditor(card) {
     const st = this._hass.states[card.entity_id];
     const app = card.appearance || {};
@@ -8499,6 +8787,7 @@ class CyborgDashboard extends HTMLElement {
         <label>COLORE TEMA<input type="color" data-theme-prop="accent" value="${esc((this._dashboard.theme && this._dashboard.theme.accent) || "#00e5ff")}"></label>
       </div>
       ${this._pageManager()}
+      ${this._hierarchyEditor()}
       <div class="section">
         <strong>SEZIONI</strong>
         <span class="hint">Clicca “SEZIONE” su un blocco per configurarlo, oppure aggiungine uno nuovo.</span>
@@ -8516,6 +8805,83 @@ class CyborgDashboard extends HTMLElement {
         <button class="secondary wide danger-outline" data-autocompose="replace"><ha-icon icon="mdi:refresh"></ha-icon> RIGENERA DA ZERO</button>
       </div>
     </aside>`;
+  }
+
+  /**
+   * Every meter the dashboard knows about, once.
+   *
+   * The same load can appear in two cards and under two entity_ids - watts in
+   * the flow diagram, kWh in the economy card - so the list is built from the
+   * union of what the cards declare plus whatever the shared map already
+   * mentions, and each entity appears exactly once.
+   */
+  _allMeters() {
+    const out = new Map();
+    const add = (entity, name) => {
+      const st = this._hass.states[entity];
+      if (!st || out.has(entity)) return;
+      out.set(entity, { entity,
+        name: name || st.attributes.friendly_name || entity,
+        cls: st.attributes.device_class || "" });
+    };
+    for (const page of (this._dashboard && this._dashboard.pages) || []) {
+      for (const sec of page.sections || []) {
+        for (const it of sec.items || []) {
+          const lists = [];
+          if (Array.isArray(it.devices)) lists.push(it.devices);
+          if (it.flow && Array.isArray(it.flow.devices)) lists.push(it.flow.devices);
+          for (const list of lists) {
+            for (const d of list) if (d && d.entity) add(d.entity, d.name);
+          }
+        }
+      }
+    }
+    const h = this._hierarchy();
+    for (const child of Object.keys(h)) { add(child); add(h[child]); }
+    return Array.from(out.values()).sort((a, b) =>
+      a.cls.localeCompare(b.cls) || a.name.localeCompare(b.name));
+  }
+
+  /**
+   * One place to see the whole wiring, since the cards can only show their own
+   * slice of it. Declaring it here or inside a card is the same thing: it is
+   * the same map, and this is the view that shows it entire.
+   */
+  _hierarchyEditor() {
+    const meters = this._allMeters();
+    if (!meters.length) {
+      return `<div class="section">
+        <strong>GERARCHIA DEI CARICHI</strong>
+        <span class="hint">Nessun contatore dichiarato. Aggiungi carichi al flusso energetico o all'analisi economica e compariranno qui.</span>
+      </div>`;
+    }
+    const h = this._hierarchy();
+    const nested = meters.filter((m) => this._parentOf(m.entity, null)).length;
+    const label = (e) => (meters.find((m) => m.entity === e) || {}).name || e;
+    const CLS = { power: "Potenza · W", energy: "Energia · kWh" };
+    const groups = [];
+    for (const m of meters) {
+      const g = groups.find((x) => x.cls === m.cls);
+      if (g) g.rows.push(m); else groups.push({ cls: m.cls, rows: [m] });
+    }
+    return `<div class="section">
+      <strong>GERARCHIA DEI CARICHI</strong>
+      <span class="hint">${meters.length} contatori, ${nested} dichiarati a valle di un altro. Un carico misurato dentro un altro — la friggitrice sulla presa della cucina — va dichiarato qui o in una qualunque delle card: è la stessa mappa, e i suoi kWh vengono contati una volta sola.</span>
+      ${groups.map((g) => `${groups.length > 1 ? `<div class="entity-result-head">${esc(CLS[g.cls] || g.cls || "Altro")}</div>` : ""}
+        ${g.rows.map((m) => {
+          const own = h[m.entity] || "";
+          const derived = !own && this._parentOf(m.entity, null);
+          const others = g.rows.filter((x) => x.entity !== m.entity);
+          return `<div class="hier-row">
+            <span class="hier-name">${esc(m.name)}</span>
+            <select data-hier-parent="${esc(m.entity)}">
+              <option value="">— a sé —</option>
+              ${others.map((o) => `<option value="${esc(o.entity)}" ${own === o.entity ? "selected" : ""}>${esc(o.name)}</option>`).join("")}
+            </select>
+            ${derived ? `<em class="wiz-tip">via ${esc(label(derived))}</em>` : ""}
+          </div>`;
+        }).join("")}`).join("")}
+    </div>`;
   }
 
   /** Sheet chrome shared by every editor variant (handle + close). */
@@ -8871,6 +9237,13 @@ class CyborgDashboard extends HTMLElement {
     // --- page + theme
     all("[data-page-prop]").forEach((el) => {
       el.onchange = () => this._set(this._page(), el.getAttribute("data-page-prop"), el.value);
+    });
+    all("[data-hier-parent]").forEach((el) => {
+      el.onchange = () => {
+        this._setParent(el.getAttribute("data-hier-parent"), el.value || null);
+        this._dirty = true;
+        this._touch();
+      };
     });
     all("[data-theme-prop]").forEach((el) => {
       el.onchange = () => this._set(this._dashboard.theme, el.getAttribute("data-theme-prop"), el.value);
@@ -10679,6 +11052,93 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
+    all("[data-mon-pick]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const [key, id] = el.getAttribute("data-mon-pick").split("|");
+        const group = MONITOR_GROUPS.find((g) => g.key === key);
+        if (!group) return;
+        card.entities = Object.assign({}, card.entities);
+        const current = card.entities[key];
+        // Il primo tocco converte il gruppo da automatico a scelto: senza
+        // questo, spegnere un occhio su un elenco trovato da solo non avrebbe
+        // niente su cui scrivere e non farebbe nulla - che e' esattamente il
+        // vicolo cieco segnalato.
+        const base = Array.isArray(current) && current.length
+          ? current.slice() : this._monitorCandidates(group);
+        card.entities[key] = base.includes(id)
+          ? base.filter((x) => x !== id) : base.concat([id]);
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-mon-auto]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.entities = Object.assign({}, card.entities);
+        delete card.entities[el.getAttribute("data-mon-auto")];
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-tariff-mode]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.tariff_mode = el.getAttribute("data-tariff-mode");
+        // Cambiare modo cambia il prezzo effettivo, quindi la lettura oraria
+        // gia' fatta non risponde piu' alla stessa domanda: si butta.
+        this._bands = {};
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-band]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        card.bands = Object.assign({}, card.bands);
+        const v = parseFloat(el.value);
+        card.bands[el.getAttribute("data-band")] = Number.isFinite(v) && v >= 0 ? v : 0;
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-fix]").forEach((el) => {
+      const apply = () => {
+        if (!card) return;
+        const [i, field] = el.getAttribute("data-fix").split("|");
+        const rows = Array.isArray(card.fixed) ? card.fixed : (card.fixed = []);
+        const row = rows[parseInt(i, 10)];
+        if (!row) return;
+        if (field === "amount") {
+          const v = parseFloat(el.value);
+          row.amount = Number.isFinite(v) ? v : 0;
+        } else {
+          row[field] = el.value;
+        }
+        this._dirty = true;
+        this._touch();
+      };
+      // Il testo si conferma uscendo dal campo, non a ogni tasto: un ridisegno
+      // per lettera farebbe perdere il cursore mentre si scrive.
+      if (el.tagName === "SELECT") el.onchange = apply; else el.onchange = apply;
+    });
+    all("[data-fix-add]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        card.fixed = (Array.isArray(card.fixed) ? card.fixed : []).concat(
+          [{ label: "Quota fissa", amount: 0, every: "month" }]);
+        this._dirty = true;
+        this._touch();
+      };
+    });
+    all("[data-fix-remove]").forEach((el) => {
+      el.onclick = () => {
+        if (!card || !Array.isArray(card.fixed)) return;
+        card.fixed.splice(parseInt(el.getAttribute("data-fix-remove"), 10), 1);
+        this._dirty = true;
+        this._touch();
+      };
+    });
     all("[data-flow-dev-parent]").forEach((el) => {
       el.onchange = () => {
         const devices = (card && card.flow && card.flow.devices) || [];
@@ -12411,6 +12871,41 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .tr-pick-all{display:flex;gap:6px;margin-top:7px}
 /* A reading bridged over a momentary zero is still a reading, but it is not
    live: the dotted outline is the difference, and the tooltip says why. */
+.eco-bands{display:flex;flex-direction:column;gap:3px;margin:5px 0 8px;padding-left:8px;
+  border-left:2px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.eco-band{display:grid;grid-template-columns:9px 1fr auto 34px auto;align-items:center;gap:8px;
+  font-size:11px;opacity:.85}
+.eco-band i{width:9px;height:9px;border-radius:50%;background:var(--bc)}
+.eco-band .eb-lab{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eco-band .eb-kwh{font:600 11px ui-monospace,monospace;opacity:.7}
+.eco-band .eb-pct{font:600 10px ui-monospace,monospace;opacity:.5;text-align:right}
+.eco-band .eb-eur{font:700 11.5px Inter,system-ui,sans-serif;color:var(--bc)}
+.eco-band-wait{font-size:11px;opacity:.5;padding:4px 0 8px}
+.eco-bill{margin-top:12px;border-radius:12px;padding:10px 12px;
+  background:color-mix(in srgb,var(--accent) 6%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 24%,transparent)}
+.eco-bill>header{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.eco-bill>header ha-icon{--mdc-icon-size:17px;color:var(--accent)}
+.eco-bill>header strong{font-size:12.5px;font-weight:650}
+.eco-bill>header em{margin-left:auto;font:10px ui-monospace,monospace;opacity:.5;font-style:normal}
+.eb-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:3px 0;font-size:12px}
+.eb-row.sub{opacity:.75;font-size:11.5px}
+.eb-row.sub i{display:block;font-style:normal;font-size:9.5px;opacity:.55;letter-spacing:.02em}
+.eb-row.credit b{color:#06d6a0}
+.eb-row b{font:700 12.5px Inter,system-ui,sans-serif;white-space:nowrap}
+.eb-row.total{margin-top:5px;padding-top:7px;border-top:1px solid rgba(255,255,255,.1)}
+.eb-row.total span{font-weight:650}
+.eb-row.total b{font-size:16px;color:var(--accent)}
+.hier-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:7px;align-items:center;margin-bottom:5px}
+.hier-row .hier-name{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hier-row select{min-height:36px}
+.hier-row .wiz-tip{grid-column:1/-1;justify-self:start}
+.tariff-bands{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.fix-row{display:grid;grid-template-columns:minmax(0,1fr) 84px 96px 34px;gap:6px;align-items:center;margin-bottom:5px}
+.fix-row input,.fix-row select{min-height:36px}
+@media(max-width:820px){.fix-row{grid-template-columns:minmax(0,1fr) 34px;grid-template-areas:"a d" "b c"}
+  .fix-row input[data-fix$="label"]{grid-area:a}.fix-row input[data-fix$="amount"]{grid-area:b}
+  .fix-row select{grid-area:c}.fix-row button{grid-area:d}}
 .flow-dev{display:flex;flex-direction:column;gap:5px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.05)}
 .flow-dev:last-of-type{border-bottom:0}
 .flow-dev .room-ent{padding:0}
@@ -12572,7 +13067,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.42.0";
+const CYBORG_BUILD = "0.43.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

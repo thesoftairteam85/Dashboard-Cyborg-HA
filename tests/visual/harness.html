@@ -159,6 +159,24 @@ const hass={states,
         "sensor.energia_pv":[900,1082],"sensor.energia_pdc":[500,612],
         "sensor.energia_lavatrice":[120,141],"sensor.energia_forno":[60,74]};
       const out={};
+      // Ora per ora: e' l'unica granularita' da cui si possa capire in quale
+      // fascia oraria l'energia e' stata consumata davvero. La serie e'
+      // deterministica - niente Math.random - cosi' i conti delle fasce sono
+      // verificabili a mano.
+      if(m.period==="hour"){
+        for(const id of m.statistic_ids||[]){
+          const t=TOT[id]; if(!t) continue;
+          const s0=Date.parse(m.start_time), s1=Date.parse(m.end_time);
+          const rows=[]; let acc=t[0];
+          for(let ms=s0; ms<=s1; ms+=3600000){
+            rows.push({start:ms,sum:acc});
+            const h=new Date(ms).getHours();
+            acc += (h>=8&&h<19) ? 0.9 : (h>=7&&h<23) ? 0.5 : 0.2;
+          }
+          out[id]=rows;
+        }
+        return out;
+      }
       for(const id of m.statistic_ids||[]){
         const t=TOT[id]; if(!t) continue;
         out[id]=[{start:m.start_time,sum:t[0]},{start:m.end_time,sum:t[1]}];
@@ -290,6 +308,14 @@ window.__mount=(dash,opts)=>{
                      {entity:"sensor.energia_lavatrice",name:"Lavatrice",icon:"",kind:"load"},
                      {entity:"sensor.energia_forno",name:"Forno",icon:"",kind:"load"},
                      {entity:"sensor.energia_pv",name:"Fotovoltaico",icon:"",kind:"source"}]});
+          if(opts.tariffBands){
+            const c=sec.items[0];
+            c.tariff_mode="bands";
+            c.bands={f1:0.32,f2:0.28,f3:0.23};
+            c.vat=10;
+            c.fixed=[{label:"Canone RAI",amount:90,every:"year"},
+                     {label:"Quota potenza",amount:3.5,every:"month"}];
+          }
           if(opts.selectEconomy){el._selected={kind:"card",sectionId:sec.id,itemId:"ecocard"};}
         }
         if(opts&&opts.view){Object.assign(el._page().view,opts.view);}

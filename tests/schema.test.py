@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 13, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 15, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -689,10 +689,109 @@ assert len(many["hidden_series"]) == schema.MAX_TREND_SERIES, len(many["hidden_s
 d13 = schema.normalize_dashboard({"version": 12, "pages": [{"id": "p", "title": "P",
     "sections": [{"id": "s", "title": "S", "items": [
         {"id": "t", "type": "trend", "hidden_series": ["sensor.a"]}]}]}]})
-assert d13["version"] == 13
+assert d13["version"] == schema.SCHEMA_VERSION
 assert d13["pages"][0]["sections"][0]["items"][0]["hidden_series"] == ["sensor.a"]
 assert schema.normalize_dashboard(d13)["pages"][0]["sections"][0]["items"][0]["hidden_series"] == ["sensor.a"]
 # una card di altro tipo non guadagna la chiave
 assert "hidden_series" not in schema.normalize_item({"id": "x", "type": "room"}, 0)
 
 print("schema: linee spente a mano (v13) ok")
+
+# --- v14: tariffa a fasce, voci fisse, IVA ----------------------------------
+def _eco(**kw):
+    item = {"id": "e", "type": "economy"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+base = _eco()
+assert base["tariff_mode"] == "single", base["tariff_mode"]
+assert base["bands"] == {"f1": 0.30, "f2": 0.27, "f3": 0.24}, base["bands"]
+assert base["fixed"] == [] and base["vat"] == 0.0
+# il prezzo unico resta dov'era: niente due verita' per lo stesso numero
+assert base["price_import"] == 0.25
+
+assert _eco(tariff_mode="bands")["tariff_mode"] == "bands"
+for junk in ("multifascia", "", None, 3, [], {"a": 1}, "BANDS"):
+    assert _eco(tariff_mode=junk)["tariff_mode"] == "single", junk
+
+# una fascia illeggibile ricade sul suo valore di fabbrica, non sullo zero:
+# un prezzo a zero renderebbe l'energia gratis senza dirlo
+assert _eco(bands={"f1": "abc", "f2": 0.2})["bands"] == {"f1": 0.30, "f2": 0.2, "f3": 0.24}
+assert _eco(bands="niente")["bands"] == {"f1": 0.30, "f2": 0.27, "f3": 0.24}
+assert _eco(bands={"f1": -5})["bands"]["f1"] == 0.0
+assert _eco(bands={"f1": "0.3117"})["bands"]["f1"] == 0.3117
+
+# voci fisse
+fx = _eco(fixed=[
+    {"label": "Canone RAI", "amount": 90, "every": "year"},
+    {"label": "Quota", "amount": "12.5", "every": "month"},
+    {"label": "Strana", "amount": 1, "every": "settimana"},
+    {"label": "Senza importo"},
+    "non un dizionario",
+])["fixed"]
+assert len(fx) == 4, fx
+assert fx[0] == {"label": "Canone RAI", "amount": 90.0, "every": "year"}
+assert fx[1]["amount"] == 12.5
+assert fx[2]["every"] == "month", fx[2]          # periodo sconosciuto -> mensile
+assert fx[3]["amount"] == 0.0                    # "Senza importo" -> zero, non scartata
+assert _eco(fixed=[{"amount": 1}] * 40)["fixed"].__len__() == 12
+assert _eco(fixed=[{"amount": 1}])["fixed"][0]["label"] == "Voce fissa"
+assert _eco(fixed="niente")["fixed"] == []
+
+# IVA
+assert _eco(vat=22)["vat"] == 22.0
+assert _eco(vat="10.5")["vat"] == 10.5
+assert _eco(vat=-3)["vat"] == 0.0
+assert _eco(vat=500)["vat"] == 100.0
+assert _eco(vat="abc")["vat"] == 0.0
+
+# giro completo di salvataggio: la tariffa sopravvive
+d14 = schema.normalize_dashboard({"version": 13, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "e", "type": "economy", "tariff_mode": "bands",
+         "bands": {"f1": 0.31, "f2": 0.28, "f3": 0.22}, "vat": 22,
+         "fixed": [{"label": "Potenza", "amount": 24, "every": "year"}]}]}]}]})
+assert d14["version"] == schema.SCHEMA_VERSION
+eco = d14["pages"][0]["sections"][0]["items"][0]
+assert eco["tariff_mode"] == "bands" and eco["bands"]["f1"] == 0.31 and eco["vat"] == 22.0
+assert eco["fixed"] == [{"label": "Potenza", "amount": 24.0, "every": "year"}]
+assert schema.normalize_dashboard(d14)["pages"][0]["sections"][0]["items"][0] == eco
+
+# una card di altro tipo non guadagna le chiavi della tariffa
+other = schema.normalize_item({"id": "x", "type": "room"}, 0)
+assert "tariff_mode" not in other and "bands" not in other and "fixed" not in other
+
+print("schema: tariffa a fasce e voci fisse (v14) ok")
+
+# --- v15: letture scelte a mano nel monitoraggio ----------------------------
+def _mon(**kw):
+    item = {"id": "m", "type": "monitor"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+assert _mon()["entities"] == {}
+picked = _mon(entities={
+    "temperature": ["sensor.a", "sensor.b", "non valido", 7],
+    "voltage": [],                       # vuota = automatico, non conservata
+    "corrente": "niente",                # non una lista
+    7: ["sensor.c"],                     # chiave non stringa
+})["entities"]
+assert picked == {"temperature": ["sensor.a", "sensor.b"]}, picked
+# un elenco lunghissimo viene tagliato, non rifiutato
+assert len(_mon(entities={"temperature": ["sensor.s%d" % i for i in range(200)]})["entities"]["temperature"]) == 60
+assert _mon(entities="niente")["entities"] == {}
+# la scelta sopravvive a un giro completo di salvataggio
+d15 = schema.normalize_dashboard({"version": 14, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "m", "type": "monitor", "groups": ["temperature"],
+         "entities": {"temperature": ["sensor.a"]}}]}]}]})
+assert d15["version"] == schema.SCHEMA_VERSION
+m15 = d15["pages"][0]["sections"][0]["items"][0]
+assert m15["entities"] == {"temperature": ["sensor.a"]}
+assert schema.normalize_dashboard(d15)["pages"][0]["sections"][0]["items"][0]["entities"] == {"temperature": ["sensor.a"]}
+# una card di altro tipo non guadagna la chiave
+assert "entities" not in schema.normalize_item({"id": "x", "type": "economy"}, 0)
+
+print("schema: letture scelte a mano nel monitoraggio (v15) ok")

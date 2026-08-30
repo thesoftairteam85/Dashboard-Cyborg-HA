@@ -4,6 +4,70 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.43.0] - 2026-08-26
+
+La bolletta vera: fasce orarie, voci fisse, IVA. Piu' la gerarchia in un posto
+solo e le letture del monitoraggio scelte a mano.
+
+### Tariffa monoraria o multifascia F1/F2/F3
+Fasce verificate su **due fonti indipendenti**, non a memoria:
+- **F1** lun-ven 08:00-19:00, festivi esclusi
+- **F2** lun-ven 07:00-08:00 e 19:00-23:00; **sabato 07:00-23:00**
+- **F3** lun-sab 23:00-07:00, piu' **tutta la domenica e i festivi nazionali**
+
+- In multifascia il sistema legge le statistiche **ora per ora** e capisce da
+  solo dove e' finita l'energia: e' l'unica granularita' che possa dirlo, un
+  secchio giornaliero non sa se quei kWh sono andati alle undici del mattino o
+  a mezzanotte. Home Assistant tiene le statistiche orarie per sempre, quindi
+  la domanda ha risposta su tutto lo storico.
+- **Pasquetta compresa.** E' l'unico festivo nazionale mobile e vale F3: il
+  calcolo della Pasqua (Meeus) e' verificato su tre anni — 2024 il 31 marzo,
+  2026 il 5 aprile, 2027 il 28 marzo. Sbagliarlo significa fatturare male un
+  lunedi all'anno, l'errore silenzioso che rende inutile un confronto.
+- Un contatore che si azzera non produce consumo negativo.
+
+### Le voci che rendono la card confrontabile con la bolletta
+- **Voci fisse** — canone, quota di commercializzazione, quota potenza — al
+  giorno, al mese o all'anno, **riproporzionate al periodo mostrato** usando il
+  mese e l'anno gregoriani medi, cosi' un totale su "30 giorni" non deriva
+  perche' febbraio e' corto. 90 € di canone annuo su 30 giorni fanno 7,39 €.
+- **IVA** su energia e quote fisse; l'immissione si sottrae **dopo**, perche'
+  il ritiro dedicato non e' una voce su cui il cliente paga l'IVA.
+- Nella card: le tre fasce con kWh, percentuale ed euro sotto la riga del
+  prelievo, il riquadro **Totale stimato in bolletta** con tutte le voci, e nel
+  piede il **prezzo medio effettivo**.
+- **Il prezzo monorario resta dov'era**: le tre fasce vivono altrove, quindi non
+  ci sono due verita' per lo stesso numero e cambiare modo non fa reinserire
+  nulla. Se il recorder non risponde la card torna al prezzo unico **e lo
+  dichiara**, invece di mostrare zero.
+
+### La gerarchia dei carichi in un posto solo
+Nuova sezione **GERARCHIA DEI CARICHI** nell'editor della pagina: ogni contatore
+una volta sola, raggruppato per grandezza, con il suo padre — e la nota *via …*
+quando la parentela arriva dall'altro sensore dello stesso apparecchio. Le card
+restano per dichiararla al volo: e' sempre la stessa mappa.
+
+### Il monitoraggio: quali letture vedere
+- **Il difetto**: la card trovava le letture da sola in base al `device_class` e
+  non c'era **nessun modo** di dire quali vedere sotto Tensioni, Correnti,
+  Temperature, Batterie. L'elenco a mano esisteva gia' nel codice, ma senza un
+  comando che lo scrivesse e senza che lo schema lo salvasse: due pezzi su tre.
+- Ora ogni gruppo attivo ha il suo elenco con l'occhio acceso/spento. Il primo
+  tocco converte il gruppo da automatico a **scelto da te** — senza quella
+  conversione, spegnere un occhio su un elenco trovato da solo non avrebbe
+  niente su cui scrivere e non farebbe nulla.
+- **AUTOMATICO** riporta il gruppo com'era. Il **massimo per gruppo** vale solo
+  in automatico: su un elenco scelto a mano sarebbe un modo di nascondere in
+  silenzio qualcosa che e' stato chiesto espressamente.
+- Un'entita' scelta che poi sparisce da Home Assistant resta nell'elenco,
+  marcata *assente*: altrimenti non ci sarebbe modo di toglierla.
+- Schema v15.
+
+### Verifiche
+1057 asserzioni frontend, 368 misurate in Chromium — fra cui che la somma delle
+tre fasce sia esattamente il costo del prelievo e che il totale del riquadro sia
+davvero la somma delle righe sopra.
+
 ## [0.42.0] - 2026-08-26
 
 «Compreso dentro» anche nell'editor del flusso energetico.
