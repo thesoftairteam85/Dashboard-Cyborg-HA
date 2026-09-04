@@ -8,6 +8,9 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v18 items[].device + slot/soglie        the "system" card: one computer watched
+                                        by picking the DEVICE, with every slot
+                                        it finds by itself overridable by hand.
 v17 items[].battery_in / battery_out    the economy card closes the balance of
                                         a house with storage: self-consumption
                                         becomes produced + discharged -
@@ -58,7 +61,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -729,6 +732,38 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["vat"] = 0.0
         period = result.get("period")
         result["period"] = period if period in ("today", "week", "month", "year") else "month"
+    if result.get("type") == "system":
+        # La card Sistema parte da un apparecchio e trova il resto da sola.
+        # Ogni casella ha pero' la sua scrittura a mano, e una lista vuota
+        # significa "cercale tu", non "non mostrarne nessuna": una lista vuota
+        # che volesse dire zero righe renderebbe impossibile tornare indietro.
+        value = result.get("device")
+        result["device"] = value if isinstance(value, str) and value else None
+        for key in ("cpu", "gpu", "mem_used", "mem_free", "mem_total", "swap",
+                    "uptime", "containers"):
+            value = result.get(key)
+            result[key] = value if isinstance(value, str) and "." in value else None
+        for key in ("temps", "disks"):
+            rows = result.get(key)
+            result[key] = (
+                [i for i in rows if isinstance(i, str) and "." in i][:40]
+                if isinstance(rows, list) else []
+            )
+        # Soglie: attenzione e allarme per quattro grandezze. `None` vuol dire
+        # "nessuna soglia", ed e' diverso da zero - zero accenderebbe l'allarme
+        # sempre.
+        for key, default in (("warn_cpu", 80.0), ("alarm_cpu", 95.0),
+                             ("warn_mem", 80.0), ("alarm_mem", 92.0),
+                             ("warn_disk", 80.0), ("alarm_disk", 92.0),
+                             ("warn_temp", 70.0), ("alarm_temp", 85.0)):
+            raw = result.get(key, default)
+            if raw is None:
+                result[key] = None
+                continue
+            try:
+                result[key] = max(0.0, min(200.0, round(float(raw), 1)))
+            except (TypeError, ValueError):
+                result[key] = default
     if result.get("type") == "camera":
         cams = result.get("cameras")
         result["cameras"] = [c for c in cams if isinstance(c, str) and c] if isinstance(cams, list) else []

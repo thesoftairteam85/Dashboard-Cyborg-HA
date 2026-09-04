@@ -110,13 +110,61 @@ const entReg=[];
 for(const [aid,ents] of Object.entries(MAP))
   for(const e of ents) entReg.push({entity_id:e,area_id:aid,device_id:null,disabled_by:null,hidden_by:null});
 
+// Un mini PC vero, con le stesse trappole di quello dell'utente: lo stesso
+// disco pubblicato sotto tre punti di mount, il loopback e i ponti Docker fra
+// le interfacce, le partizioni accanto al disco che le contiene.
+const SYSDEV="dev-minipc", SP="sensor.minipc_";
+{
+  const put=(suf,val,attrs)=>{states[SP+suf]=S(String(val),Object.assign({friendly_name:"Mini PC "+suf},attrs));};
+  const M=(u)=>({unit_of_measurement:u,state_class:"measurement"});
+  const SZ=(u)=>({unit_of_measurement:u,device_class:"data_size",state_class:"measurement"});
+  const RT=(u)=>({unit_of_measurement:u,device_class:"data_rate",state_class:"measurement"});
+  const TP=()=>({unit_of_measurement:"°C",device_class:"temperature",state_class:"measurement"});
+  states[SP+"utilizzo_della_cpu"]=S("7.5",Object.assign({friendly_name:"Mini PC Utilizzo della CPU"},M("%")));
+  states[SP+"carico_cpu"]=S("0.03",Object.assign({friendly_name:"Mini PC Carico CPU"},M("")));
+  states[SP+"intel_gpu_processor_usage"]=S("32",Object.assign({friendly_name:"Mini PC Intel GPU processor usage"},M("%")));
+  states[SP+"uso_della_memoria"]=S("2000",Object.assign({friendly_name:"Mini PC Uso della memoria"},SZ("MiB")));
+  states[SP+"memoria_libera"]=S("6000",Object.assign({friendly_name:"Mini PC Memoria libera"},SZ("MiB")));
+  states[SP+"swap_utilizzato"]=S("0",Object.assign({friendly_name:"Mini PC Swap utilizzato"},SZ("MiB")));
+  states[SP+"memoria_utilizzata_dai_container"]=S("565",Object.assign({friendly_name:"Mini PC Memoria utilizzata dai container"},SZ("MiB")));
+  states[SP+"containers_active"]=S("5",Object.assign({friendly_name:"Mini PC Containers active"},M("")));
+  states[SP+"package_id_0_temperatura"]=S("71",Object.assign({friendly_name:"Mini PC Package id 0 temperatura"},TP()));
+  states[SP+"core_0_temperatura"]=S("64",Object.assign({friendly_name:"Mini PC Core 0 temperatura"},TP()));
+  states[SP+"core_1_temperatura"]=S("66",Object.assign({friendly_name:"Mini PC Core 1 temperatura"},TP()));
+  states[SP+"uptime"]=S(new Date(Date.parse("2026-08-24T09:00:00Z")).toISOString(),
+    {friendly_name:"Mini PC Uptime",device_class:"timestamp"});
+  for(const mount of ["hostroot","etc_hostname","etc_hosts"]){
+    put(mount+"_utilizzo_disco",80.7,M("%"));
+    states[SP+mount+"_utilizzo_disco"]=S("80.7",Object.assign({friendly_name:"Mini PC /"+mount+" utilizzo disco"},M("%")));
+    states[SP+mount+"_disco_utilizzato"]=S("168.8",Object.assign({friendly_name:"Mini PC /"+mount+" disco utilizzato"},SZ("GiB")));
+    states[SP+mount+"_disco_libero"]=S("40.5",Object.assign({friendly_name:"Mini PC /"+mount+" disco libero"},SZ("GiB")));
+    states[SP+mount+"_disk_size"]=S("220.6",Object.assign({friendly_name:"Mini PC /"+mount+" disk size"},SZ("GiB")));
+  }
+  states[SP+"mnt_dati_utilizzo_disco"]=S("16.5",Object.assign({friendly_name:"Mini PC /mnt/dati utilizzo disco"},M("%")));
+  states[SP+"mnt_dati_disk_size"]=S("899.2",Object.assign({friendly_name:"Mini PC /mnt/dati disk size"},SZ("GiB")));
+  states[SP+"mnt_dati_disco_libero"]=S("751.3",Object.assign({friendly_name:"Mini PC /mnt/dati disco libero"},SZ("GiB")));
+  for(const [k,rx,tx] of [["eno1",12.5,2.0],["lo",0,0],["br_abc",0,0]]){
+    states[SP+k+"_rx"]=S(String(rx),Object.assign({friendly_name:"Mini PC "+k+" RX"},RT("Mbit/s")));
+    states[SP+k+"_tx"]=S(String(tx),Object.assign({friendly_name:"Mini PC "+k+" TX"},RT("Mbit/s")));
+  }
+  for(const dev of ["sda","sda1","sda2"]){
+    states[SP+dev+"_disk_read"]=S("0.5",Object.assign({friendly_name:"Mini PC "+dev+" disk read"},RT("MB/s")));
+    states[SP+dev+"_disk_write"]=S("1.5",Object.assign({friendly_name:"Mini PC "+dev+" disk write"},RT("MB/s")));
+  }
+  for(const id of Object.keys(states)) if(id.startsWith(SP))
+    entReg.push({entity_id:id,area_id:null,device_id:SYSDEV,disabled_by:null,hidden_by:null});
+}
+
 let saved=null;
 const hass={states,
   callWS:async(m)=>{
     if(m.type==="cyborg_dashboard/get") return {dashboard:window.__DASH__};
     if(m.type==="cyborg_dashboard/save"){saved=m.dashboard;return {saved:true,revision:1}}
     if(m.type==="config/area_registry/list") return AREA.map(([area_id,name,icon])=>({area_id,name,icon}));
-    if(m.type==="config/device_registry/list") return window.__DEVREG||[];
+    if(m.type==="config/device_registry/list")
+      // L'apparecchio ha un'area: senza, le sue cinquanta entita' finirebbero
+      // fra gli "orfani senza area" e falserebbero quella prova.
+      return (window.__DEVREG||[]).concat([{id:SYSDEV,name:"Mini PC",name_by_user:null,area_id:"soggiorno"}]);
     if(m.type==="config/entity_registry/list") return entReg;
     if(m.type==="history/history_during_period"){
       const out={}; const now=Date.now();
@@ -326,6 +374,12 @@ window.__mount=(dash,opts)=>{
             sec.items[0].device_class=opts.trendClass||"temperature";
             sec.items[0].max_series=opts.trendMax||8;}
           if(opts.selectTrend){el._editing=true;el._selected={kind:"card",sectionId:sec.id,itemId:"trcard"};}
+        }
+        if(opts&&opts.system){
+          const sec=el._sections()[0];
+          sec.items.unshift({id:"syscard",type:"system",entity_id:"",name:"",size:"lg",
+            appearance:{},states:{},actions:{},device:SYSDEV,temps:[],disks:[]});
+          if(opts.selectSystem){el._selected={kind:"card",sectionId:sec.id,itemId:"syscard"};}
         }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];

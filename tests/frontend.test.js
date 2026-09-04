@@ -4315,6 +4315,182 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                     ok("stato ripristinato dopo la sezione 46", !states["light.sala"]);
                   }
 
+console.log("\n== 48. CARD SISTEMA: UN COMPUTER, NON UN IMPIANTO ==");
+{
+  const savedReg = el._registry, savedDash48 = el._dashboard, savedSel = el._selected;
+  const D = "dev-minipc";
+  const P2 = "sensor.minipc_";
+  const mk = (suffix, state, attrs) => {
+    states[P2 + suffix] = S(String(state), attrs);
+    return P2 + suffix;
+  };
+  const M = (u) => ({ unit_of_measurement: u, state_class: "measurement" });
+  const size = (u) => ({ unit_of_measurement: u, device_class: "data_size", state_class: "measurement" });
+  const rate = (u) => ({ unit_of_measurement: u, device_class: "data_rate", state_class: "measurement" });
+  const temp = () => ({ unit_of_measurement: "°C", device_class: "temperature", state_class: "measurement" });
+
+  mk("utilizzo_della_cpu", 7.5, Object.assign({ friendly_name: "Mini PC Utilizzo della CPU" }, M("%")));
+  mk("carico_cpu", 0.03, Object.assign({ friendly_name: "Mini PC Carico CPU" }, M("")));
+  mk("intel_gpu_processor_usage", 32, Object.assign({ friendly_name: "Mini PC Intel GPU processor usage" }, M("%")));
+  mk("uso_della_memoria", 2000, Object.assign({ friendly_name: "Mini PC Uso della memoria" }, size("MiB")));
+  mk("memoria_libera", 6000, Object.assign({ friendly_name: "Mini PC Memoria libera" }, size("MiB")));
+  mk("swap_utilizzato", 0, Object.assign({ friendly_name: "Mini PC Swap utilizzato" }, size("MiB")));
+  mk("memoria_utilizzata_dai_container", 565, Object.assign({ friendly_name: "Mini PC Memoria utilizzata dai container" }, size("MiB")));
+  mk("containers_active", 5, Object.assign({ friendly_name: "Mini PC Containers active" }, M("")));
+  mk("package_id_0_temperatura", 71, Object.assign({ friendly_name: "Mini PC Package id 0 temperatura" }, temp()));
+  mk("core_0_temperatura", 64, Object.assign({ friendly_name: "Mini PC Core 0 temperatura" }, temp()));
+  mk("core_1_temperatura", 66, Object.assign({ friendly_name: "Mini PC Core 1 temperatura" }, temp()));
+  states[P2 + "uptime"] = S(new Date(Date.now() - 3 * 86400000 - 4 * 3600000).toISOString(),
+    { friendly_name: "Mini PC Uptime", device_class: "timestamp" });
+  // il disco di sistema, pubblicato sotto TRE punti di mount identici
+  for (const mount of ["hostroot", "etc_hostname", "etc_hosts"]) {
+    mk(mount + "_utilizzo_disco", 80.7, Object.assign({ friendly_name: "Mini PC /" + mount + " utilizzo disco" }, M("%")));
+    mk(mount + "_disco_utilizzato", 168.8, Object.assign({ friendly_name: "Mini PC /" + mount + " disco utilizzato" }, size("GiB")));
+    mk(mount + "_disco_libero", 40.5, Object.assign({ friendly_name: "Mini PC /" + mount + " disco libero" }, size("GiB")));
+    mk(mount + "_disk_size", 220.6, Object.assign({ friendly_name: "Mini PC /" + mount + " disk size" }, size("GiB")));
+  }
+  mk("mnt_dati_utilizzo_disco", 16.5, Object.assign({ friendly_name: "Mini PC /mnt/dati utilizzo disco" }, M("%")));
+  mk("mnt_dati_disk_size", 899.2, Object.assign({ friendly_name: "Mini PC /mnt/dati disk size" }, size("GiB")));
+  // rete: eno1 vera, lo e br- interne
+  mk("eno1_rx", 12.5, Object.assign({ friendly_name: "Mini PC eno1 RX" }, rate("Mbit/s")));
+  mk("eno1_tx", 2.0, Object.assign({ friendly_name: "Mini PC eno1 TX" }, rate("Mbit/s")));
+  mk("lo_rx", 0, Object.assign({ friendly_name: "Mini PC lo RX" }, rate("Mbit/s")));
+  mk("lo_tx", 0, Object.assign({ friendly_name: "Mini PC lo TX" }, rate("Mbit/s")));
+  mk("br_abc_rx", 0, Object.assign({ friendly_name: "Mini PC br-abc RX" }, rate("Mbit/s")));
+  mk("br_abc_tx", 0, Object.assign({ friendly_name: "Mini PC br-abc TX" }, rate("Mbit/s")));
+  // I/O: sda aggregato piu' le sue partizioni
+  for (const dev of ["sda", "sda1", "sda2"]) {
+    mk(dev + "_disk_read", 0.5, Object.assign({ friendly_name: "Mini PC " + dev + " disk read" }, rate("MB/s")));
+    mk(dev + "_disk_write", 1.5, Object.assign({ friendly_name: "Mini PC " + dev + " disk write" }, rate("MB/s")));
+  }
+  const allIds = Object.keys(states).filter((id) => id.startsWith(P2));
+  el._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
+    entityDevice: Object.fromEntries(allIds.map((id) => [id, D])),
+    deviceEntities: { [D]: allIds }, deviceName: { [D]: "Mini PC" }, orphans: [] };
+
+  const card48 = { id: "sy1", type: "system", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {}, device: D, temps: [], disks: [] };
+  const auto = el._systemAuto(card48);
+
+  ok("trova il carico della CPU, non quello della GPU",
+     auto.cpu === P2 + "utilizzo_della_cpu", String(auto.cpu));
+  ok("e la GPU la tiene a parte", auto.gpu === P2 + "intel_gpu_processor_usage", String(auto.gpu));
+  ok("il load average non viene scambiato per una percentuale",
+     auto.cpu !== P2 + "carico_cpu");
+  ok("trova memoria usata e libera",
+     auto.memUsed === P2 + "uso_della_memoria" && auto.memFree === P2 + "memoria_libera",
+     auto.memUsed + " / " + auto.memFree);
+  ok("lo swap non viene scambiato per memoria",
+     auto.memUsed !== P2 + "swap_utilizzato" && auto.swap === P2 + "swap_utilizzato");
+  ok("la memoria dei container non viene scambiata per quella di sistema",
+     auto.memUsed !== P2 + "memoria_utilizzata_dai_container");
+  ok("trova i container e l'accensione",
+     auto.containers === P2 + "containers_active" && auto.uptime === P2 + "uptime");
+  ok("trova tutte le temperature", auto.temps.length === 3, String(auto.temps.length));
+
+  // --- il difetto vero: lo stesso disco pubblicato sotto tre mount
+  ok("lo stesso disco sotto tre mount viene contato una volta sola",
+     auto.disks.length === 2, JSON.stringify(auto.disks.map((d) => d.name)));
+  ok("e resta quello pieno per primo",
+     Math.abs(auto.disks[0].pct - 80.7) < 0.01, String(auto.disks[0].pct));
+  ok("col suo spazio, letto dalle entità appaiate",
+     Math.abs(auto.disks[0].size - 220.6) < 0.01 && Math.abs(auto.disks[0].free - 40.5) < 0.01,
+     JSON.stringify([auto.disks[0].size, auto.disks[0].free]));
+  ok("il nome del disco perde il nome dell'apparecchio e il suffisso",
+     /hostroot/.test(auto.disks[0].name) && !/Mini PC/.test(auto.disks[0].name)
+     && !/utilizzo disco/i.test(auto.disks[0].name), auto.disks[0].name);
+
+  // --- rete e I/O
+  ok("delle interfacce resta solo quella vera",
+     auto.net.length === 1 && auto.net[0].rx === P2 + "eno1_rx",
+     JSON.stringify(auto.net.map((n) => n.label)));
+  ok("loopback e ponti docker restano fuori: non sono traffico",
+     !auto.net.some((n) => /lo|br/.test(n.key.replace(P2, ""))),
+     JSON.stringify(auto.net.map((n) => n.key)));
+  ok("delle code disco resta il disco, non le sue partizioni",
+     auto.io.length === 1 && auto.io[0].key === P2 + "sda",
+     JSON.stringify(auto.io.map((n) => n.key)));
+
+  // --- percentuale di memoria
+  const slots = el._systemSlots(card48);
+  ok("la memoria in percentuale si ricava da usata e libera",
+     Math.abs(el._sysMemPct(slots) - 25) < 0.01, String(el._sysMemPct(slots)));
+  ok("e col totale dichiarato viene lo stesso",
+     Math.abs(el._sysMemPct({ memUsed: P2 + "uso_della_memoria", memTotal: null,
+       memFree: P2 + "memoria_libera" }) - 25) < 0.01);
+  ok("senza memoria non si inventa una percentuale",
+     el._sysMemPct({ memUsed: null, memFree: null, memTotal: null }) === null);
+
+  // --- soglie
+  ok("sotto la soglia è verde", el._sysLevel(10, 80, 95).k === "ok");
+  ok("in mezzo è ambra", el._sysLevel(85, 80, 95).k === "warn");
+  ok("sopra è rossa", el._sysLevel(99, 80, 95).k === "alarm");
+  ok("un valore che non c'è non è un allarme", el._sysLevel(null, 80, 95).k === "none");
+
+  // --- il disegno
+  const sec48 = { id: "sy", title: "Sistema", icon: "mdi:server", accent: "#00e5ff", items: [card48] };
+  const h48 = el._renderCard(card48, sec48);
+  ok("la card disegna gli anelli", (h48.match(/class="sys-ring"/g) || []).length >= 3,
+     String((h48.match(/class="sys-ring"/g) || []).length));
+  ok("dice da quanto è acceso", /acceso da 3 giorni/.test(h48), "");
+  ok("mostra i container", /container/.test(h48) && />5</.test(h48));
+  ok("elenca i dischi una volta ciascuno",
+     (h48.match(/class="sys-row"/g) || []).length === 2,
+     String((h48.match(/class="sys-row"/g) || []).length));
+  ok("il disco all'80,7% è oltre la soglia di attenzione", /#ffd166/.test(h48));
+  ok("la temperatura più alta è quella mostrata nell'anello",
+     /Package id 0/.test(h48));
+  ok("sistema: nessun undefined", !/>undefined</.test(h48) && !/undefined/.test(h48),
+     (h48.match(/.{40}undefined.{20}/) || [""])[0]);
+  ok("sistema: div bilanciati",
+     (h48.match(/<div/g) || []).length === (h48.match(/<\/div>/g) || []).length);
+
+  // --- senza apparecchio non è una card vuota, è una card che lo dice
+  const h48b = el._renderCard(Object.assign({}, card48, { device: null }), sec48);
+  ok("senza apparecchio la card spiega cosa fare",
+     /Scegli l'apparecchio/.test(h48b) && !/sys-ring/.test(h48b));
+
+  // --- la scelta a mano vince su quella trovata
+  const manual = Object.assign({}, card48, { cpu: P2 + "intel_gpu_processor_usage" });
+  ok("una casella scritta a mano vince su quella trovata",
+     el._systemSlots(manual).cpu === P2 + "intel_gpu_processor_usage");
+  const fewTemps = Object.assign({}, card48, { temps: [P2 + "package_id_0_temperatura"] });
+  ok("un elenco di temperature scritto a mano vince",
+     el._systemSlots(fewTemps).temps.length === 1);
+  ok("un elenco vuoto vuol dire «cercale tu», non «non mostrarne nessuna»",
+     el._systemSlots(Object.assign({}, card48, { temps: [] })).temps.length === 3);
+  const oneDisk = Object.assign({}, card48, { disks: [P2 + "mnt_dati_utilizzo_disco"] });
+  ok("e lo stesso per i dischi",
+     el._systemSlots(oneDisk).disks.length === 1
+     && el._systemSlots(oneDisk).disks[0].entity === P2 + "mnt_dati_utilizzo_disco",
+     JSON.stringify(el._systemSlots(oneDisk).disks.map((d) => d.entity)));
+
+  // --- l'editor
+  el._dashboard.pages[0].sections = [sec48];
+  el._selected = { kind: "card", sectionId: "sy", itemId: "sy1" };
+  el._editing = true;
+  el._signature = ""; el.render();
+  const e48 = el.innerHTML;
+  ok("l'editor fa scegliere l'apparecchio", /data-sys-device/.test(e48));
+  ok("offre di riscrivere ogni casella a mano",
+     (e48.match(/data-sys-slot=/g) || []).length >= 7,
+     String((e48.match(/data-sys-slot=/g) || []).length));
+  ok("e dice cosa ha trovato da solo dentro l'opzione automatica",
+     /trovato da solo: Mini PC Utilizzo della CPU/.test(e48));
+  ok("le temperature si spengono una per una", /data-sys-temp=/.test(e48));
+  ok("i dischi pure", /data-sys-disk=/.test(e48));
+  ok("le soglie sono otto: attenzione e allarme per quattro grandezze",
+     (e48.match(/data-sys-thr=/g) || []).length === 8,
+     String((e48.match(/data-sys-thr=/g) || []).length));
+  ok("editor sistema: nessun undefined", !/>undefined</.test(e48));
+
+  el._editing = false; el._selected = savedSel; el._dashboard = savedDash48;
+  el._registry = savedReg;
+  for (const id of allIds) delete states[id];
+  delete states[P2 + "uptime"];
+  ok("stato ripristinato dopo la sezione 48", !states[P2 + "eno1_rx"]);
+}
+
                   console.log("\n== 47. L'ANALISI ECONOMICA NEL TEMPO ==");
                   {
                     const savedWS2 = el._hass.callWS;

@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 17, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 18, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -857,8 +857,61 @@ dash17 = schema.normalize_dashboard({"version": 16, "pages": [{"id": "p", "title
     "sections": [{"id": "s", "title": "S", "items": [
         {"id": "ec", "type": "economy", "battery_in": "sensor.carica",
          "battery_out": "sensor.scarica"}]}]}]})
-assert dash17["version"] == 17, dash17["version"]
+# la normalizzazione porta sempre all'ultima versione: qui si verifica che i
+# due contatori sopravvivano alla migrazione, non a quale numero si fermi
+assert dash17["version"] == schema.SCHEMA_VERSION, dash17["version"]
 kept = dash17["pages"][0]["sections"][0]["items"][0]
 assert kept["battery_in"] == "sensor.carica", kept
 assert kept["battery_out"] == "sensor.scarica", kept
 print("schema: contatori della batteria nella card economica ok")
+
+
+# ---------------------------------------------------------------------------
+# v18: la card Sistema.
+#
+# Si sceglie un APPARECCHIO e la card trova il resto. Ogni casella ha pero' la
+# sua scrittura a mano, e una lista vuota vuol dire "cercale tu" e non "non
+# mostrarne nessuna": una lista vuota che significasse zero righe renderebbe
+# impossibile tornare indietro dall'editor.
+def _sys(**kw):
+    item = {"id": "sy", "type": "system"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+sy = _sys()
+assert sy["device"] is None
+for key in ("cpu", "gpu", "mem_used", "mem_free", "mem_total", "swap",
+            "uptime", "containers"):
+    assert key in sy and sy[key] is None, key
+assert sy["temps"] == [] and sy["disks"] == []
+# le soglie di fabbrica
+assert (sy["warn_cpu"], sy["alarm_cpu"]) == (80.0, 95.0), sy["warn_cpu"]
+assert (sy["warn_disk"], sy["alarm_disk"]) == (80.0, 92.0)
+assert (sy["warn_temp"], sy["alarm_temp"]) == (70.0, 85.0)
+# una soglia esplicitamente assente resta assente: e' diverso da zero, che
+# accenderebbe l'allarme sempre
+assert _sys(warn_cpu=None)["warn_cpu"] is None
+assert _sys(warn_cpu=0)["warn_cpu"] == 0.0
+# valori fuori scala vengono riportati dentro, spazzatura torna al default
+assert _sys(alarm_temp=9999)["alarm_temp"] == 200.0
+assert _sys(alarm_temp="caldissimo")["alarm_temp"] == 85.0
+# le caselle vogliono un entity_id, non una stringa qualunque
+assert _sys(cpu="sensor.carico")["cpu"] == "sensor.carico"
+for junk in ("carico", "", None, 7, [], {"a": 1}):
+    assert _sys(cpu=junk)["cpu"] is None, junk
+# le liste tengono solo entity_id, con un tetto
+assert _sys(temps=["sensor.a", "nonvalido", 3, "sensor.b"])["temps"] == ["sensor.a", "sensor.b"]
+assert len(_sys(disks=["sensor.d%d" % i for i in range(60)])["disks"]) == 40
+# e sopravvivono a un giro completo di salvataggio
+dash18 = schema.normalize_dashboard({"version": 17, "pages": [{"id": "p", "title": "P",
+    "sections": [{"id": "s", "title": "S", "items": [
+        {"id": "sy", "type": "system", "device": "abc123",
+         "cpu": "sensor.cpu", "temps": ["sensor.t1"], "warn_disk": 90}]}]}]})
+assert dash18["version"] == 18, dash18["version"]
+kept18 = dash18["pages"][0]["sections"][0]["items"][0]
+assert kept18["device"] == "abc123"
+assert kept18["cpu"] == "sensor.cpu"
+assert kept18["temps"] == ["sensor.t1"]
+assert kept18["warn_disk"] == 90.0
+print("schema: card Sistema (v18) ok")

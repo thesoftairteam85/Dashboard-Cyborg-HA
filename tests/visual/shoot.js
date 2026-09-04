@@ -1506,14 +1506,18 @@ const DEFAULT_DASH = {
      ch.svgW + " vs " + ch.cardW);
   ok("non provoca scorrimento orizzontale", ch.scrollW <= ch.winW + 1,
      ch.scrollW + " vs " + ch.winW);
+  // Quanti giorni del mese sono passati OGGI: una soglia fissa renderebbe la
+  // prova vera in agosto e falsa il 4 settembre.
+  const daysSoFar = new Date().getDate();
   ok("c'è una colonna per ogni giorno del mese finora",
-     ch.hits.length >= 27 && ch.hits.length <= 31, String(ch.hits.length));
+     ch.hits.length === daysSoFar, ch.hits.length + " vs " + daysSoFar);
   ok("ogni colonna è toccabile per intero, non solo la barra",
      ch.hits.every((h) => h.w >= 6 && h.h > 40), JSON.stringify(ch.hits[0]));
   ok("le barre del prelievo ci sono davvero, con un'altezza misurabile",
-     ch.grid.length >= 20 && ch.grid.every((b) => b.h >= 1),
-     ch.grid.length + " barre");
-  ok("e quelle della produzione", ch.prod.length >= 20, String(ch.prod.length));
+     ch.grid.length === daysSoFar && ch.grid.every((b) => b.h >= 1),
+     ch.grid.length + " barre su " + daysSoFar);
+  ok("e quelle della produzione", ch.prod.length === daysSoFar,
+     ch.prod.length + " vs " + daysSoFar);
   ok("prelievo e produzione non si sovrappongono: sono due barre affiancate",
      ch.grid[0].x + ch.grid[0].w <= ch.prod[0].x + 0.6,
      JSON.stringify([ch.grid[0], ch.prod[0]]));
@@ -1556,7 +1560,7 @@ const DEFAULT_DASH = {
      ecoStep.nav.trim() !== ch.nav.trim(), ch.nav + " -> " + ecoStep.nav);
   ok("e ora si può tornare avanti", ecoStep.fwdDisabled === false);
   ok("il mese precedente è completo, non troncato a oggi",
-     ecoStep.bars >= 28, String(ecoStep.bars));
+     ecoStep.bars >= 28 && ecoStep.bars > daysSoFar, String(ecoStep.bars));
   ok("la navigazione vive in memoria, non nel dashboard salvato",
      ecoStep.offset === 1 && ecoStep.saved === undefined, JSON.stringify(ecoStep));
 
@@ -1654,6 +1658,181 @@ const DEFAULT_DASH = {
      pch.eur.every((e) => e.right <= pch.winW + 1), JSON.stringify(pch.eur.map((e) => e.right)));
   await phoneEco.screenshot({ path: path.resolve(__dirname, "74-phone-eco-history.png") });
   await phoneEco.close();
+
+  console.log("\n== CARD SISTEMA ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, system: true });
+  await page.waitForTimeout(1400);
+
+  const sys = await page.evaluate(() => {
+    const card = document.querySelector('[data-card-id="syscard"]');
+    const box = card ? card.getBoundingClientRect() : null;
+    const rings = Array.from(document.querySelectorAll(".sys-ring")).map((r) => {
+      const svg = r.querySelector("svg");
+      const arc = r.querySelector(".sr-arc");
+      const val = r.querySelector(".sr-val");
+      const b = svg.getBoundingClientRect();
+      const cs = arc ? getComputedStyle(arc) : null;
+      return { label: (r.querySelector("strong") || {}).textContent || "",
+        value: (val || {}).textContent || "",
+        color: cs ? cs.stroke : "",
+        dash: cs ? parseFloat(cs.strokeDasharray) : 0,
+        offset: cs ? parseFloat(cs.strokeDashoffset) : 0,
+        w: Math.round(b.width), h: Math.round(b.height),
+        right: Math.round(b.right) };
+    });
+    const rows = Array.from(document.querySelectorAll(".sys-row")).map((r) => {
+      const bar = r.querySelector(".sy-bar i");
+      const b = r.getBoundingClientRect();
+      return { k: (r.querySelector(".sy-k") || {}).textContent.trim(),
+        v: (r.querySelector(".sy-v") || {}).textContent.trim(),
+        barW: bar ? Math.round(bar.getBoundingClientRect().width) : 0,
+        trackW: bar ? Math.round(bar.parentElement.getBoundingClientRect().width) : 0,
+        color: bar ? getComputedStyle(bar).backgroundColor : "",
+        right: Math.round(b.right) };
+    });
+    const chips = Array.from(document.querySelectorAll(".sys-chip")).map((c) => ({
+      t: c.textContent.trim(), color: getComputedStyle(c.querySelector("i")).backgroundColor }));
+    const io = Array.from(document.querySelectorAll(".sys-io")).map((r) => r.textContent.replace(/\s+/g, " ").trim());
+    return { hasCard: !!card, cardW: box ? Math.round(box.width) : 0,
+      cardRight: box ? Math.round(box.right) : 0,
+      rings, rows, chips, io,
+      top: (document.querySelector(".sys-top") || {}).textContent || "",
+      badge: (document.querySelector(".sys-badge") || {}).textContent || "",
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth };
+  });
+
+  ok("la card Sistema è disegnata", sys.hasCard && sys.rings.length >= 3,
+     JSON.stringify(sys.rings.map((r) => r.label)));
+  ok("gli anelli hanno una dimensione vera, non zero",
+     sys.rings.every((r) => r.w >= 60 && r.h >= 60), JSON.stringify(sys.rings.map((r) => [r.w, r.h])));
+  ok("e stanno tutti dentro la card",
+     sys.rings.every((r) => r.right <= sys.cardRight + 1),
+     JSON.stringify([sys.cardRight, sys.rings.map((r) => r.right)]));
+  ok("l'arco è disegnato in proporzione al valore, non a caso", (() => {
+    const cpu = sys.rings.find((r) => /CPU/.test(r.label));
+    if (!cpu || !cpu.dash) return false;
+    // 7,5 % => l'arco coperto e' il 7,5% della circonferenza
+    const shown = 1 - cpu.offset / cpu.dash;
+    return Math.abs(shown - 0.075) < 0.01;
+  })(), JSON.stringify(sys.rings.find((r) => /CPU/.test(r.label))));
+  ok("il disco all'80,7% è ambra, non verde", (() => {
+    const d = sys.rings.find((r) => /DISCO/.test(r.label));
+    return d && /255,\s*209,\s*102/.test(d.color);
+  })(), JSON.stringify(sys.rings.find((r) => /DISCO/.test(r.label))));
+  ok("la CPU al 7,5% è verde", (() => {
+    const c = sys.rings.find((r) => /CPU/.test(r.label));
+    return c && /6,\s*214,\s*160/.test(c.color);
+  })(), JSON.stringify(sys.rings.find((r) => /CPU/.test(r.label))));
+  ok("la temperatura a 71 °C è oltre la soglia di attenzione", (() => {
+    const t = sys.rings.find((r) => /TEMPERATURA/.test(r.label));
+    return t && /255,\s*209,\s*102/.test(t.color);
+  })(), JSON.stringify(sys.rings.find((r) => /TEMPERATURA/.test(r.label))));
+  ok("dice da quanto è acceso", /acceso da \d+ giorn/.test(sys.top), sys.top);
+  ok("e quanti container gira", /5/.test(sys.badge) && /container/.test(sys.badge), sys.badge);
+
+  ok("lo stesso disco sotto tre mount compare una volta sola",
+     sys.rows.length === 2, JSON.stringify(sys.rows.map((r) => r.k)));
+  ok("la barra del disco è lunga in proporzione al riempimento", (() => {
+    const r = sys.rows.find((x) => /80/.test(x.v));
+    return r && r.trackW > 0 && Math.abs(r.barW / r.trackW - 0.807) < 0.03;
+  })(), JSON.stringify(sys.rows));
+  ok("le righe dei dischi non escono dalla card",
+     sys.rows.every((r) => r.right <= sys.cardRight + 1), JSON.stringify(sys.rows.map((r) => r.right)));
+  ok("le temperature secondarie diventano pastiglie colorate",
+     sys.chips.length === 3, JSON.stringify(sys.chips.map((c) => c.t)));
+  ok("rete e code disco mostrano due direzioni ciascuna",
+     sys.io.length === 2 && sys.io.every((t) => /\d/.test(t)), JSON.stringify(sys.io));
+  ok("la card non provoca scorrimento orizzontale",
+     sys.scrollW <= sys.winW + 1, sys.scrollW + " vs " + sys.winW);
+  await page.screenshot({ path: path.resolve(__dirname, "76-system.png") });
+
+  // --- l'editor: ogni casella riscrivibile, e la scelta a mano che vince
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, system: true, selectSystem: true });
+  await page.evaluate(() => { const el = window.__EL__; el._editing = true; el._signature = ""; el.render(); });
+  await page.waitForTimeout(900);
+
+  const sysEd = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const slots = Array.from(document.querySelectorAll("[data-sys-slot]")).map((x) => ({
+      key: x.getAttribute("data-sys-slot"), auto: x.options[0].textContent.trim(),
+      n: x.options.length, right: Math.round(x.getBoundingClientRect().right) }));
+    const panel = document.querySelector(".editor");
+    // Misurato PRIMA del clic: il tocco ridisegna il pannello, e un nodo
+    // staccato dal documento restituisce un rettangolo di zeri.
+    const panelRight = panel ? Math.round(panel.getBoundingClientRect().right) : 0;
+    const eyes = document.querySelectorAll("[data-sys-temp]").length;
+    const disks = document.querySelectorAll("[data-sys-disk]").length;
+    const thr = document.querySelectorAll("[data-sys-thr]").length;
+    // spegnere una temperatura: la lista trovata da sola diventa una lista tua
+    const before = (el._findCard("syscard").temps || []).length;
+    document.querySelector("[data-sys-temp]").click();
+    await new Promise((r) => setTimeout(r, 400));
+    const card = el._findCard("syscard");
+    return { slots, eyes, disks, thr, before, after: (card.temps || []).length,
+      shown: el._systemSlots(card).temps.length, panelRight };
+  });
+  ok("l'editor offre una casella per ogni lettura principale",
+     sysEd.slots.length >= 7, String(sysEd.slots.length));
+  ok("ognuna dice cosa è stato trovato da solo",
+     sysEd.slots.every((x) => /trovato da solo/.test(x.auto)),
+     JSON.stringify(sysEd.slots.map((x) => x.auto)));
+  ok("e nessuna esce dal pannello",
+     sysEd.slots.every((x) => x.right <= sysEd.panelRight + 1),
+     JSON.stringify([sysEd.panelRight, sysEd.slots.map((x) => x.right)]));
+  ok("le temperature e i dischi hanno un occhio ciascuno",
+     sysEd.eyes === 3 && sysEd.disks === 2, sysEd.eyes + " / " + sysEd.disks);
+  ok("otto soglie: attenzione e allarme per quattro grandezze", sysEd.thr === 8, String(sysEd.thr));
+  ok("spegnendone una la lista trovata diventa una lista scritta da te",
+     sysEd.before === 0 && sysEd.after === 2 && sysEd.shown === 2,
+     JSON.stringify(sysEd));
+  await page.screenshot({ path: path.resolve(__dirname, "77-system-editor.png") });
+
+  // --- sul telefono
+  const phoneSys = await browser.newPage({ viewport: { width: 390, height: 1200 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  phoneSys.on("pageerror", (e) => errors.push("PHONE-SYS: " + e.message));
+  await phoneSys.goto("http://127.0.0.1:8899/harness.html");
+  await phoneSys.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await phoneSys.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await phoneSys.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, system: true });
+  await phoneSys.waitForTimeout(1400);
+  const psys = await phoneSys.evaluate(() => {
+    const rings = Array.from(document.querySelectorAll(".sys-ring svg")).map((r) => {
+      const b = r.getBoundingClientRect();
+      return { w: Math.round(b.width), right: Math.round(b.right), top: Math.round(b.top) };
+    });
+    const vals = Array.from(document.querySelectorAll(".sr-val")).map((t) =>
+      Math.round(parseFloat(getComputedStyle(t).fontSize)));
+    const rows = Array.from(document.querySelectorAll(".sys-row")).map((r) => ({
+      right: Math.round(r.getBoundingClientRect().right),
+      clipped: Array.from(r.children).some((c) => c.scrollWidth > c.clientWidth + 1) }));
+    return { rings, vals, rows, winW: window.innerWidth,
+      scrollW: document.documentElement.scrollWidth,
+      lines: new Set(rings.map((r) => r.top)).size };
+  });
+  ok("telefono: gli anelli restano leggibili",
+     psys.rings.length >= 3 && psys.rings.every((r) => r.w >= 60),
+     JSON.stringify(psys.rings.map((r) => r.w)));
+  ok("telefono: si dispongono su più righe invece di stringersi",
+     psys.lines >= 2, String(psys.lines));
+  ok("telefono: i numeri dentro l'anello non diventano illeggibili",
+     psys.vals.every((v) => v >= 12), JSON.stringify(psys.vals));
+  ok("telefono: niente esce dallo schermo",
+     psys.rings.every((r) => r.right <= psys.winW + 1)
+     && psys.rows.every((r) => r.right <= psys.winW + 1),
+     JSON.stringify([psys.winW, psys.rings.map((r) => r.right)]));
+  ok("telefono: nessuna riga dei dischi troncata",
+     psys.rows.every((r) => !r.clipped), JSON.stringify(psys.rows));
+  ok("telefono: nessuno scorrimento orizzontale",
+     psys.scrollW <= psys.winW + 1, psys.scrollW + " vs " + psys.winW);
+  await phoneSys.screenshot({ path: path.resolve(__dirname, "78-phone-system.png") });
+  await phoneSys.close();
 
   console.log("\n== CONTATORE GENERALE ==");
   await page.goto("http://127.0.0.1:8899/harness.html");

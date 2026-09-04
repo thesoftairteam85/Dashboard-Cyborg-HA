@@ -4,6 +4,62 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.47.0] - 2026-09-04
+
+Card **Sistema**: un computer sorvegliato per quello che è, non per le
+grandezze elettriche che non ha.
+
+### Perché una card a sé e non il Monitoraggio
+Il monitoraggio è costruito su grandezze normate — 230 V ±10% secondo EN 50160,
+soglie di temperatura sui quadri. La RAM in MiB e un disco pieno all'80% non
+stanno in quella tassonomia: infilarceli peggiora entrambe le card, ed è il
+motivo per cui il mini PC lì dentro sembrava «un po' random».
+
+### Si sceglie l'apparecchio, non novanta entità
+La card parte dall'oggetto giusto: **un dispositivo di Home Assistant**. Scelto
+quello, trova da sola fra le sue entità carico CPU e GPU, memoria usata/libera/
+totale, swap, temperature, dischi, rete, code di lettura e scrittura, container
+attivi e da quanto è accesa la macchina.
+
+**Trovare non è decidere.** Ogni casella ha la sua tendina, e l'opzione
+automatica scrive nero su bianco *cosa* ha trovato («trovato da solo: Utilizzo
+della CPU»), così si vede se ha preso la cosa giusta prima di fidarsi.
+Temperature e dischi si spengono uno per uno con un occhio: al primo tocco la
+lista trovata diventa una lista tua, e un elenco vuoto torna a significare
+«cercale tu» invece di «non mostrarne nessuna» — altrimenti dall'editor non si
+tornerebbe più indietro.
+
+### Le trappole di un vero server, gestite
+- **Lo stesso disco sotto tre punti di mount.** In un container `/etc/hosts`,
+  `/etc/hostname` e `/etc/resolv.conf` sono legami al disco di sistema: senza
+  deduplica la card elencava quattro volte lo stesso 80,7 %. Due mount con
+  dimensione e occupato identici sono lo stesso disco, e vengono contati una
+  volta sola.
+- **Loopback e ponti Docker non sono traffico**: `lo`, `br-*`, `veth*` restano
+  fuori dalla rete. Sono la macchina che parla con se stessa.
+- **Le partizioni ripetono il disco che le contiene**: se c'è `sda`, allora
+  `sda1` e `sda2` sono la stessa coda vista in due punti. Resta l'aggregato.
+- **Il load average non è una percentuale**: `Carico CPU 0.03` è un numero di
+  processi, e non viene scambiato per `Utilizzo della CPU 7,5 %`.
+- **Swap e memoria dei container non sono memoria di sistema.**
+- **La percentuale di memoria** si ricava dal totale quando c'è, altrimenti da
+  usata + libera: è la stessa cosa, ed è meglio che dichiarare «non
+  disponibile» un dato che si ha sotto un'altra forma.
+
+### Soglie tue
+Attenzione e allarme per CPU, memoria, disco e temperatura — verde, ambra,
+rossa. Sono valori, non verità: un disco al 90 % su una macchina che scrive log
+è normale, su un database no. Una soglia lasciata vuota **non è zero**: zero
+accenderebbe l'allarme sempre.
+
+### Verificato
+- 1200 asserzioni nella suite frontend, **443 misurate** in Chromium headless:
+  che l'arco dell'anello copra davvero il 7,5 % della circonferenza per un
+  valore di 7,5, che il disco all'80,7 % sia ambra e la CPU al 7,5 % verde,
+  che la barra sia lunga l'80,7 % della sua pista, che sul telefono gli anelli
+  vadano a capo invece di stringersi fino a diventare illeggibili.
+- Schema v18, con la migrazione provata in andata e ritorno.
+
 ## [0.46.0] - 2026-08-30
 
 Il contatore generale, e i grafici che smettono di mescolare megabyte e megabit.

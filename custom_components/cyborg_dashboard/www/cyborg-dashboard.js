@@ -861,6 +861,7 @@ const CARD_TYPES = [
   { k: "notifications", l: "Notifiche", solo: true, d: "Avvisi di Home Assistant e aggiornamenti disponibili." },
   { k: "people", l: "Presenze", solo: true, d: "Chi è in casa e chi è fuori." },
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
+  { k: "system", l: "Sistema", solo: true, d: "Un computer sorvegliato: CPU, memoria, temperature, dischi, rete. Scegli l'apparecchio, il resto lo trova da sé." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
   { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
@@ -1196,8 +1197,8 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "camera", "economy", "lights", "irrigation", "trend", "room", "ev", "comfort",
-  "thermostat"]);
+  "monitor", "system", "camera", "economy", "lights", "irrigation", "trend", "room", "ev",
+  "comfort", "thermostat"]);
 
 const COMPOSITE_META = {
   comfort:       ["Temperature", "Sensori stanza per stanza", "mdi:home-thermometer", "xl"],
@@ -1211,6 +1212,7 @@ const COMPOSITE_META = {
   notifications: ["Notifiche", "Avvisi di sistema", "mdi:bell-outline", "md"],
   people:        ["Presenze", "Chi è in casa", "mdi:account-group", "sm"],
   monitor:       ["Monitoraggio", "Diagnostica impianto", "mdi:gauge-full", "lg"],
+  system:        ["Sistema", "Salute di un computer", "mdi:server", "lg"],
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
   thermostat:    ["Controllo temperatura", "Termostati e clima", "mdi:thermostat-box", "lg"],
   economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
@@ -6892,6 +6894,356 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+/* ======================================================================
+   * CARD SISTEMA — un computer, non un impianto elettrico
+   *
+   * Il monitoraggio elettrico e' costruito su grandezze normate: 230 V ±10%
+   * secondo EN 50160, soglie di temperatura sui quadri. La RAM in MiB e un
+   * disco pieno all'80% non stanno in quella tassonomia, e infilarceli
+   * peggiora entrambe le card.
+   *
+   * Questa card parte invece dall'oggetto giusto: **un apparecchio**. Se ne
+   * sceglie uno, e la card trova da sola CPU, memoria, temperature, dischi,
+   * rete e I/O fra le sue entita'. Ma trovare non e' decidere: ogni casella
+   * si puo' riscrivere a mano, e una lista scelta a mano vince sempre su
+   * quella trovata.
+   * ==================================================================== */
+
+  /** Le entita' dell'apparecchio scelto. */
+  _systemEntities(item) {
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+    const reg = this._registry || {};
+    // Le entita' di servizio NON vengono scartate qui, al contrario delle
+    // altre card: su un server la diagnostica e' esattamente il contenuto.
+    return (item.device && (reg.deviceEntities || {})[item.device]) || [];
+  }
+
+  /** Il nome dell'apparecchio, tolto dal davanti di ogni sua entita'. */
+  _systemShortName(item, id) {
+    const st = this._hass.states[id];
+    const full = (st && st.attributes.friendly_name) || id;
+    const dev = ((this._registry || {}).deviceName || {})[item.device] || "";
+    let out = full;
+    if (dev && out.toLowerCase().startsWith(dev.toLowerCase())) out = out.slice(dev.length);
+    return out.replace(/^[\s·—-]+/, "").trim() || full;
+  }
+
+  /**
+   * Which entity plays which part.
+   *
+   * Matching is done on the entity_id AND on the friendly name, because
+   * Glances translates the names but not the ids: "Uso della memoria" has the
+   * id `..._uso_della_memoria`, but a machine set to English would say
+   * "Memory used". Both spellings are in the patterns.
+   */
+  _systemAuto(item) {
+    const ids = this._systemEntities(item);
+    const st = (id) => this._hass.states[id];
+    const hay = (id) => (id + " " + ((st(id) && st(id).attributes.friendly_name) || "")).toLowerCase();
+    const num = (id) => {
+      const x = st(id);
+      return x && Number.isFinite(parseFloat(x.state)) ? parseFloat(x.state) : null;
+    };
+    const unit = (id) => ((st(id) && st(id).attributes.unit_of_measurement) || "");
+    const dc = (id) => ((st(id) && st(id).attributes.device_class) || "");
+    const isPct = (id) => unit(id) === "%" && num(id) !== null;
+    const isSize = (id) => dc(id) === "data_size" && num(id) !== null;
+    const isRate = (id) => dc(id) === "data_rate" && num(id) !== null;
+    const first = (test) => ids.find((id) => test(id)) || null;
+
+    const cpu = first((id) => isPct(id) && /cpu|processor/.test(hay(id))
+      && !/gpu/.test(hay(id)) && /utilizzo|usage|uso|percent/.test(hay(id)))
+      || first((id) => isPct(id) && /cpu|processor/.test(hay(id)) && !/gpu/.test(hay(id)));
+    const gpu = first((id) => isPct(id) && /gpu/.test(hay(id))
+      && /utilizzo|usage|uso|processor/.test(hay(id)));
+    const memRe = /memor|\bram\b|\bmem\b/;
+    const memUsed = first((id) => isSize(id) && memRe.test(hay(id))
+      && /uso|used|utilizzat/.test(hay(id)) && !/swap|container|cache/.test(hay(id)));
+    const memFree = first((id) => isSize(id) && memRe.test(hay(id))
+      && /liber|free|available|disponib/.test(hay(id)) && !/swap/.test(hay(id)));
+    const memTotal = first((id) => isSize(id) && memRe.test(hay(id))
+      && /total/.test(hay(id)) && !/swap/.test(hay(id)));
+    const swap = first((id) => isSize(id) && /swap/.test(hay(id))
+      && /uso|used|utilizzat/.test(hay(id)));
+    const containers = first((id) => /container/.test(hay(id)) && !unit(id) && num(id) !== null);
+    const containersMem = first((id) => isSize(id) && /container/.test(hay(id)));
+    const uptime = first((id) => dc(id) === "timestamp" && /uptime|avvio|boot/.test(hay(id)));
+
+    const temps = ids.filter((id) => dc(id) === "temperature" && num(id) !== null);
+
+    // --- dischi: la percentuale piena, appaiata alle sue dimensioni.
+    //
+    // Glances pubblica lo stesso volume sotto piu' punti di mount - in un
+    // container /etc/hostname, /etc/hosts e /etc/resolv.conf sono bind mount
+    // dello stesso disco - e senza deduplica la card elencherebbe quattro
+    // volte lo stesso 80,7 %. Si raggruppano per (dimensione, usato): due
+    // mount con gli stessi identici numeri sono lo stesso disco.
+    const DISK_PCT = /(_utilizzo_disco|_disk_usage|_disk_used_percent)$/;
+    const diskRows = [];
+    for (const id of ids) {
+      if (!isPct(id) || !DISK_PCT.test(id)) continue;
+      const key = id.replace(DISK_PCT, "");
+      const near = (suf) => ids.find((o) => o === key + suf) || null;
+      const used = near("_disco_utilizzato") || near("_disk_used");
+      const size = near("_disk_size") || near("_dimensione_disco");
+      const free = near("_disco_libero") || near("_disk_free");
+      diskRows.push({ entity: id, pct: num(id),
+        used: used ? num(used) : null, size: size ? num(size) : null,
+        free: free ? num(free) : null,
+        unit: unit(used || size || free) || "",
+        name: this._systemShortName(item, id)
+          .replace(/\s*(utilizzo disco|disk usage|disk used percent)\s*$/i, "").trim() });
+    }
+    const seen = new Set(), disks = [];
+    for (const d of diskRows) {
+      const sig = [d.size, d.used, d.pct].join("|");
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      disks.push(d);
+    }
+    disks.sort((a, b) => (b.pct || 0) - (a.pct || 0));
+
+    // --- rete e I/O dei dischi: coppie rx/tx e read/write con lo stesso ceppo
+    const pairUp = (rxRe, txRe, keep) => {
+      const out = [];
+      for (const id of ids) {
+        if (!isRate(id) || !rxRe.test(id)) continue;
+        const key = id.replace(rxRe, "");
+        const tx = ids.find((o) => txRe.test(o) && o.replace(txRe, "") === key);
+        if (!tx) continue;
+        const label = this._systemShortName(item, id)
+          .replace(/\s*(rx|tx|disk read|disk write|lettura|scrittura)\s*$/i, "").trim();
+        if (keep && !keep(key, label)) continue;
+        out.push({ key, label, rx: id, tx, unit: unit(id),
+          v: (num(id) || 0) + (num(tx) || 0) });
+      }
+      return out.sort((a, b) => b.v - a.v);
+    };
+    // `lo` e' il loopback e i `br-*` sono ponti interni di Docker: non sono
+    // traffico, sono contabilita' della macchina con se stessa.
+    const net = pairUp(/_rx$/, /_tx$/, (key) => !/_lo$|_br_|_veth|_docker\d*$/.test(key));
+    // Le partizioni ripetono il disco che le contiene: se esiste `sda`, allora
+    // `sda1` e `sda2` sono la stessa coda vista in due punti.
+    const ioAll = pairUp(/_disk_read$/, /_disk_write$/);
+    const stems = new Set(ioAll.map((r) => r.key));
+    const io = ioAll.filter((r) => {
+      const m = /^(.*?)(\d+)$/.exec(r.key);
+      return !(m && stems.has(m[1]));
+    });
+
+    return { cpu, gpu, memUsed, memFree, memTotal, swap, containers, containersMem,
+      uptime, temps, disks, net, io };
+  }
+
+  /**
+   * The card's slots: what was found, with what was chosen by hand on top.
+   *
+   * Auto-detection may suggest; it may never decide. Every slot has a manual
+   * override, and an empty hand-written list means "keep looking by yourself"
+   * rather than "show nothing" - so switching a card to manual and clearing it
+   * cannot leave a card that silently displays an empty box.
+   */
+  _systemSlots(item) {
+    const auto = this._systemAuto(item);
+    const pick = (key, autoValue) => (item[key] ? item[key] : autoValue);
+    const list = (key, autoValue) =>
+      (Array.isArray(item[key]) && item[key].length ? item[key] : autoValue);
+    const temps = list("temps", auto.temps).filter((id) => this._hass.states[id]);
+    const diskIds = Array.isArray(item.disks) && item.disks.length ? item.disks : null;
+    const disks = diskIds
+      ? diskIds.map((id) => auto.disks.find((d) => d.entity === id)
+          || { entity: id, pct: null, used: null, size: null, free: null, unit: "",
+               name: this._systemShortName(item, id) }).filter((d) => this._hass.states[d.entity])
+      : auto.disks;
+    return {
+      cpu: pick("cpu", auto.cpu), gpu: pick("gpu", auto.gpu),
+      memUsed: pick("mem_used", auto.memUsed), memFree: pick("mem_free", auto.memFree),
+      memTotal: pick("mem_total", auto.memTotal), swap: pick("swap", auto.swap),
+      containers: pick("containers", auto.containers),
+      containersMem: auto.containersMem,
+      uptime: pick("uptime", auto.uptime),
+      temps, disks, net: auto.net, io: auto.io,
+      auto,
+    };
+  }
+
+  /** Il numero di un'entita', o null se non c'e' o non e' un numero. */
+  _sysNum(id) {
+    const st = id && this._hass.states[id];
+    if (!st) return null;
+    const n = parseFloat(st.state);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /**
+   * Quanta memoria e' occupata, in percentuale.
+   *
+   * Il totale a volte c'e' e a volte no. Quando manca si ricava da usata piu'
+   * libera: e' la stessa cosa, ed e' meglio che dichiarare "non disponibile"
+   * un dato che si ha sotto un'altra forma.
+   */
+  _sysMemPct(slots) {
+    const used = this._sysNum(slots.memUsed);
+    if (used === null) return null;
+    const total = this._sysNum(slots.memTotal);
+    const free = this._sysNum(slots.memFree);
+    const whole = total !== null ? total : (free !== null ? used + free : null);
+    if (whole === null || whole <= 0) return null;
+    return Math.max(0, Math.min(100, (used / whole) * 100));
+  }
+
+  /** Il colore di una percentuale rispetto alle sue due soglie. */
+  _sysLevel(value, warn, alarm) {
+    if (value === null) return { k: "none", color: "var(--divider-color)" };
+    if (alarm !== null && value >= alarm) return { k: "alarm", color: "#ff6b6b" };
+    if (warn !== null && value >= warn) return { k: "warn", color: "#ffd166" };
+    return { k: "ok", color: "#06d6a0" };
+  }
+
+  /**
+   * The ring, same construction as the state-of-charge one: a stroked circle
+   * with a dash offset, so there is no arc-flag arithmetic to get wrong.
+   */
+  _sysRing(label, value, suffix, level, sub) {
+    const r = 34, c = 2 * Math.PI * r;
+    const pct = value === null ? 0 : Math.max(0, Math.min(100, value));
+    return `<div class="sys-ring">
+      <svg viewBox="0 0 80 80" role="img" aria-label="${esc(label)} ${value === null ? "non disponibile" : Math.round(pct) + "%"}">
+        <circle class="sr-bg" cx="40" cy="40" r="${r}"/>
+        <circle class="sr-arc" cx="40" cy="40" r="${r}" style="stroke:${esc(level.color)};
+          stroke-dasharray:${c.toFixed(1)};stroke-dashoffset:${(c * (1 - pct / 100)).toFixed(1)}"/>
+        <text class="sr-val" x="40" y="44" style="fill:${esc(level.color)}">${
+          value === null ? "—" : (value < 10 ? value.toFixed(1) : Math.round(value))}</text>
+        <text class="sr-unit" x="40" y="56">${esc(suffix)}</text>
+      </svg>
+      <strong>${esc(label)}</strong>
+      ${sub ? `<small>${esc(sub)}</small>` : ""}
+    </div>`;
+  }
+
+  _systemBody(item) {
+    if (!item.device) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:server-network-off"></ha-icon>
+        <span>Scegli l'apparecchio da sorvegliare nell'editor della card: un mini PC, un NAS, il server di Home Assistant. Il resto — CPU, memoria, temperature, dischi, rete — lo trova da sé fra le sue entità.</span></div>`;
+    }
+    const slots = this._systemSlots(item);
+    const devName = ((this._registry || {}).deviceName || {})[item.device] || "";
+    const ids = this._systemEntities(item);
+    if (!ids.length) {
+      return `<div class="ov-empty"><ha-icon icon="mdi:server-off"></ha-icon>
+        <span>${esc(devName || "L'apparecchio scelto")} non ha entità in Home Assistant, oppure il registro non è ancora stato letto.</span></div>`;
+    }
+
+    const cpu = this._sysNum(slots.cpu);
+    const gpu = this._sysNum(slots.gpu);
+    const mem = this._sysMemPct(slots);
+    const memUsed = this._sysNum(slots.memUsed);
+    const memUnit = (slots.memUsed && this._hass.states[slots.memUsed]
+      && this._hass.states[slots.memUsed].attributes.unit_of_measurement) || "";
+    const disk = slots.disks.length ? slots.disks[0] : null;
+    const thr = (k, dw, da) => [
+      item["warn_" + k] ?? dw, item["alarm_" + k] ?? da];
+    const [wCpu, aCpu] = thr("cpu", 80, 95);
+    const [wMem, aMem] = thr("mem", 80, 92);
+    const [wDisk, aDisk] = thr("disk", 80, 92);
+    const [wTemp, aTemp] = thr("temp", 70, 85);
+
+    const temps = slots.temps.map((id) => ({ id, v: this._sysNum(id),
+      name: this._systemShortName(item, id).replace(/\s*temperatura\s*$/i, "").trim() }))
+      .filter((t) => t.v !== null).sort((a, b) => b.v - a.v);
+    const hot = temps.length ? temps[0] : null;
+
+    const rate = (id) => {
+      const v = this._sysNum(id);
+      const u = (this._hass.states[id] && this._hass.states[id].attributes.unit_of_measurement) || "";
+      if (v === null) return "—";
+      return (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(3)) + " " + u;
+    };
+
+    return `<div class="sys">
+      <div class="sys-top">
+        <div>
+          <strong>${esc(devName || "Apparecchio")}</strong>
+          <span>${slots.uptime ? esc(this._sysUptime(slots.uptime)) : `${ids.length} letture`}</span>
+        </div>
+        ${slots.containers !== null && this._sysNum(slots.containers) !== null
+          ? `<div class="sys-badge"><ha-icon icon="mdi:docker"></ha-icon>
+              <b>${esc(String(Math.round(this._sysNum(slots.containers))))}</b>
+              <span>container${slots.containersMem && this._sysNum(slots.containersMem) !== null
+                ? " · " + esc(Math.round(this._sysNum(slots.containersMem)) + " "
+                  + (this._hass.states[slots.containersMem].attributes.unit_of_measurement || "")) : ""}</span>
+            </div>` : ""}
+      </div>
+
+      <div class="sys-rings">
+        ${this._sysRing("CPU", cpu, "%", this._sysLevel(cpu, wCpu, aCpu),
+          gpu !== null ? "GPU " + Math.round(gpu) + "%" : "")}
+        ${this._sysRing("MEMORIA", mem, "%", this._sysLevel(mem, wMem, aMem),
+          memUsed !== null ? Math.round(memUsed) + " " + memUnit : "")}
+        ${disk ? this._sysRing("DISCO", disk.pct, "%", this._sysLevel(disk.pct, wDisk, aDisk),
+          disk.free !== null ? Math.round(disk.free) + " " + disk.unit + " liberi" : disk.name) : ""}
+        ${hot ? this._sysRing("TEMPERATURA", hot.v === null ? null : Math.min(100, hot.v), "°C",
+          this._sysLevel(hot.v, wTemp, aTemp), hot.name) : ""}
+      </div>
+
+      ${temps.length > 1 ? `<div class="sys-chips">${temps.map((t) => {
+        const lv = this._sysLevel(t.v, wTemp, aTemp);
+        return `<span class="sys-chip" style="--cc:${esc(lv.color)}" data-more-info="${esc(t.id)}">
+          <i></i>${esc(t.name)}<b>${esc(t.v.toFixed(0))}°</b></span>`;
+      }).join("")}</div>` : ""}
+
+      ${slots.disks.length ? `<div class="sys-block">
+        <h5>DISCHI</h5>
+        ${slots.disks.map((d) => {
+          const lv = this._sysLevel(d.pct, wDisk, aDisk);
+          return `<button class="sys-row" data-more-info="${esc(d.entity)}">
+            <span class="sy-k">${esc(d.name)}</span>
+            <span class="sy-bar"><i style="width:${Math.max(2, Math.min(100, d.pct || 0)).toFixed(1)}%;background:${esc(lv.color)}"></i></span>
+            <span class="sy-v" style="color:${esc(lv.color)}">${d.pct === null ? "—" : esc(d.pct.toFixed(1)) + "%"}</span>
+            <span class="sy-s">${d.used !== null && d.size !== null
+              ? esc(d.used.toFixed(0) + " / " + d.size.toFixed(0) + " " + d.unit) : ""}</span>
+          </button>`;
+        }).join("")}
+      </div>` : ""}
+
+      ${slots.net.length ? `<div class="sys-block">
+        <h5>RETE</h5>
+        ${slots.net.slice(0, 4).map((n) => `<div class="sys-io">
+          <span class="sy-k">${esc(n.label)}</span>
+          <span class="sy-io-v down"><ha-icon icon="mdi:arrow-down"></ha-icon>${esc(rate(n.rx))}</span>
+          <span class="sy-io-v up"><ha-icon icon="mdi:arrow-up"></ha-icon>${esc(rate(n.tx))}</span>
+        </div>`).join("")}
+      </div>` : ""}
+
+      ${slots.io.length ? `<div class="sys-block">
+        <h5>DISCHI · LETTURA E SCRITTURA</h5>
+        ${slots.io.slice(0, 4).map((n) => `<div class="sys-io">
+          <span class="sy-k">${esc(n.label)}</span>
+          <span class="sy-io-v down"><ha-icon icon="mdi:book-open-outline"></ha-icon>${esc(rate(n.rx))}</span>
+          <span class="sy-io-v up"><ha-icon icon="mdi:content-save-outline"></ha-icon>${esc(rate(n.tx))}</span>
+        </div>`).join("")}
+      </div>` : ""}
+
+      ${slots.swap && this._sysNum(slots.swap) !== null ? `<span class="hint">Swap in uso ${
+        esc(this._sysNum(slots.swap).toFixed(1))} ${esc((this._hass.states[slots.swap].attributes.unit_of_measurement) || "")}${
+        this._sysNum(slots.swap) > 0 ? " — la macchina sta scrivendo memoria su disco." : "."}</span>` : ""}
+    </div>`;
+  }
+
+  /** Da quanto e' acceso, dal timestamp di avvio. */
+  _sysUptime(id) {
+    const st = this._hass.states[id];
+    if (!st) return "";
+    const t = Date.parse(st.state);
+    if (!Number.isFinite(t)) return String(st.state);
+    const sec = Math.max(0, (Date.now() - t) / 1000);
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `acceso da ${d} giorn${d === 1 ? "o" : "i"}${h ? " e " + h + " h" : ""}`;
+    if (h > 0) return `acceso da ${h} h${m ? " " + m + " min" : ""}`;
+    return `acceso da ${m} min`;
+  }
+
   _monitorBody(item) {
     const groups = MONITOR_GROUPS
       .filter((g) => !Array.isArray(item.groups) || !item.groups.length || item.groups.includes(g.key))
@@ -7875,6 +8227,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "notifications") return this._notificationsBody(item);
     if (type === "people") return this._peopleBody(item);
     if (type === "monitor") return this._monitorBody(item);
+    if (type === "system") return this._systemBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "economy") return this._economyBody(item);
     if (type === "comfort") return this._comfortBody(item);
@@ -8123,6 +8476,136 @@ class CyborgDashboard extends HTMLElement {
   }
 
   _compositeEditor(card) {
+    if (card.type === "system") {
+      if (!this._registry && !this._registryLoading) this._loadRegistry();
+      const reg = this._registry || {};
+      const devIds = reg.deviceEntities || {};
+      const devName = reg.deviceName || {};
+      // Solo gli apparecchi che hanno qualcosa da sorvegliare: un dispositivo
+      // con due entita' non numeriche in questa card non ha niente da dire.
+      const candidates = Object.keys(devIds).map((did) => ({
+        id: did, name: devName[did] || did,
+        n: devIds[did].filter((id) => {
+          const st = this._hass.states[id];
+          return st && Number.isFinite(parseFloat(st.state));
+        }).length,
+      })).filter((d) => d.n >= 3).sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+
+      const slots = card.device ? this._systemSlots(card) : null;
+      const auto = slots && slots.auto;
+      const label = (id) => {
+        const st = id && this._hass.states[id];
+        if (!id) return "— non trovato —";
+        return (st && st.attributes.friendly_name) || id;
+      };
+      const picker = (key, title, test, hint) => {
+        const ids = this._systemEntities(card).filter(test);
+        const chosen = card[key] || "";
+        const found = auto ? (auto[({ cpu: "cpu", gpu: "gpu", mem_used: "memUsed",
+          mem_free: "memFree", mem_total: "memTotal", swap: "swap",
+          containers: "containers", uptime: "uptime" })[key]] || null) : null;
+        return `<label>${esc(title)}
+          <select data-sys-slot="${esc(key)}">
+            <option value="">— trovato da solo: ${esc(found ? label(found) : "niente")} —</option>
+            ${ids.map((id) => `<option value="${esc(id)}" ${chosen === id ? "selected" : ""}>${
+              esc(label(id))}</option>`).join("")}
+          </select>
+          ${hint ? `<span class="hint">${hint}</span>` : ""}
+        </label>`;
+      };
+      const isPct = (id) => {
+        const st = this._hass.states[id];
+        return st && st.attributes.unit_of_measurement === "%" && Number.isFinite(parseFloat(st.state));
+      };
+      const isSize = (id) => {
+        const st = this._hass.states[id];
+        return st && st.attributes.device_class === "data_size";
+      };
+      const isTemp = (id) => {
+        const st = this._hass.states[id];
+        return st && st.attributes.device_class === "temperature";
+      };
+
+      return `<div class="section">
+        <strong>APPARECCHIO</strong>
+        <span class="hint">Scegline uno e la card trova da sola CPU, memoria, temperature, dischi, rete e I/O fra le sue entità. <strong>Trovare non è decidere</strong>: ogni casella qui sotto si può riscrivere a mano.</span>
+        <label>COMPUTER DA SORVEGLIARE<select data-sys-device>
+          <option value="">— nessuno —</option>
+          ${candidates.map((d) => `<option value="${esc(d.id)}" ${card.device === d.id ? "selected" : ""}>${
+            esc(d.name)} · ${d.n} letture</option>`).join("")}
+        </select></label>
+        ${card.device && !candidates.some((d) => d.id === card.device)
+          ? `<span class="hint"><strong>L'apparecchio scelto non è più fra quelli disponibili.</strong> È stato rimosso da Home Assistant, oppure le sue entità sono state disattivate.</span>` : ""}
+      </div>
+      ${!card.device ? "" : `
+      <div class="section">
+        <strong>LETTURE PRINCIPALI</strong>
+        ${picker("cpu", "CARICO CPU", isPct, "In percentuale. Se la macchina pubblica anche il <em>load average</em>, non è questo: quello è un numero di processi, non una percentuale.")}
+        ${picker("gpu", "CARICO GPU", isPct, "")}
+        ${picker("mem_used", "MEMORIA IN USO", isSize, "")}
+        ${picker("mem_free", "MEMORIA LIBERA", isSize, "La percentuale di memoria si calcola da queste due, oppure dal totale se c'è. Basta una delle due strade.")}
+        ${picker("mem_total", "MEMORIA TOTALE", isSize, "")}
+        ${picker("swap", "SWAP IN USO", isSize, "")}
+        ${picker("uptime", "ACCESO DA", (id) => {
+          const st = this._hass.states[id];
+          return st && st.attributes.device_class === "timestamp";
+        }, "")}
+        ${picker("containers", "CONTAINER ATTIVI", (id) => {
+          const st = this._hass.states[id];
+          return st && !st.attributes.unit_of_measurement && Number.isFinite(parseFloat(st.state));
+        }, "")}
+      </div>
+      <div class="section">
+        <strong>TEMPERATURE</strong>
+        <span class="hint">${(slots.temps || []).length} temperature mostrate.${
+          Array.isArray(card.temps) && card.temps.length
+            ? " <strong>Elenco scelto da te</strong>: resta com'è finché non lo cambi."
+            : " Trovate da sole: ogni sensore di temperatura dell'apparecchio."}</span>
+        <div class="eco-dev-list">${this._systemEntities(card).filter(isTemp).map((id) => {
+          const on = Array.isArray(card.temps) && card.temps.length
+            ? card.temps.includes(id) : true;
+          return `<div class="eco-dev-edit">
+            <div class="ede-txt"><strong>${esc(this._systemShortName(card, id))}</strong>
+              <small>${esc(id)}</small></div>
+            <button class="mini ${on ? "on" : ""}" data-sys-temp="${esc(id)}"
+              title="${on ? "Mostrata" : "Nascosta"}"><ha-icon icon="${
+              on ? "mdi:eye-outline" : "mdi:eye-off-outline"}"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessun sensore di temperatura su questo apparecchio.</div>'}</div>
+        ${Array.isArray(card.temps) && card.temps.length
+          ? `<button class="secondary wide" data-sys-temp-auto>TORNA A TROVARLE DA SOLO</button>` : ""}
+      </div>
+      <div class="section">
+        <strong>DISCHI</strong>
+        <span class="hint">${(slots.disks || []).length} dischi mostrati. Gli stessi identici numeri sotto due punti di mount sono lo stesso disco visto due volte — in un container <code>/etc/hosts</code> e <code>/etc/hostname</code> sono legami al disco di sistema — e vengono contati una volta sola.</span>
+        <div class="eco-dev-list">${(auto ? auto.disks : []).map((d) => {
+          const on = Array.isArray(card.disks) && card.disks.length
+            ? card.disks.includes(d.entity) : true;
+          return `<div class="eco-dev-edit">
+            <div class="ede-txt"><strong>${esc(d.name)}</strong>
+              <small>${d.pct === null ? "" : esc(d.pct.toFixed(1) + "%")}${
+                d.size !== null ? esc(" · " + d.size.toFixed(0) + " " + d.unit) : ""}</small></div>
+            <button class="mini ${on ? "on" : ""}" data-sys-disk="${esc(d.entity)}"
+              title="${on ? "Mostrato" : "Nascosto"}"><ha-icon icon="${
+              on ? "mdi:eye-outline" : "mdi:eye-off-outline"}"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessun disco trovato: servono entità in percentuale che finiscono per <code>_utilizzo_disco</code> o <code>_disk_usage</code>.</div>'}</div>
+        ${Array.isArray(card.disks) && card.disks.length
+          ? `<button class="secondary wide" data-sys-disk-auto>TORNA A TROVARLI DA SOLO</button>` : ""}
+      </div>
+      <div class="section">
+        <strong>SOGLIE</strong>
+        <span class="hint">Sotto la prima è verde, in mezzo ambra, sopra la seconda rossa. Sono le tue soglie: un disco al 90% su una macchina che scrive log è normale, su un database no.</span>
+        ${[["cpu", "CPU %", 80, 95], ["mem", "MEMORIA %", 80, 92],
+           ["disk", "DISCO %", 80, 92], ["temp", "TEMPERATURA °C", 70, 85]]
+          .map(([k, lab, dw, da]) => `<div class="two">
+            <label>${esc(lab)} · ATTENZIONE<input type="number" step="1" min="0" max="200"
+              data-sys-thr="warn_${k}" value="${card["warn_" + k] ?? dw}"></label>
+            <label>${esc(lab)} · ALLARME<input type="number" step="1" min="0" max="200"
+              data-sys-thr="alarm_${k}" value="${card["alarm_" + k] ?? da}"></label>
+          </div>`).join("")}
+      </div>`}`;
+    }
     if (card.type === "economy") {
       const energyStats = Object.keys(this._hass.states).filter((id) => {
         const st = this._hass.states[id];
@@ -11599,6 +12082,59 @@ class CyborgDashboard extends HTMLElement {
         this._touch(true);
       };
     });
+    const sysDevice = q("[data-sys-device]");
+    if (sysDevice && card) sysDevice.onchange = () => {
+      card.device = sysDevice.value || null;
+      // Cambiare apparecchio azzera le caselle scritte a mano: puntavano a
+      // entita' di un'altra macchina, e lasciarle sarebbe peggio che perderle.
+      for (const k of ["cpu", "gpu", "mem_used", "mem_free", "mem_total", "swap",
+                       "uptime", "containers"]) card[k] = null;
+      card.temps = [];
+      card.disks = [];
+      this._touch();
+    };
+    all("[data-sys-slot]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        card[el.getAttribute("data-sys-slot")] = el.value || null;
+        this._touch();
+      };
+    });
+    // L'occhio su una temperatura o un disco: al primo spegnimento la lista
+    // trovata da sola diventa una lista scritta da te, con dentro tutto tranne
+    // quello. Un elenco vuoto torna automatico invece di mostrare il nulla.
+    const toggleList = (key, autoIds, id) => {
+      const cur = Array.isArray(card[key]) && card[key].length ? card[key].slice() : autoIds.slice();
+      const i = cur.indexOf(id);
+      if (i >= 0) cur.splice(i, 1); else cur.push(id);
+      card[key] = cur.length === autoIds.length && autoIds.every((x) => cur.includes(x)) ? [] : cur;
+      this._touch();
+    };
+    all("[data-sys-temp]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        toggleList("temps", this._systemAuto(card).temps, el.getAttribute("data-sys-temp"));
+      };
+    });
+    all("[data-sys-disk]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        toggleList("disks", this._systemAuto(card).disks.map((d) => d.entity),
+          el.getAttribute("data-sys-disk"));
+      };
+    });
+    const sysTempAuto = q("[data-sys-temp-auto]");
+    if (sysTempAuto && card) sysTempAuto.onclick = () => { card.temps = []; this._touch(); };
+    const sysDiskAuto = q("[data-sys-disk-auto]");
+    if (sysDiskAuto && card) sysDiskAuto.onclick = () => { card.disks = []; this._touch(); };
+    all("[data-sys-thr]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const v = parseFloat(el.value);
+        card[el.getAttribute("data-sys-thr")] = Number.isFinite(v) ? v : null;
+        this._touch();
+      };
+    });
     const ecoDetect = q("[data-eco-detect]");
     if (ecoDetect && card) ecoDetect.onclick = () => this._detectEconomy(card);
     const ecoAdd = q("[data-eco-dev-add]");
@@ -12848,6 +13384,54 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .wxd-fact ha-icon{--mdc-icon-size:16px;color:var(--accent);opacity:.8;flex-shrink:0}
 .wxd-fact span{flex:1;min-width:0;font-size:11px;opacity:.6}
 .wxd-fact strong{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.sys{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.sys-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sys-top>div>strong{display:block;font:700 13px Inter,system-ui,sans-serif}
+.sys-top>div>span{display:block;font:10px ui-monospace,monospace;opacity:.45;margin-top:2px}
+.sys-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:99px;
+  border:1px solid var(--divider-color);font-size:10.5px}
+.sys-badge b{font-size:13px}
+.sys-badge span{opacity:.55}
+/* Gli anelli si dispongono su una griglia che si stringe da sola: quattro su un
+   monitor, due su un telefono, senza una media query per ogni misura. */
+.sys-rings{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:10px}
+.sys-ring{display:flex;flex-direction:column;align-items:center;gap:3px;text-align:center}
+.sys-ring>svg{width:84px;height:84px;transform:rotate(-90deg)}
+.sys-ring>strong{font:700 9.5px ui-monospace,monospace;letter-spacing:.1em;opacity:.55}
+.sys-ring>small{font-size:9.5px;opacity:.4;line-height:1.2;max-width:110px}
+.sr-bg{fill:none;stroke:var(--divider-color);stroke-width:7;opacity:.45}
+.sr-arc{fill:none;stroke-width:7;stroke-linecap:round;transition:stroke-dashoffset .6s ease}
+.sr-val{transform:rotate(90deg);transform-origin:40px 40px;text-anchor:middle;
+  font:750 21px Inter,system-ui,sans-serif;letter-spacing:-.04em}
+.sr-unit{transform:rotate(90deg);transform-origin:40px 40px;text-anchor:middle;
+  fill:var(--primary-text-color);opacity:.35;font:600 8px ui-monospace,monospace}
+.sys-chips{display:flex;flex-wrap:wrap;gap:5px}
+.sys-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;
+  border:1px solid color-mix(in srgb,var(--cc) 40%,transparent);font-size:10px;cursor:pointer;
+  background:color-mix(in srgb,var(--cc) 9%,transparent)}
+.sys-chip i{width:6px;height:6px;border-radius:50%;background:var(--cc);display:block}
+.sys-chip b{color:var(--cc)}
+.sys-block{display:flex;flex-direction:column;gap:5px}
+.sys-block>h5{margin:2px 0 0;font:700 9.5px ui-monospace,monospace;letter-spacing:.14em;opacity:.4}
+.sys-row{display:grid;grid-template-columns:1fr 90px 52px 108px;align-items:center;gap:8px;
+  background:transparent;border:0;padding:3px 0;text-align:left;color:inherit;cursor:pointer;
+  font-size:11px}
+.sys-row:hover .sy-k{color:var(--accent)}
+.sy-k{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sy-bar{height:6px;border-radius:99px;background:var(--divider-color);overflow:hidden}
+.sy-bar i{display:block;height:100%;border-radius:99px;transition:width .5s ease}
+.sy-v{text-align:right;font:700 11.5px ui-monospace,monospace}
+.sy-s{text-align:right;font:10px ui-monospace,monospace;opacity:.4}
+.sys-io{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;font-size:11px}
+.sy-io-v{display:inline-flex;align-items:center;gap:3px;font:600 11px ui-monospace,monospace}
+.sy-io-v ha-icon{--mdc-icon-size:13px;opacity:.5}
+.sy-io-v.down{color:#8ecae6}
+.sy-io-v.up{color:#06d6a0}
+@media(max-width:560px){
+  .sys-row{grid-template-columns:1fr 46px 92px}
+  .sys-row .sy-bar{display:none}
+  .sys-ring>svg{width:72px;height:72px}
+}
 .eco{margin-top:12px;display:flex;flex-direction:column;gap:12px}
 .eco-tabs{display:flex;gap:4px}
 .eco-tab{flex:1;padding:7px 4px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.04em;background:transparent;border:1px solid var(--divider-color);color:var(--primary-text-color);opacity:.5}
@@ -13958,7 +14542,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.46.0";
+const CYBORG_BUILD = "0.47.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
