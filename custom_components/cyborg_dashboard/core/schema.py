@@ -743,6 +743,9 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                     "uptime", "containers"):
             value = result.get(key)
             result[key] = value if isinstance(value, str) and "." in value else None
+        # Il confronto con le soglie e' acceso di fabbrica: e' la ragione per
+        # cui le soglie esistono. Si spegne, non si deve chiedere di accenderlo.
+        result["gauges"] = result.get("gauges", True) is not False
         for key in ("temps", "disks"):
             rows = result.get(key)
             result[key] = (

@@ -212,6 +212,17 @@ const hass={states,
         "sensor.energia_pv":[900,1082],"sensor.energia_pdc":[500,612],
         "sensor.energia_lavatrice":[120,141],"sensor.energia_forno":[60,74]};
       const out={};
+      // min/max su una finestra: e' quello che chiede la card Sistema per
+      // disegnare dove una lettura e' stata nelle ultime 24 ore. Valori fissi,
+      // cosi' la posizione della barra pallida e' verificabile a mano.
+      if((m.types||[]).includes("min")&&(m.types||[]).includes("max")){
+        const outMM={};
+        for(const id of m.statistic_ids||[]){
+          outMM[id]=[{start:Date.parse(m.start_time),min:10,max:30},
+                     {start:Date.parse(m.start_time)+3600000,min:20,max:60}];
+        }
+        return outMM;
+      }
       // Ora per ora: e' l'unica granularita' da cui si possa capire in quale
       // fascia oraria l'energia e' stata consumata davvero. La serie e'
       // deterministica - niente Math.random - cosi' i conti delle fasce sono

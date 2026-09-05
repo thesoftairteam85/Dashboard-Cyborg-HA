@@ -2673,15 +2673,48 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /**
+   * Every section of every page, as a place a card can go.
+   *
+   * `_section` only looks inside the page on screen, which is the right scope
+   * for almost everything the panel does - and exactly the wrong one here.
+   * "Move Mini PC out of Monitoraggio" usually means moving it to a section
+   * that does not exist on this page yet, and a destination list that stops at
+   * the page boundary answers a question nobody asked.
+   */
+  _allSections() {
+    const out = [];
+    for (const page of (this._dashboard && this._dashboard.pages) || []) {
+      for (const sec of page.sections || []) {
+        out.push({ pageId: page.id, pageTitle: page.title || page.id,
+          id: sec.id, title: sec.title || sec.id, section: sec });
+      }
+    }
+    return out;
+  }
+
+  /** In quale sezione, di quale pagina, sta una card. */
+  _sectionOfCard(itemId) {
+    return this._allSections().find((s) =>
+      (s.section.items || []).some((i) => i.id === itemId)) || null;
+  }
+
   _reassignCard(fromId, itemId, toId) {
     if (fromId === toId) return;
-    const from = this._section(fromId), to = this._section(toId);
-    if (!from || !to) return;
+    const all = this._allSections();
+    const from = (all.find((s) => s.id === fromId) || {}).section;
+    const target = all.find((s) => s.id === toId);
+    if (!from || !target) return;
     const i = from.items.findIndex((x) => x.id === itemId);
     if (i < 0) return;
     const [card] = from.items.splice(i, 1);
-    to.items.push(card);
-    this._selected = { kind: "card", sectionId: toId, itemId };
+    target.section.items = target.section.items || [];
+    target.section.items.push(card);
+    // La card se n'e' andata: se era quella aperta nell'editor e la pagina
+    // e' un'altra, tenerla selezionata mostrerebbe un pannello che modifica
+    // qualcosa che non e' piu' sullo schermo.
+    const here = this._sections().some((sec) => sec.id === toId);
+    this._selected = here ? { kind: "card", sectionId: toId, itemId } : null;
     this._touch();
   }
 
@@ -7186,6 +7219,62 @@ class CyborgDashboard extends HTMLElement {
           this._sysLevel(hot.v, wTemp, aTemp), hot.name) : ""}
       </div>
 
+      ${item.gauges === false ? "" : (() => {
+        // Le stesse letture degli anelli, ma messe contro le loro soglie e
+        // contro dove sono state nelle ultime 24 ore.
+        const rows = [];
+        const whole = (() => {
+          const u = this._sysNum(slots.memUsed), t = this._sysNum(slots.memTotal),
+                f = this._sysNum(slots.memFree);
+          return t !== null ? t : (u !== null && f !== null ? u + f : null);
+        })();
+        if (slots.cpu) rows.push({ id: slots.cpu, label: "CPU", unit: "%",
+          value: cpu, warn: wCpu, alarm: aCpu, scale: 100 });
+        if (slots.gpu && gpu !== null) rows.push({ id: slots.gpu, label: "GPU", unit: "%",
+          value: gpu, warn: wCpu, alarm: aCpu, scale: 100 });
+        if (slots.memUsed && whole) rows.push({ id: slots.memUsed, label: "Memoria", unit: "%",
+          value: mem, warn: wMem, alarm: aMem, scale: 100,
+          // Le statistiche della memoria sono in MiB: la percentuale si ottiene
+          // sullo stesso totale con cui e' calcolata la lettura di adesso.
+          scaleStat: (v) => (v / whole) * 100 });
+        for (const d of slots.disks) rows.push({ id: d.entity, label: d.name, unit: "%",
+          value: d.pct, warn: wDisk, alarm: aDisk, scale: 100 });
+        for (const t of temps) rows.push({ id: t.id, label: t.name, unit: "°",
+          value: t.v, warn: wTemp, alarm: aTemp,
+          // La scala arriva un po' oltre l'allarme: una barra che finisce
+          // esattamente sull'allarme non fa vedere di quanto lo si supera.
+          scale: Math.max(aTemp || 0, wTemp || 0, t.v || 0) * 1.15 });
+        if (!rows.length) return "";
+        const stats = this._sysStats(rows.map((r) => r.id));
+        return `<div class="sys-block sys-gauges">
+          <h5>STATO CONTRO I LIMITI · ULTIME 24 ORE</h5>
+          ${rows.map((r) => {
+            const raw = stats && stats.by ? stats.by[r.id] : null;
+            const stat = raw ? (r.scaleStat
+              ? { min: r.scaleStat(raw.min), max: r.scaleStat(raw.max) } : raw) : null;
+            return this._sysGauge(Object.assign({}, r, { stat }));
+          }).join("")}
+          <div class="sg-legend">
+            <span><i class="lg-range"></i>dove è stata nelle ultime 24 ore</span>
+            <span><i class="lg-warn"></i>attenzione</span>
+            <span><i class="lg-alarm"></i>allarme</span>
+          </div>
+          ${(() => {
+            // Tre stati diversi, tre frasi diverse. Un recorder che non
+            // risponde e una lettura che non ha statistiche producono lo stesso
+            // disegno - nessuna barra pallida - ma non sono la stessa cosa, e
+            // tacere in entrambi i casi lascerebbe l'utente a indovinare.
+            if (!stats) return `<span class="hint">Lettura del minimo e del massimo delle ultime 24 ore…</span>`;
+            if (stats.error) return `<span class="hint">Senza statistiche a lungo termine restano la lettura di adesso e le soglie.</span>`;
+            const senza = rows.filter((r) => !stats.by[r.id]).length;
+            if (!senza) return "";
+            return `<span class="hint">${senza === rows.length
+              ? "Senza statistiche a lungo termine restano"
+              : senza + " di queste letture non hanno statistiche a lungo termine: per loro restano"} la lettura di adesso e le soglie.</span>`;
+          })()}
+        </div>`;
+      })()}
+
       ${temps.length > 1 ? `<div class="sys-chips">${temps.map((t) => {
         const lv = this._sysLevel(t.v, wTemp, aTemp);
         return `<span class="sys-chip" style="--cc:${esc(lv.color)}" data-more-info="${esc(t.id)}">
@@ -7227,6 +7316,92 @@ class CyborgDashboard extends HTMLElement {
       ${slots.swap && this._sysNum(slots.swap) !== null ? `<span class="hint">Swap in uso ${
         esc(this._sysNum(slots.swap).toFixed(1))} ${esc((this._hass.states[slots.swap].attributes.unit_of_measurement) || "")}${
         this._sysNum(slots.swap) > 0 ? " — la macchina sta scrivendo memoria su disco." : "."}</span>` : ""}
+    </div>`;
+  }
+
+/**
+   * The 24-hour minimum and maximum of every reading on the card.
+   *
+   * A number on its own does not say whether it is normal. 33 °C means one
+   * thing if the machine has been between 28 and 34 all day and another if it
+   * touched 74 an hour ago. Long-term statistics already carry `min` and `max`
+   * per bucket for anything with `state_class: measurement`, so the range costs
+   * one query for every reading at once - not one per reading, and no history
+   * of our own to keep.
+   */
+  _sysStats(ids) {
+    const list = Array.from(new Set(ids.filter(Boolean)));
+    if (!list.length) return null;
+    const key = list.join(",");
+    this._sysStat = this._sysStat || {};
+    if (this._sysStat[key] && Date.now() - this._sysStat[key].ts < 300000) return this._sysStat[key];
+    if (this._sysStatPending === key) return this._sysStat[key] || null;
+    this._sysStatPending = key;
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 3600000);
+    this._hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      statistic_ids: list,
+      period: "hour",
+      types: ["min", "max", "mean"],
+    }).then((res) => {
+      const out = { ts: Date.now(), by: {} };
+      for (const id of list) {
+        const rows = (res && res[id]) || [];
+        let lo = null, hi = null;
+        for (const r of rows) {
+          const a = num(r.min), b = num(r.max);
+          if (a !== null) lo = lo === null ? a : Math.min(lo, a);
+          if (b !== null) hi = hi === null ? b : Math.max(hi, b);
+        }
+        if (lo !== null && hi !== null) out.by[id] = { min: lo, max: hi };
+      }
+      this._sysStat[key] = out;
+      this._sysStatPending = null;
+      this._touch(true);
+    }).catch(() => {
+      // Nessuna statistica non e' un guasto: il confronto sparisce, la lettura
+      // attuale e le soglie restano. Meglio meno informazione che una inventata.
+      this._sysStat[key] = { ts: Date.now(), by: {}, error: true };
+      this._sysStatPending = null;
+      this._touch(true);
+    });
+    return null;
+  }
+
+  /**
+   * One reading against its limits, drawn as a track.
+   *
+   * A ring answers "quanto"; this answers "quanto, rispetto a cosa". The bands
+   * are the thresholds, the pale bar is where the reading has actually been in
+   * the last 24 hours, and the tick is now. Seen together they say whether the
+   * current number is ordinary for this machine or the start of something.
+   */
+  _sysGauge(row) {
+    const { label, value, unit, warn, alarm, stat, scale } = row;
+    const lv = this._sysLevel(value, warn, alarm);
+    const pos = (v) => Math.max(0, Math.min(100, (v / scale) * 100));
+    const wPos = warn !== null && warn !== undefined ? pos(warn) : null;
+    const aPos = alarm !== null && alarm !== undefined ? pos(alarm) : null;
+    const fmt = (v) => (v === null || v === undefined ? "—"
+      : (Math.abs(v) < 10 ? v.toFixed(1) : Math.round(v)) + unit);
+    return `<div class="sg-row">
+      <span class="sg-k">${esc(label)}</span>
+      <span class="sg-track">
+        ${wPos !== null ? `<i class="sg-band warn" style="left:${wPos.toFixed(1)}%;width:${
+          Math.max(0, (aPos === null ? 100 : aPos) - wPos).toFixed(1)}%"></i>` : ""}
+        ${aPos !== null ? `<i class="sg-band alarm" style="left:${aPos.toFixed(1)}%;width:${
+          Math.max(0, 100 - aPos).toFixed(1)}%"></i>` : ""}
+        ${stat ? `<i class="sg-range" style="left:${pos(stat.min).toFixed(1)}%;width:${
+          Math.max(0.8, pos(stat.max) - pos(stat.min)).toFixed(1)}%"></i>` : ""}
+        ${value === null ? "" : `<i class="sg-now" style="left:${pos(value).toFixed(1)}%;background:${
+          esc(lv.color)}"></i>`}
+      </span>
+      <span class="sg-v" style="color:${esc(lv.color)}">${esc(fmt(value))}</span>
+      <span class="sg-mm">${stat ? esc(fmt(stat.min) + " – " + fmt(stat.max))
+        : (aPos !== null ? "max " + esc(fmt(alarm)) : "")}</span>
     </div>`;
   }
 
@@ -8336,6 +8511,27 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini" data-card-move="-1" data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Sposta indietro"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
             <button class="mini" data-card-move="1" data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Sposta avanti"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
             <button class="mini grow" data-select-card data-sec="${esc(section.id)}" data-item="${esc(item.id)}"><ha-icon icon="mdi:tune"></ha-icon> CONFIGURA</button>
+            ${(() => {
+              // Spostare una card in un'altra sezione si poteva gia' fare, ma
+              // solo da dentro CONFIGURA, tre livelli sotto, e solo verso le
+              // sezioni di QUESTA pagina. Qui e' dove sta gia' la mano.
+              const dests = this._allSections();
+              if (dests.length < 2) return "";
+              const cur = section.id;
+              const pages = [];
+              for (const d of dests) {
+                let g = pages.find((p) => p.id === d.pageId);
+                if (!g) pages.push(g = { id: d.pageId, title: d.pageTitle, rows: [] });
+                g.rows.push(d);
+              }
+              return `<select class="mini card-move-to" data-card-to
+                data-sec="${esc(cur)}" data-item="${esc(item.id)}" title="Sposta in un'altra sezione">
+                <option value="">SPOSTA IN…</option>
+                ${pages.map((p) => `<optgroup label="${esc(p.title)}">${p.rows.map((d) =>
+                  `<option value="${esc(d.id)}" ${d.id === cur ? "disabled" : ""}>${
+                    esc(d.title)}${d.id === cur ? " · è qui" : ""}</option>`).join("")}</optgroup>`).join("")}
+              </select>`;
+            })()}
             <button class="mini danger" data-card-remove data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Elimina"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
           </div>
         </article>`;
@@ -8596,6 +8792,8 @@ class CyborgDashboard extends HTMLElement {
       <div class="section">
         <strong>SOGLIE</strong>
         <span class="hint">Sotto la prima è verde, in mezzo ambra, sopra la seconda rossa. Sono le tue soglie: un disco al 90% su una macchina che scrive log è normale, su un database no.</span>
+        <label class="check"><input type="checkbox" data-sys-gauges ${card.gauges !== false ? "checked" : ""}> Mostra il confronto con i limiti</label>
+        <span class="hint">Una barra per ogni lettura, con le soglie disegnate sopra e <strong>dove quella lettura è stata nelle ultime 24 ore</strong>. Un numero da solo non dice se è normale: 33 °C vuol dire una cosa se la macchina è stata fra 28 e 34 tutto il giorno, un'altra se un'ora fa toccava 74.</span>
         ${[["cpu", "CPU %", 80, 95], ["mem", "MEMORIA %", 80, 92],
            ["disk", "DISCO %", 80, 92], ["temp", "TEMPERATURA °C", 70, 85]]
           .map(([k, lab, dw, da]) => `<div class="two">
@@ -9786,8 +9984,18 @@ class CyborgDashboard extends HTMLElement {
         <label>DIMENSIONE<select data-prop="size">${Object.keys(SIZE_LABEL).map((v) =>
           `<option value="${v}" ${(card.size || "md") === v ? "selected" : ""}>${esc(SIZE_LABEL[v])}</option>`).join("")}</select></label>
         <label>NOME<input data-prop="name" value="${esc(card.name || "")}" placeholder="${esc((st && st.attributes.friendly_name) || "Nome automatico")}"></label>
-        <label>SEZIONE<select data-move-section>${sections.map((s) =>
-          `<option value="${esc(s.id)}" ${s.id === this._selected.sectionId ? "selected" : ""}>${esc(s.title)}</option>`).join("")}</select></label>
+        <label>SEZIONE<select data-move-section>${(() => {
+          const dests = this._allSections();
+          const pages = [];
+          for (const d of dests) {
+            let g = pages.find((p) => p.id === d.pageId);
+            if (!g) pages.push(g = { id: d.pageId, title: d.pageTitle, rows: [] });
+            g.rows.push(d);
+          }
+          return pages.map((p) => `<optgroup label="${esc(p.title)}">${p.rows.map((d) =>
+            `<option value="${esc(d.id)}" ${d.id === this._selected.sectionId ? "selected" : ""}>${
+              esc(d.title)}</option>`).join("")}</optgroup>`).join("");
+        })()}</select><span class="hint">Anche verso una sezione di un'altra pagina: la card ci va, e il pannello di modifica si chiude perché quello che stava modificando non è più su questo schermo.</span></label>
         <label>ICONA${iconField("data-prop", "appearance.icon", currentIcon)}</label>
       </div>
 
@@ -10404,6 +10612,13 @@ class CyborgDashboard extends HTMLElement {
     });
     all("[data-card-remove]").forEach((el) => {
       el.onclick = () => this._removeCard(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+    });
+    all("[data-card-to]").forEach((el) => {
+      el.onchange = () => {
+        const to = el.value;
+        if (!to) return;
+        this._reassignCard(el.getAttribute("data-sec"), el.getAttribute("data-item"), to);
+      };
     });
     all("[data-card-move]").forEach((el) => {
       el.onclick = () => this._moveCard(el.getAttribute("data-sec"), el.getAttribute("data-item"), parseInt(el.getAttribute("data-card-move"), 10));
@@ -12127,6 +12342,11 @@ class CyborgDashboard extends HTMLElement {
     if (sysTempAuto && card) sysTempAuto.onclick = () => { card.temps = []; this._touch(); };
     const sysDiskAuto = q("[data-sys-disk-auto]");
     if (sysDiskAuto && card) sysDiskAuto.onclick = () => { card.disks = []; this._touch(); };
+    const sysGauges = q("[data-sys-gauges]");
+    if (sysGauges && card) sysGauges.onchange = () => {
+      card.gauges = sysGauges.checked;
+      this._touch();
+    };
     all("[data-sys-thr]").forEach((el) => {
       el.onchange = () => {
         if (!card) return;
@@ -13070,6 +13290,12 @@ button.mini.grow{flex:1;justify-content:center}
 .spark-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
 .spark-area{fill:color-mix(in srgb,var(--accent) 16%,transparent);stroke:none}
 .chart-empty{margin-top:12px;font:9px ui-monospace,monospace;letter-spacing:1.5px;opacity:.35}
+/* Il menu "sposta in..." vive fra i comandi della card, non tre livelli
+   sotto dentro CONFIGURA: e' li' che sta gia' la mano di chi riordina. */
+.card-move-to{max-width:130px;padding:4px 6px;border-radius:8px;font:600 9.5px ui-monospace,monospace;
+  letter-spacing:.06em;background:transparent;color:var(--primary-text-color);
+  border:1px solid var(--divider-color);cursor:pointer}
+.card-move-to:hover{border-color:color-mix(in srgb,var(--accent) 50%,transparent);color:var(--accent)}
 .card-tools{display:flex;gap:5px;margin-top:12px;padding-top:11px;border-top:1px solid color-mix(in srgb,var(--accent) 18%,transparent)}
 .editor-item{outline:1px dashed color-mix(in srgb,var(--accent) 40%,transparent);outline-offset:-1px}
 .editor-item.selected{outline:2px solid var(--accent)}
@@ -13405,6 +13631,40 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
   font:750 21px Inter,system-ui,sans-serif;letter-spacing:-.04em}
 .sr-unit{transform:rotate(90deg);transform-origin:40px 40px;text-anchor:middle;
   fill:var(--primary-text-color);opacity:.35;font:600 8px ui-monospace,monospace}
+/* Il confronto con i limiti: una pista per lettura, le soglie come fasce di
+   sfondo, la barra pallida dove la lettura e' stata nelle ultime 24 ore, e la
+   tacca dov'e' adesso. */
+.sys-gauges{gap:4px}
+/* La pista si prende piu' spazio dell'etichetta: e' lei il disegno, il nome
+   e' solo la didascalia. */
+.sg-row{display:grid;grid-template-columns:minmax(72px,.75fr) 1.7fr 48px 88px;
+  align-items:center;gap:9px;font-size:10.5px}
+.sg-k{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.75}
+.sg-track{position:relative;height:10px;border-radius:99px;background:var(--divider-color);
+  overflow:hidden}
+.sg-band{position:absolute;top:0;bottom:0;display:block}
+.sg-band.warn{background:color-mix(in srgb,#ffd166 42%,transparent)}
+.sg-band.alarm{background:color-mix(in srgb,#ff6b6b 52%,transparent)}
+/* L'intervallo e' semitrasparente apposta: dove attraversa una fascia di
+   soglia si deve vedere che la attraversa, non coprirla. */
+.sg-range{position:absolute;top:2.5px;bottom:2.5px;display:block;border-radius:99px;
+  background:color-mix(in srgb,var(--primary-text-color) 26%,transparent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary-text-color) 22%,transparent)}
+/* La tacca sta sopra tutto e non deve uscire dalla pista ai due estremi:
+   centrarla con translateX(-50%) la porterebbe fuori bordo a 0 e a 100, quindi
+   si sposta di meta' larghezza con un margine negativo dentro l'overflow. */
+.sg-now{position:absolute;top:-1px;bottom:-1px;width:3px;border-radius:2px;display:block;
+  margin-left:-1.5px;box-shadow:0 0 6px currentColor}
+.sg-v{text-align:right;font:700 11px ui-monospace,monospace}
+.sg-mm{text-align:right;font:10px ui-monospace,monospace;opacity:.38;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sg-legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:3px;font-size:9.5px;opacity:.45}
+.sg-legend>span{display:inline-flex;align-items:center;gap:5px}
+.sg-legend i{width:12px;height:7px;border-radius:2px;display:block}
+.sg-legend .lg-range{background:color-mix(in srgb,var(--primary-text-color) 30%,transparent)}
+.sg-legend .lg-warn{background:color-mix(in srgb,#ffd166 45%,transparent)}
+.sg-legend .lg-alarm{background:color-mix(in srgb,#ff6b6b 50%,transparent)}
+@media(max-width:560px){.sg-row{grid-template-columns:minmax(60px,.8fr) 1.4fr 44px}.sg-mm{display:none}}
 .sys-chips{display:flex;flex-wrap:wrap;gap:5px}
 .sys-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;
   border:1px solid color-mix(in srgb,var(--cc) 40%,transparent);font-size:10px;cursor:pointer;
@@ -14542,7 +14802,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.47.0";
+const CYBORG_BUILD = "0.48.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

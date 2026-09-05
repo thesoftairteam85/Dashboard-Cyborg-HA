@@ -135,6 +135,81 @@ el._selected = {kind:"card",sectionId:"a",itemId:"i1"};
 el._reassignCard("a","i1","b");
 ok("sposta card tra sezioni", el._section("a").items.length===0 && el._section("b").items.length===1);
 ok("selezione segue la card", el._selected.sectionId === "b");
+
+// --- spostare una card in una sezione di UN'ALTRA pagina
+//
+// Il difetto: la destinazione si prendeva da `_sections()`, che guarda solo la
+// pagina sullo schermo. "Porta Mini PC fuori da Monitoraggio" quasi sempre
+// vuol dire portarlo in una sezione che su questa pagina non c'e'.
+{
+  const savedPages = el._dashboard.pages;
+  el._dashboard.pages = [
+    { id: "p1", title: "Casa", icon: "mdi:home", type: "sections", sections: [
+      { id: "mon", title: "Monitoraggio", icon: "mdi:gauge", accent: null, collapsed: false,
+        items: [{ id: "mpc", type: "system", entity_id: "", appearance: {}, states: {}, actions: {} },
+                { id: "dtx", type: "trend", entity_id: "", appearance: {}, states: {}, actions: {} }] }] },
+    { id: "p2", title: "Tecnica", icon: "mdi:cog", type: "sections", sections: [
+      { id: "srv", title: "Mini PC · Server", icon: "mdi:server", accent: null, collapsed: false,
+        items: [] }] },
+  ];
+  el._pageIndex = 0;
+  el._selected = { kind: "card", sectionId: "mon", itemId: "mpc" };
+
+  ok("le destinazioni comprendono le sezioni di tutte le pagine",
+     el._allSections().length === 2
+     && el._allSections().some((x) => x.id === "srv" && x.pageTitle === "Tecnica"),
+     JSON.stringify(el._allSections().map((x) => x.pageTitle + "/" + x.title)));
+  ok("e si sa in quale sezione, di quale pagina, sta una card",
+     el._sectionOfCard("dtx").id === "mon" && el._sectionOfCard("dtx").pageId === "p1");
+  ok("una card che non esiste non produce una sezione fantasma",
+     el._sectionOfCard("mai-esistita") === null);
+
+  el._reassignCard("mon", "mpc", "srv");
+  ok("la card attraversa la pagina",
+     el._dashboard.pages[0].sections[0].items.length === 1
+     && el._dashboard.pages[1].sections[0].items.length === 1
+     && el._dashboard.pages[1].sections[0].items[0].id === "mpc",
+     JSON.stringify([el._dashboard.pages[0].sections[0].items.map((i) => i.id),
+                     el._dashboard.pages[1].sections[0].items.map((i) => i.id)]));
+  ok("e siccome è finita su un'altra pagina l'editor si chiude invece di modificare l'invisibile",
+     el._selected === null);
+
+  // spostandola dentro la stessa pagina, invece, resta selezionata
+  el._dashboard.pages[1].sections.push({ id: "srv2", title: "Rete", icon: "mdi:lan",
+    accent: null, collapsed: false, items: [] });
+  el._pageIndex = 1;
+  el._selected = { kind: "card", sectionId: "srv", itemId: "mpc" };
+  el._reassignCard("srv", "mpc", "srv2");
+  ok("nella stessa pagina la selezione segue la card",
+     el._selected && el._selected.sectionId === "srv2");
+  ok("spostare una card su se stessa non fa niente",
+     (() => { el._reassignCard("srv2", "mpc", "srv2");
+       return el._section("srv2").items.length === 1; })());
+  ok("una destinazione inesistente non fa sparire la card",
+     (() => { el._reassignCard("srv2", "mpc", "non-esiste");
+       return el._section("srv2").items.length === 1; })());
+
+  // il comando deve essere SULLA card, non tre livelli sotto
+  el._pageIndex = 0;
+  el._editing = true; el._selected = null;
+  el._signature = ""; el.render();
+  const mvHtml = el.innerHTML;
+  ok("ogni card in modifica offre «sposta in…» senza aprire CONFIGURA",
+     /data-card-to/.test(mvHtml) && /SPOSTA IN/.test(mvHtml), "");
+  ok("e l'elenco è raggruppato per pagina",
+     /<optgroup label="Casa"/.test(mvHtml) && /<optgroup label="Tecnica"/.test(mvHtml), "");
+  ok("la sezione in cui la card sta già è marcata e non selezionabile",
+     /<option value="mon" disabled>Monitoraggio · è qui<\/option>/.test(mvHtml),
+     (mvHtml.match(/<option value="mon"[^>]*>[^<]*/) || [""])[0]);
+  el._editing = false;
+
+  el._dashboard.pages = savedPages;
+  el._pageIndex = 0;
+  el._selected = null;
+}
+el._dashboard.pages[0].sections = [ {id:"a",title:"A",icon:"mdi:x",accent:null,collapsed:false,items:[]},
+                                    {id:"b",title:"B",icon:"mdi:y",accent:null,collapsed:false,items:[{id:"i1",type:"entity",entity_id:"person.oscar",appearance:{},states:{},actions:{}}]} ];
+el._selected = {kind:"card",sectionId:"b",itemId:"i1"};
 el._moveSection("b",-1);
 ok("riordina sezioni", el._sections()[0].id === "b");
 el._addSection({title:"Nuova",icon:"mdi:z",accent:"#fff"});
@@ -4483,6 +4558,112 @@ console.log("\n== 48. CARD SISTEMA: UN COMPUTER, NON UN IMPIANTO ==");
      (e48.match(/data-sys-thr=/g) || []).length === 8,
      String((e48.match(/data-sys-thr=/g) || []).length));
   ok("editor sistema: nessun undefined", !/>undefined</.test(e48));
+
+  // --- il confronto con i limiti
+  //
+  // La richiesta parte in modo sincrono, la risposta no: qui si controlla la
+  // richiesta subito, poi si mette in cache una risposta finta e si guarda il
+  // disegno. Cosi' la sezione resta sincrona come tutto il resto del file.
+  el._sysStat = {}; el._sysStatPending = null;
+  const savedWS48 = el._hass.callWS;
+  let askedStats = null;
+  el._hass.callWS = (m) => {
+    if (m.type === "recorder/statistics_during_period") askedStats = m;
+    return new Promise(() => { /* non risponde mai: sta ancora leggendo */ });
+  };
+
+  const gaugeHtml0 = el._renderCard(card48, sec48);
+  ok("le barre dei limiti ci sono anche prima che le statistiche rispondano",
+     /class="sg-row"/.test(gaugeHtml0), "");
+  ok("e mentre aspetta lo dice invece di mostrare un intervallo inventato",
+     /Lettura del minimo/.test(gaugeHtml0) && !/class="sg-range"/.test(gaugeHtml0), "");
+  ok("chiede min e max in una sola interrogazione",
+     askedStats && askedStats.types.includes("min") && askedStats.types.includes("max")
+     && askedStats.statistic_ids.length === 8,
+     askedStats && JSON.stringify([askedStats.types, askedStats.statistic_ids.length]));
+  ok("su una finestra di 24 ore, ora per ora",
+     askedStats && askedStats.period === "hour"
+     && Math.abs((Date.parse(askedStats.end_time) - Date.parse(askedStats.start_time)) - 86400000) < 60000,
+     askedStats && askedStats.period);
+
+  const statKey = askedStats.statistic_ids.join(",");
+  el._sysStatPending = null;
+  el._sysStat = { [statKey]: { ts: Date.now(), by: Object.fromEntries(
+    askedStats.statistic_ids.map((id) => [id, { min: 12, max: 74 }])) } };
+
+  const gaugeHtml = el._renderCard(card48, sec48);
+  ok("arrivate le statistiche compare l'intervallo delle 24 ore",
+     /class="sg-range"/.test(gaugeHtml), "");
+  // CPU + GPU + memoria + due dischi + tre temperature
+  ok("c'è una barra per CPU, GPU, memoria, ogni disco e ogni temperatura",
+     (gaugeHtml.match(/class="sg-row"/g) || []).length === 8,
+     String((gaugeHtml.match(/class="sg-row"/g) || []).length));
+  // Le righe si isolano su sg-track: spezzare su sg-row lascia in coda tutto
+  // quello che viene DOPO l'ultima riga - pastiglie comprese - e una ricerca
+  // per nome ci cascherebbe dentro.
+  const gRows = gaugeHtml.split('class="sg-row"').filter((r) => /class="sg-track"/.test(r));
+  ok("le soglie sono disegnate come fasce, non come numeri soltanto",
+     /class="sg-band warn"/.test(gaugeHtml) && /class="sg-band alarm"/.test(gaugeHtml));
+  ok("e c'è la tacca di dove si è adesso", /class="sg-now"/.test(gaugeHtml));
+  ok("la legenda spiega le tre cose", /ultime 24 ore/.test(gaugeHtml)
+     && /attenzione/.test(gaugeHtml) && /allarme/.test(gaugeHtml));
+  ok("limiti: nessun undefined", !/undefined/.test(gaugeHtml),
+     (gaugeHtml.match(/.{40}undefined.{20}/) || [""])[0]);
+  ok("limiti: div bilanciati",
+     (gaugeHtml.match(/<div/g) || []).length === (gaugeHtml.match(/<\/div>/g) || []).length);
+
+  // La memoria e' una percentuale calcolata: le sue statistiche sono in MiB e
+  // vanno riportate sulla stessa scala, altrimenti la barra pallida finirebbe
+  // dove capita per un valore che vale lo 0,9%.
+  ok("l'intervallo della memoria è riportato in percentuale, non lasciato in MiB", (() => {
+    const mem = gRows.find((r) => /Memoria/.test(r));
+    if (!mem) return false;
+    const m = /class="sg-range" style="left:([\d.]+)%;width:([\d.]+)%/.exec(mem);
+    // 12 MiB su 8000 => 0,15% ; 74 MiB => 0,93%
+    return m && parseFloat(m[1]) < 1 && parseFloat(m[2]) < 2;
+  })(), (gRows.find((r) => /Memoria/.test(r)) || "").slice(0, 200));
+  ok("mentre quello di un disco, che è già una percentuale, resta com'è", (() => {
+    const d = gRows.find((r) => /hostroot/.test(r));
+    const m = d && /class="sg-range" style="left:([\d.]+)%;width:([\d.]+)%/.exec(d);
+    return m && Math.abs(parseFloat(m[1]) - 12) < 0.5 && Math.abs(parseFloat(m[2]) - 62) < 0.5;
+  })(), "");
+  ok("la tacca del disco all'80,7% cade all'80,7% della pista", (() => {
+    const d = gRows.find((r) => /hostroot/.test(r));
+    const m = d && /class="sg-now" style="left:([\d.]+)%/.exec(d);
+    return m && Math.abs(parseFloat(m[1]) - 80.7) < 0.3;
+  })(), "");
+  ok("la scala di una temperatura va oltre l'allarme, così si vede di quanto lo si supera",
+     (() => {
+       const t = gRows.find((r) => /Package id 0/.test(r));
+       const m = t && /class="sg-band alarm" style="left:([\d.]+)%/.exec(t);
+       // allarme 85 su una scala 85*1,15 => circa l'87% della pista
+       return m && parseFloat(m[1]) > 80 && parseFloat(m[1]) < 95;
+     })(), "");
+
+  // un recorder che non risponde non deve far sparire le barre in silenzio
+  el._sysStat = { [statKey]: { ts: Date.now(), by: {}, error: true } };
+  const noStat = el._renderCard(card48, sec48);
+  ok("senza recorder le barre restano, con soglie e lettura di adesso",
+     /class="sg-row"/.test(noStat) && /class="sg-now"/.test(noStat)
+     && !/class="sg-range"/.test(noStat), "");
+  ok("e la card lo dice invece di far finta di niente",
+     /Senza statistiche a lungo termine/.test(noStat), "");
+
+  // e nemmeno una singola lettura senza statistiche deve sparire in silenzio
+  el._sysStat = { [statKey]: { ts: Date.now(), by: Object.fromEntries(
+    askedStats.statistic_ids.slice(1).map((id) => [id, { min: 12, max: 74 }])) } };
+  const oneMissing = el._renderCard(card48, sec48);
+  ok("una sola lettura senza statistiche viene dichiarata, non nascosta",
+     /1 di queste letture non hanno statistiche/.test(oneMissing), "");
+
+  // si può spegnere: è una scelta, non un obbligo
+  el._sysStat = { [statKey]: { ts: Date.now(), by: {} } };
+  const noGauge = el._renderCard(Object.assign({}, card48, { gauges: false }), sec48);
+  ok("il confronto si può spegnere", !/class="sg-row"/.test(noGauge)
+     && /class="sys-ring"/.test(noGauge));
+
+  el._hass.callWS = savedWS48;
+  el._sysStat = {}; el._sysStatPending = null;
 
   el._editing = false; el._selected = savedSel; el._dashboard = savedDash48;
   el._registry = savedReg;

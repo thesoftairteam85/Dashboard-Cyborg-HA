@@ -1659,6 +1659,84 @@ const DEFAULT_DASH = {
   await phoneEco.screenshot({ path: path.resolve(__dirname, "74-phone-eco-history.png") });
   await phoneEco.close();
 
+  console.log("\n== SPOSTARE UNA CARD ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true });
+  await page.evaluate(() => {
+    const el = window.__EL__;
+    // Una seconda pagina CON sezioni: la mappa 3D non ne ha, e senza una
+    // destinazione fuori pagina il caso che conta non verrebbe provato.
+    el._dashboard.pages.push({ id: "p-tec", title: "Tecnica", icon: "mdi:cog",
+      type: "sections", sections: [{ id: "sec-srv", title: "Mini PC · Server",
+        icon: "mdi:server", accent: null, collapsed: false, items: [] }] });
+    el._editing = true; el._signature = ""; el.render();
+  });
+  await page.waitForTimeout(700);
+
+  const mv = await page.evaluate(() => {
+    const sels = Array.from(document.querySelectorAll("[data-card-to]"));
+    const first = sels[0];
+    const box = first ? first.getBoundingClientRect() : null;
+    const tools = first ? first.closest(".card-tools").getBoundingClientRect() : null;
+    const groups = first ? Array.from(first.querySelectorAll("optgroup")).map((g) => g.label) : [];
+    const disabled = first ? Array.from(first.options).filter((o) => o.disabled).map((o) => o.textContent.trim()) : [];
+    return { n: sels.length, groups, disabled,
+      w: box ? Math.round(box.width) : 0, h: box ? Math.round(box.height) : 0,
+      right: box ? Math.round(box.right) : 0,
+      toolsRight: tools ? Math.round(tools.right) : 0,
+      pages: (window.__EL__._dashboard.pages || []).length,
+      // Le pagine che hanno sezioni: la mappa 3D non ne ha, e giustamente non
+      // compare fra le destinazioni.
+      pagesWithSections: (window.__EL__._dashboard.pages || [])
+        .filter((p) => (p.sections || []).length).length,
+      allSections: window.__EL__._allSections().length };
+  });
+  ok("ogni card in modifica porta il comando «sposta in…» addosso",
+     mv.n >= 3, String(mv.n));
+  ok("il comando è grande abbastanza da toccarlo", mv.w >= 60 && mv.h >= 22,
+     mv.w + "x" + mv.h);
+  ok("e non sfonda la barra dei comandi della card",
+     mv.right <= mv.toolsRight + 1, mv.right + " vs " + mv.toolsRight);
+  ok("l'elenco è raggruppato per pagina, non una lista piatta",
+     mv.groups.length === mv.pagesWithSections && mv.groups.length >= 2,
+     JSON.stringify(mv.groups) + " su " + mv.pages + " pagine");
+  ok("una pagina senza sezioni — la mappa 3D — non compare fra le destinazioni",
+     mv.pagesWithSections < mv.pages, mv.pagesWithSections + "/" + mv.pages);
+  ok("comprende le sezioni di TUTTE le pagine, non solo di questa",
+     mv.allSections > mv.groups.length && mv.pages > 1,
+     mv.allSections + " sezioni su " + mv.pages + " pagine");
+  ok("la sezione dove la card sta già è marcata «è qui» e non si può scegliere",
+     mv.disabled.length === 1 && /è qui/.test(mv.disabled[0]), JSON.stringify(mv.disabled));
+
+  // spostarla davvero, su un'altra PAGINA
+  const cardMoved = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sel = document.querySelector("[data-card-to]");
+    const item = sel.getAttribute("data-item");
+    const from = sel.getAttribute("data-sec");
+    // la prima destinazione che sta su un'altra pagina
+    const here = new Set(el._sections().map((s2) => s2.id));
+    const target = el._allSections().find((d) => !here.has(d.id));
+    if (!target) return { skipped: true };
+    sel.value = target.id;
+    sel.onchange();
+    await new Promise((r) => setTimeout(r, 500));
+    const dest = el._allSections().find((d) => d.id === target.id);
+    const src = el._allSections().find((d) => d.id === from);
+    return { item, fromCount: src.section.items.length,
+      landed: dest.section.items.some((i) => i.id === item),
+      selected: el._selected,
+      stillOnScreen: !!document.querySelector(`[data-item="${item}"]`) };
+  });
+  ok("la card cambia pagina davvero", !cardMoved.skipped && cardMoved.landed,
+     JSON.stringify(cardMoved));
+  ok("e sparisce da dove stava", cardMoved.stillOnScreen === false, JSON.stringify(cardMoved));
+  ok("l'editor non resta aperto su qualcosa che non è più su questo schermo",
+     cardMoved.selected === null, JSON.stringify(cardMoved.selected));
+
   console.log("\n== CARD SISTEMA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });
@@ -1749,6 +1827,64 @@ const DEFAULT_DASH = {
   ok("la card non provoca scorrimento orizzontale",
      sys.scrollW <= sys.winW + 1, sys.scrollW + " vs " + sys.winW);
   await page.screenshot({ path: path.resolve(__dirname, "76-system.png") });
+
+  // --- il confronto con i limiti
+  const gauges = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".sg-row")).map((r) => {
+      const track = r.querySelector(".sg-track");
+      const t = track.getBoundingClientRect();
+      const px = (el2) => {
+        if (!el2) return null;
+        const b = el2.getBoundingClientRect();
+        return { left: (b.left - t.left) / t.width * 100, width: b.width / t.width * 100 };
+      };
+      return { k: (r.querySelector(".sg-k") || {}).textContent.trim(),
+        v: (r.querySelector(".sg-v") || {}).textContent.trim(),
+        trackW: Math.round(t.width), trackH: Math.round(t.height),
+        warn: px(r.querySelector(".sg-band.warn")),
+        alarm: px(r.querySelector(".sg-band.alarm")),
+        range: px(r.querySelector(".sg-range")),
+        now: px(r.querySelector(".sg-now")),
+        nowColor: r.querySelector(".sg-now") ? getComputedStyle(r.querySelector(".sg-now")).backgroundColor : "",
+        right: Math.round(r.getBoundingClientRect().right) };
+    });
+    const card = document.querySelector('[data-card-id="syscard"]');
+    return { rows, legend: document.querySelectorAll(".sg-legend span").length,
+      cardRight: card ? Math.round(card.getBoundingClientRect().right) : 0 };
+  });
+
+  ok("c'è una barra per ogni lettura", gauges.rows.length === 8,
+     JSON.stringify(gauges.rows.map((r) => r.k)));
+  ok("le piste hanno una larghezza e un'altezza vere",
+     gauges.rows.every((r) => r.trackW > 40 && r.trackH >= 8),
+     JSON.stringify([gauges.rows[0].trackW, gauges.rows[0].trackH]));
+  ok("la tacca del disco all'80,7% cade davvero all'80,7% della pista", (() => {
+    const d = gauges.rows.find((r) => /hostroot/.test(r.k));
+    return d && d.now && Math.abs(d.now.left - 80.7) < 1.5;
+  })(), JSON.stringify(gauges.rows.find((r) => /hostroot/.test(r.k))));
+  ok("la fascia di attenzione comincia alla soglia, non a occhio", (() => {
+    const c = gauges.rows.find((r) => /CPU/.test(r.k));
+    return c && c.warn && Math.abs(c.warn.left - 80) < 1.5
+      && c.alarm && Math.abs(c.alarm.left - 95) < 1.5;
+  })(), JSON.stringify(gauges.rows.find((r) => /CPU/.test(r.k))));
+  ok("l'intervallo delle 24 ore è disegnato dove dicono le statistiche", (() => {
+    const d = gauges.rows.find((r) => /hostroot/.test(r.k));
+    // il finto recorder risponde min 10, max 60 su una scala 0-100
+    return d && d.range && Math.abs(d.range.left - 10) < 1.5
+      && Math.abs(d.range.width - 50) < 2;
+  })(), JSON.stringify(gauges.rows.find((r) => /hostroot/.test(r.k))));
+  ok("la tacca non esce mai dalla pista, nemmeno a fondo scala",
+     gauges.rows.every((r) => !r.now || (r.now.left >= -1 && r.now.left <= 101)),
+     JSON.stringify(gauges.rows.map((r) => r.now && Math.round(r.now.left))));
+  ok("il colore della tacca segue la soglia, come l'anello", (() => {
+    const c = gauges.rows.find((r) => /CPU/.test(r.k) && !/GPU/.test(r.k));
+    const d = gauges.rows.find((r) => /hostroot/.test(r.k));
+    return c && d && /6,\s*214,\s*160/.test(c.nowColor) && /255,\s*209,\s*102/.test(d.nowColor);
+  })(), JSON.stringify(gauges.rows.map((r) => [r.k, r.nowColor])));
+  ok("la legenda spiega le tre cose disegnate", gauges.legend === 3, String(gauges.legend));
+  ok("nessuna riga esce dalla card",
+     gauges.rows.every((r) => r.right <= gauges.cardRight + 1),
+     JSON.stringify([gauges.cardRight, gauges.rows.map((r) => r.right)]));
 
   // --- l'editor: ogni casella riscrivibile, e la scelta a mano che vince
   await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),

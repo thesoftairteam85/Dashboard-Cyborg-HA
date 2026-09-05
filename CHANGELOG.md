@@ -4,6 +4,65 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.48.0] - 2026-09-05
+
+Spostare una card dove vuoi, e leggere ogni numero contro i suoi limiti.
+
+### «Sposta in…» addosso alla card
+Spostare una card in un'altra sezione **si poteva già fare**, ma solo da dentro
+CONFIGURA, tre livelli sotto, fra NOME e ICONA — e **solo verso le sezioni della
+pagina che si stava guardando**. Quella seconda parte è il difetto vero:
+«porta Mini PC fuori da Monitoraggio» quasi sempre vuol dire portarlo in una
+sezione che su quella pagina non esiste ancora, e un elenco di destinazioni che
+si ferma al bordo della pagina risponde a una domanda che nessuno ha fatto.
+
+Ora, in modifica, **ogni card porta addosso un «SPOSTA IN…»**, accanto alle
+frecce e a CONFIGURA — dove sta già la mano di chi riordina. L'elenco è
+raggruppato per pagina e comprende **ogni sezione di ogni pagina**; quella in
+cui la card sta già è marcata *«è qui»* e non si può scegliere. Una pagina senza
+sezioni — la mappa 3D — non compare, perché non è un posto dove una card possa
+andare.
+
+Se la card finisce su un'altra pagina, **il pannello di modifica si chiude**:
+tenerlo aperto significherebbe modificare qualcosa che non è più sullo schermo.
+
+### Stato contro i limiti, nella card Sistema
+Un numero da solo non dice se è normale. 33 °C vuol dire una cosa se la macchina
+è stata fra 28 e 34 tutto il giorno, un'altra se un'ora fa toccava 74.
+
+Sotto gli anelli c'è ora **una pista per ogni lettura** — CPU, GPU, memoria,
+ogni disco, ogni temperatura — con sopra tre cose:
+
+- le **soglie** disegnate come fasce di sfondo (ambra l'attenzione, rossa
+  l'allarme), così si vede *quanto* manca al limite e non solo che non lo si è
+  raggiunto;
+- **dove quella lettura è stata nelle ultime 24 ore**, come barra pallida;
+- **dov'è adesso**, come tacca, del colore della soglia in cui cade.
+
+Le statistiche a lungo termine portano già `min` e `max` per bucket su tutto ciò
+che ha `state_class: measurement`: **una sola interrogazione** per tutte le
+letture insieme, e nessuno storico da tenere per conto nostro.
+
+Tre stati, tre frasi diverse: sta ancora leggendo, il recorder non risponde,
+oppure alcune letture non hanno statistiche. Disegnano la stessa cosa — nessuna
+barra pallida — ma non sono la stessa cosa, e tacere in tutti e tre i casi
+lascerebbe a indovinare.
+
+La memoria è l'unica percentuale **calcolata** e non letta: le sue statistiche
+arrivano in MiB e vengono riportate sulla stessa scala con cui è calcolata la
+lettura di adesso. Senza, la barra pallida finirebbe a fondo pista per un
+valore che vale il 25%.
+
+Si spegne dall'editor con una spunta: è una scelta, non un obbligo.
+
+### Verificato
+- 1230 asserzioni frontend, **462 misurate** in Chromium: che la tacca del disco
+  all'80,7 % cada davvero all'80,7 % della pista, che la fascia d'attenzione
+  cominci esattamente sulla soglia e non a occhio, che l'intervallo delle 24 ore
+  stia dove dicono le statistiche, che la tacca non esca mai dalla pista
+  nemmeno a fondo scala, e che una card spostata su un'altra pagina sparisca
+  davvero da dove stava.
+
 ## [0.47.0] - 2026-09-04
 
 Card **Sistema**: un computer sorvegliato per quello che è, non per le
