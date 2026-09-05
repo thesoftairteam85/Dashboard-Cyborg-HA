@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 18, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 19, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -908,10 +908,38 @@ dash18 = schema.normalize_dashboard({"version": 17, "pages": [{"id": "p", "title
     "sections": [{"id": "s", "title": "S", "items": [
         {"id": "sy", "type": "system", "device": "abc123",
          "cpu": "sensor.cpu", "temps": ["sensor.t1"], "warn_disk": 90}]}]}]})
-assert dash18["version"] == 18, dash18["version"]
+assert dash18["version"] == schema.SCHEMA_VERSION, dash18["version"]
 kept18 = dash18["pages"][0]["sections"][0]["items"][0]
 assert kept18["device"] == "abc123"
 assert kept18["cpu"] == "sensor.cpu"
 assert kept18["temps"] == ["sensor.t1"]
 assert kept18["warn_disk"] == 90.0
 print("schema: card Sistema (v18) ok")
+
+
+# ---------------------------------------------------------------------------
+# v19: zone e sensori della centrale di allarme.
+#
+# Non e' legato al `type` della card ma all'entita' collegata: qualunque card
+# puntata a un alarm_control_panel deve poter dire quali sensori sorveglia.
+def _al(**kw):
+    item = {"id": "al", "type": "entity", "entity_id": "alarm_control_panel.casa"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+al = _al()
+assert al["show_zones"] is True
+assert al["zones"] == []
+assert al["battery_warn"] == 20
+# la lista tiene solo entity_id, con un tetto
+assert _al(zones=["binary_sensor.a", "rotto", 3])["zones"] == ["binary_sensor.a"]
+assert len(_al(zones=["binary_sensor.z%d" % i for i in range(200)])["zones"]) == 120
+# la soglia di batteria sta fra 1 e 99: zero direbbe "mai", cento "sempre"
+assert _al(battery_warn=0)["battery_warn"] == 1
+assert _al(battery_warn=150)["battery_warn"] == 99
+assert _al(battery_warn="boh")["battery_warn"] == 20
+# una card che NON punta a una centrale non si porta dietro queste chiavi
+altro = schema.normalize_item({"id": "x", "type": "entity", "entity_id": "light.sala"}, 0)
+assert "zones" not in altro and "battery_warn" not in altro
+print("schema: zone della centrale (v19) ok")

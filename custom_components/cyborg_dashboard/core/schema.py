@@ -8,6 +8,11 @@ v3  pages[].sections[].items[]           sections are first-class objects with
                                          their own id/title/icon/accent
 v4  pages[].type                         a page is either a "sections" page or a
                                          "floorplan" page (3D map with rooms[])
+v19 items[].zones / show_zones /        an alarm card also answers "posso
+    battery_warn                        inserire?": which contact is open,
+                                        which sensor has a flat battery, which
+                                        stopped answering. Matched on
+                                        device_class, never on brand.
 v18 items[].device + slot/soglie        the "system" card: one computer watched
                                         by picking the DEVICE, with every slot
                                         it finds by itself overridable by hand.
@@ -61,7 +66,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -732,6 +737,20 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["vat"] = 0.0
         period = result.get("period")
         result["period"] = period if period in ("today", "week", "month", "year") else "month"
+    # Le zone della centrale: riconosciute per device_class, non per marca.
+    # Vale per qualunque card collegata a un alarm_control_panel, quindi non e'
+    # legato al `type` ma alla presenza delle chiavi.
+    if str(result.get("entity_id") or "").startswith("alarm_control_panel."):
+        result["show_zones"] = result.get("show_zones", True) is not False
+        rows = result.get("zones")
+        result["zones"] = (
+            [i for i in rows if isinstance(i, str) and "." in i][:120]
+            if isinstance(rows, list) else []
+        )
+        try:
+            result["battery_warn"] = max(1, min(99, int(float(result.get("battery_warn", 20)))))
+        except (TypeError, ValueError):
+            result["battery_warn"] = 20
     if result.get("type") == "system":
         # La card Sistema parte da un apparecchio e trova il resto da sola.
         # Ogni casella ha pero' la sua scrittura a mano, e una lista vuota

@@ -4,6 +4,43 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.49.0] - 2026-09-05
+
+La centrale risponde anche alla domanda vera: **posso inserire?**
+
+### Zone e sensori, sopra i pulsanti
+Una centrale è un'entità; un impianto vero è trenta. Quello che serve prima di
+inserire non è lo stato della centrale — quello si vede — ma quale contatto è
+aperto, quale sensore ha la batteria a terra e quale ha smesso di rispondere.
+
+Sopra i pulsanti compaiono ora delle pastiglie: **in allarme**, **manomessi**,
+**aperte**, **non rispondono**, **batteria scarica**. Se non c'è niente da dire,
+una riga sola: *«N sensori, tutto a posto»* — non cinque pastiglie a zero. Le
+aperture aperte sono anche elencate per nome e stanza, perché inserendo la
+centrale le escluderà o rifiuterà, e conviene saperlo **prima** di premere.
+
+### Nessuna marca nel codice
+Il riconoscimento è per **`device_class`** — porta, finestra, basculante,
+movimento, presenza, urto, rumore, fumo, gas, monossido, allagamento,
+manomissione, guasto — e mai per nome o per integrazione. Il giorno che la
+centrale cambia marca, questa parte non cambia una riga.
+
+La **batteria** viene cercata sull'**entità sorella dello stesso apparecchio**,
+non fra gli attributi del contatto: è dove la mettono quasi tutte le
+integrazioni, e guardare solo negli attributi vuol dire non trovarla mai. Stessa
+strada per la manomissione. La soglia di «scarica» è tua (di fabbrica 20%).
+
+Come sempre: l'elenco trovato da solo si può riscrivere a mano, sensore per
+sensore, e un elenco vuoto torna a significare «trovali tu».
+
+### Verificato
+- 1255 asserzioni frontend, **474 misurate** in Chromium: che le zone stiano
+  **sopra** i pulsanti (la domanda viene prima del gesto), che un'apertura
+  aperta sia ambra e non verde, che le pastiglie siano abbastanza grandi da
+  toccarle, che niente esca dalla card, e che escludendo un sensore la lista
+  trovata diventi davvero una lista scritta a mano.
+- Schema v19.
+
 ## [0.48.0] - 2026-09-05
 
 Spostare una card dove vuoi, e leggere ogni numero contro i suoi limiti.

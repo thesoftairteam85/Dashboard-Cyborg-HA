@@ -1659,6 +1659,96 @@ const DEFAULT_DASH = {
   await phoneEco.screenshot({ path: path.resolve(__dirname, "74-phone-eco-history.png") });
   await phoneEco.close();
 
+  console.log("\n== ZONE E SENSORI DELLA CENTRALE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, alarm: true });
+  await page.waitForTimeout(900);
+
+  const zn = await page.evaluate(() => {
+    // La card giusta e' quella che CONTIENE il blocco delle zone: nella pagina
+    // ce n'e' piu' d'una legata all'allarme, e misurare le pastiglie di una
+    // dentro i bordi di un'altra e' un confronto senza senso.
+    const zonesTop0 = document.querySelector(".al-zones");
+    const card = zonesTop0 ? zonesTop0.closest(".item") : null;
+    const box = card ? card.getBoundingClientRect() : null;
+    const chips = Array.from((card || document).querySelectorAll(".az-chip")).map((c) => {
+      const b = c.getBoundingClientRect();
+      return { t: c.textContent.replace(/\s+/g, " ").trim(),
+        color: getComputedStyle(c).color,
+        w: Math.round(b.width), h: Math.round(b.height), right: Math.round(b.right) };
+    });
+    const rows = Array.from((card || document).querySelectorAll(".az-row")).map((r) => ({
+      k: (r.querySelector(".az-k") || {}).textContent.trim(),
+      right: Math.round(r.getBoundingClientRect().right),
+      h: Math.round(r.getBoundingClientRect().height) }));
+    const zonesTop = document.querySelector(".al-zones");
+    const grid = document.querySelector(".al-grid");
+    return { chips, rows,
+      // le zone devono stare SOPRA i pulsanti: la domanda "posso inserire?"
+      // viene prima del gesto
+      zonesAbove: !!(zonesTop && grid)
+        && zonesTop.getBoundingClientRect().top < grid.getBoundingClientRect().top,
+      buttons: document.querySelectorAll("[data-alarm-act]").length,
+      cardRight: box ? Math.round(box.right) : 0,
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth };
+  });
+
+  ok("la centrale mostra lo stato dei sensori, non solo il proprio",
+     zn.chips.length + zn.rows.length > 0,
+     JSON.stringify(zn.chips.map((c) => c.t)));
+  ok("le zone stanno sopra i pulsanti: «posso inserire?» viene prima del gesto",
+     zn.zonesAbove === true);
+  ok("i pulsanti della centrale restano tutti", zn.buttons >= 3, String(zn.buttons));
+  ok("le pastiglie sono grandi abbastanza da toccarle",
+     zn.chips.every((c) => c.w >= 60 && c.h >= 20), JSON.stringify(zn.chips.map((c) => [c.w, c.h])));
+  ok("un'apertura aperta è ambra, non verde",
+     zn.chips.some((c) => /apert/.test(c.t) && /255,\s*209,\s*102/.test(c.color)),
+     JSON.stringify(zn.chips.map((c) => [c.t, c.color])));
+  ok("niente esce dalla card",
+     zn.chips.every((c) => c.right <= zn.cardRight + 1)
+     && zn.rows.every((r) => r.right <= zn.cardRight + 1),
+     JSON.stringify([zn.cardRight, zn.chips.map((c) => c.right)]));
+  ok("le righe dei sensori hanno un'altezza toccabile",
+     zn.rows.every((r) => r.h >= 18), JSON.stringify(zn.rows.map((r) => r.h)));
+  ok("nessuno scorrimento orizzontale", zn.scrollW <= zn.winW + 1,
+     zn.scrollW + " vs " + zn.winW);
+  await page.screenshot({ path: path.resolve(__dirname, "79-alarm-zones.png") });
+
+  const znEd = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const sec = el._sections().find((s2) => s2.items.some((i) => i.entity_id
+      && i.entity_id.startsWith("alarm_control_panel.")));
+    const item = sec.items.find((i) => i.entity_id && i.entity_id.startsWith("alarm_control_panel."));
+    el._editing = true;
+    el._selected = { kind: "card", sectionId: sec.id, itemId: item.id };
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 500));
+    const eyes = Array.from(document.querySelectorAll("[data-alarm-zone]"));
+    const panel = document.querySelector(".editor");
+    const panelRight = panel ? Math.round(panel.getBoundingClientRect().right) : 0;
+    const rows = eyes.map((e) => Math.round(e.getBoundingClientRect().right));
+    const before = (item.zones || []).length;
+    if (eyes[0]) eyes[0].click();
+    await new Promise((r) => setTimeout(r, 400));
+    return { n: eyes.length, panelRight, rows, before,
+      after: (el._findCard(item.id).zones || []).length,
+      hasBatt: !!document.querySelector("[data-alarm-batt]"),
+      hasToggle: !!document.querySelector("[data-alarm-zones]") };
+  });
+  ok("l'editor di una card di allarme offre l'elenco dei sensori",
+     znEd.n >= 1, String(znEd.n));
+  ok("con la soglia di batteria e l'interruttore del blocco",
+     znEd.hasBatt && znEd.hasToggle, JSON.stringify(znEd));
+  ok("e niente esce dal pannello",
+     znEd.rows.every((r) => r <= znEd.panelRight + 1),
+     JSON.stringify([znEd.panelRight, znEd.rows]));
+  ok("escludendone uno la lista trovata diventa una lista scritta da te",
+     znEd.before === 0 && znEd.after === znEd.n - 1,
+     JSON.stringify(znEd));
+
   console.log("\n== SPOSTARE UNA CARD ==");
   await page.goto("http://127.0.0.1:8899/harness.html");
   await page.waitForFunction("window.__ready === true", { timeout: 15000 });

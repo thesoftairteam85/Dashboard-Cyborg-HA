@@ -4390,6 +4390,123 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                     ok("stato ripristinato dopo la sezione 46", !states["light.sala"]);
                   }
 
+console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
+{
+  const savedReg49 = el._registry, savedSel49 = el._selected, savedDash49 = el._dashboard;
+  const B = (id, dc, state, attrs) => {
+    states[id] = S(state, Object.assign({ friendly_name: id.split(".")[1], device_class: dc }, attrs || {}));
+    return id;
+  };
+  states["alarm_control_panel.ajax"] = S("disarmed", { friendly_name: "Centrale",
+    supported_features: 1 | 2 | 8 });
+  B("binary_sensor.z_porta", "door", "off");
+  B("binary_sensor.z_finestra", "window", "on");          // aperta
+  B("binary_sensor.z_bagno", "window", "on");             // aperta
+  B("binary_sensor.z_movimento", "motion", "off");
+  B("binary_sensor.z_fumo", "smoke", "off");
+  B("binary_sensor.z_allagamento", "moisture", "on");     // in allarme
+  B("binary_sensor.z_persa", "door", "unavailable");      // non risponde
+  B("binary_sensor.z_tamper", "tamper", "on");            // manomesso
+  // la batteria sta su un'ENTITA' SORELLA dello stesso apparecchio
+  states["sensor.z_porta_batteria"] = S("8", { friendly_name: "Porta batteria",
+    device_class: "battery", unit_of_measurement: "%" });
+  // e una che non c'entra niente con la sicurezza, per vedere che resti fuori
+  B("binary_sensor.z_aggiornamento", "update", "on");
+
+  el._registry = { areas: [], byArea: {}, category: {},
+    entityArea: { "binary_sensor.z_porta": "Ingresso" },
+    entityDevice: { "binary_sensor.z_porta": "d1", "sensor.z_porta_batteria": "d1" },
+    deviceEntities: { d1: ["binary_sensor.z_porta", "sensor.z_porta_batteria"] },
+    deviceName: { d1: "Contatto porta" }, orphans: [] };
+
+  const alCard = { id: "al1", type: "entity", entity_id: "alarm_control_panel.ajax",
+    name: "", size: "lg", appearance: {}, states: {}, actions: {}, zones: [] };
+  const alSec = { id: "als", title: "Sicurezza", icon: "mdi:shield", accent: "#ff3d71", items: [alCard] };
+
+  const zones = el._alarmZones(alCard);
+  const mine = zones.filter((z) => z.id.startsWith("binary_sensor.z_"));
+  ok("i sensori si riconoscono dalla classe, non dal nome né dalla marca",
+     mine.length === 8, JSON.stringify(mine.map((z) => z.id)));
+  ok("una classe che non c'entra con la sicurezza resta fuori",
+     !zones.some((z) => z.id === "binary_sensor.z_aggiornamento"));
+  ok("la batteria viene letta dall'entità sorella dello stesso apparecchio",
+     (zones.find((z) => z.id === "binary_sensor.z_porta") || {}).battery === 8,
+     JSON.stringify(zones.find((z) => z.id === "binary_sensor.z_porta")));
+  ok("un sensore che non risponde è marcato tale",
+     (zones.find((z) => z.id === "binary_sensor.z_persa") || {}).unavailable === true);
+  ok("e ne conosce la stanza quando Home Assistant gliela dà",
+     (zones.find((z) => z.id === "binary_sensor.z_porta") || {}).area === "Ingresso");
+
+  const h49 = el._renderCard(alCard, alSec);
+  ok("la card dice quante aperture sono aperte adesso",
+     /<b>2<\/b> aperte/.test(h49), (h49.match(/<b>\d<\/b> [a-z ]+/g) || []).join(" | "));
+  ok("e quante sono in allarme", /<b>1<\/b> in allarme/.test(h49));
+  ok("e quante manomesse", /<b>1<\/b> manomessi/.test(h49));
+  ok("e quante non rispondono", /<b>1<\/b> non rispondono/.test(h49));
+  ok("e quante hanno la batteria a terra", /<b>1<\/b> batteria scarica/.test(h49));
+  ok("le aperture aperte sono elencate, non solo contate",
+     /z_finestra|Finestra/i.test(h49) && /inserendo/.test(h49));
+  ok("zone: nessun undefined", !/undefined/.test(h49),
+     (h49.match(/.{40}undefined.{20}/) || [""])[0]);
+  ok("zone: div bilanciati",
+     (h49.match(/<div/g) || []).length === (h49.match(/<\/div>/g) || []).length);
+  ok("i pulsanti della centrale ci sono ancora, sotto",
+     /data-alarm-act/.test(h49) && /TIENI PREMUTO/.test(h49));
+
+  // tutto a posto: una frase sola, non cinque pastiglie a zero
+  states["binary_sensor.z_finestra"] = S("off", { friendly_name: "z_finestra", device_class: "window" });
+  states["binary_sensor.z_bagno"] = S("off", { friendly_name: "z_bagno", device_class: "window" });
+  states["binary_sensor.z_allagamento"] = S("off", { friendly_name: "z_allagamento", device_class: "moisture" });
+  states["binary_sensor.z_persa"] = S("off", { friendly_name: "z_persa", device_class: "door" });
+  states["binary_sensor.z_tamper"] = S("off", { friendly_name: "z_tamper", device_class: "tamper" });
+  states["sensor.z_porta_batteria"] = S("94", { friendly_name: "Porta batteria",
+    device_class: "battery", unit_of_measurement: "%" });
+  // ...e per provare il caso "tutto a posto" bisogna guardare SOLO i propri
+  // sensori: il banco ne ha altri, aperti, che non c'entrano con questa prova.
+  const soloMiei = Object.assign({}, alCard, { zones: mine.map((z) => z.id) });
+  const hOk = el._renderCard(soloMiei, alSec);
+  ok("quando è tutto a posto lo dice in una riga sola",
+     /tutto a posto/.test(hOk) && !/class="az-chip"/.test(hOk),
+     (hOk.match(/class="az-chip"[\s\S]{0,60}/) || [""])[0]);
+
+  // la soglia di batteria è una scelta
+  states["sensor.z_porta_batteria"] = S("30", { friendly_name: "Porta batteria",
+    device_class: "battery", unit_of_measurement: "%" });
+  ok("con la soglia di fabbrica il 30% non è scarico",
+     !/batteria scarica/.test(el._renderCard(soloMiei, alSec)));
+  ok("alzandola a 40 lo diventa",
+     /batteria scarica/.test(el._renderCard(Object.assign({}, soloMiei, { battery_warn: 40 }), alSec)));
+
+  // scelta a mano: vince, e un elenco vuoto torna automatico
+  ok("un elenco scritto a mano vince su quello trovato",
+     el._alarmZones(Object.assign({}, alCard, { zones: ["binary_sensor.z_porta"] })).length === 1);
+  ok("un elenco vuoto vuol dire «trovali tu»",
+     el._alarmZones(Object.assign({}, alCard, { zones: [] })).length === zones.length
+     && zones.length > 8, String(zones.length));
+  ok("il blocco si può spegnere",
+     !/al-zones/.test(el._renderCard(Object.assign({}, alCard, { show_zones: false }), alSec)));
+
+  // editor
+  el._dashboard.pages[0].sections = [alSec];
+  el._selected = { kind: "card", sectionId: "als", itemId: "al1" };
+  el._editing = true; el._signature = ""; el.render();
+  const e49 = el.innerHTML;
+  ok("l'editor elenca i sensori con un occhio ciascuno",
+     (e49.match(/data-alarm-zone=/g) || []).length === zones.length,
+     (e49.match(/data-alarm-zone=/g) || []).length + " vs " + zones.length);
+  ok("e fa scegliere la soglia di batteria", /data-alarm-batt/.test(e49));
+  ok("e fa spegnere il blocco", /data-alarm-zones/.test(e49));
+  ok("editor zone: nessun undefined", !/>undefined</.test(e49));
+  el._editing = false;
+
+  for (const id of Object.keys(states)) {
+    if (id.startsWith("binary_sensor.z_") || id === "sensor.z_porta_batteria"
+        || id === "alarm_control_panel.ajax") delete states[id];
+  }
+  el._registry = savedReg49; el._selected = savedSel49; el._dashboard = savedDash49;
+  ok("stato ripristinato dopo la sezione 49", !states["binary_sensor.z_porta"]);
+}
+
 console.log("\n== 48. CARD SISTEMA: UN COMPUTER, NON UN IMPIANTO ==");
 {
   const savedReg = el._registry, savedDash48 = el._dashboard, savedSel = el._selected;

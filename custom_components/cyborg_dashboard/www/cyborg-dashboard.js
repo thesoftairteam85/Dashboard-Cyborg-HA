@@ -5514,6 +5514,123 @@ class CyborgDashboard extends HTMLElement {
    * (`code_format`, or `code_arm_required`) the keypad appears; without it the
    * arm call would simply be refused with nothing on screen to explain why.
    */
+/**
+   * Which sensors belong to the alarm, and how they are.
+   *
+   * A panel is one entity; a real system is thirty. What an owner needs before
+   * arming is not the panel's state - he can see that - but the answer to
+   * "posso inserire?": which contact is open, which sensor has a flat battery,
+   * which one stopped answering. Home Assistant already knows all three, on
+   * every brand, because they are `device_class`, `unavailable` and a battery
+   * entity on the same device.
+   *
+   * Nothing here is brand-specific on purpose. The panel today is one make and
+   * will be another tomorrow: matching on device classes rather than on entity
+   * names means the change costs nothing.
+   */
+  _alarmZoneClasses() {
+    return { door: "Porta", window: "Finestra", garage_door: "Basculante",
+      opening: "Apertura", motion: "Movimento", occupancy: "Presenza",
+      vibration: "Urto", sound: "Rumore", smoke: "Fumo", gas: "Gas",
+      carbon_monoxide: "Monossido", moisture: "Allagamento", tamper: "Manomissione",
+      safety: "Sicurezza", problem: "Guasto" };
+  }
+
+  /** I sensori che la card considera: scelti a mano, o trovati per classe. */
+  _alarmZones(item) {
+    const classes = this._alarmZoneClasses();
+    const picked = Array.isArray(item.zones) && item.zones.length ? item.zones : null;
+    const ids = picked || Object.keys(this._hass.states).filter((id) => {
+      if (domainOf(id) !== "binary_sensor") return false;
+      const st = this._hass.states[id];
+      return st && classes[st.attributes.device_class];
+    });
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+    const reg = this._registry || {};
+    const entDev = reg.entityDevice || {};
+    const devEnt = reg.deviceEntities || {};
+    const area = reg.entityArea || {};
+
+    return ids.map((id) => {
+      const st = this._hass.states[id];
+      if (!st) return { id, name: id, missing: true };
+      const dc = st.attributes.device_class || "";
+      // La batteria sta quasi sempre su un'ENTITA' SORELLA dello stesso
+      // apparecchio, non fra gli attributi del contatto. Cercarla solo negli
+      // attributi vuol dire non trovarla quasi mai.
+      let battery = num(st.attributes.battery_level);
+      let low = st.attributes.battery === "low";
+      let tamper = false;
+      const dev = entDev[id];
+      for (const sib of (dev && devEnt[dev]) || []) {
+        const sst = this._hass.states[sib];
+        if (!sst) continue;
+        const sdc = sst.attributes.device_class;
+        if (battery === null && sdc === "battery" && domainOf(sib) === "sensor") {
+          battery = num(sst.state);
+        }
+        if (sdc === "battery" && domainOf(sib) === "binary_sensor" && sst.state === "on") low = true;
+        if (sdc === "tamper" && sib !== id && sst.state === "on") tamper = true;
+      }
+      const unavailable = st.state === "unavailable" || st.state === "unknown";
+      return { id, dc, name: st.attributes.friendly_name || id,
+        area: area[id] || "", state: st.state, open: st.state === "on",
+        battery, low, tamper, unavailable,
+        kind: classes[dc] || dcLabel(dc) || "Sensore" };
+    });
+  }
+
+  /**
+   * The one line that decides whether the house can be armed.
+   *
+   * An open contact does not stop Home Assistant from calling `alarm_arm_away`
+   * - the panel decides that, and most panels either refuse or arm with the
+   * zone excluded. Either way the owner should know BEFORE pressing, not after.
+   */
+  _alarmZonesBlock(item) {
+    if (item.show_zones === false) return "";
+    const rows = this._alarmZones(item).filter((z) => !z.missing);
+    if (!rows.length) return "";
+    const lowLevel = Number.isFinite(Number(item.battery_warn)) ? Number(item.battery_warn) : 20;
+    const open = rows.filter((z) => z.open && !z.unavailable
+      && ["door", "window", "garage_door", "opening"].includes(z.dc));
+    const alarmNow = rows.filter((z) => z.open && !z.unavailable
+      && ["smoke", "gas", "carbon_monoxide", "moisture", "safety"].includes(z.dc));
+    const flat = rows.filter((z) => z.low || (z.battery !== null && z.battery <= lowLevel));
+    const gone = rows.filter((z) => z.unavailable);
+    const tampered = rows.filter((z) => z.tamper || (z.dc === "tamper" && z.open));
+
+    const chip = (list, label, icon, color) => list.length
+      ? `<button class="az-chip" style="--zc:${esc(color)}" data-alarm-zone-open="${esc(label)}">
+          <ha-icon icon="${esc(icon)}"></ha-icon><b>${list.length}</b> ${esc(label)}
+        </button>` : "";
+
+    const detail = (list) => list.map((z) => `<button class="az-row" data-more-info="${esc(z.id)}">
+        <span class="az-k">${esc(z.name)}</span>
+        <span class="az-a">${esc(z.area)}</span>
+        <span class="az-s">${esc(z.unavailable ? "non risponde"
+          : z.battery !== null ? z.battery.toFixed(0) + "%" : z.open ? "aperto" : "")}</span>
+      </button>`).join("");
+
+    const problems = alarmNow.concat(tampered, gone, flat);
+    return `<div class="al-zones">
+      <div class="az-chips">
+        ${chip(alarmNow, "in allarme", "mdi:alert-octagon", "#ff3d71")}
+        ${chip(tampered, "manomessi", "mdi:shield-alert", "#ff3d71")}
+        ${chip(open, "aperte", "mdi:door-open", "#ffd166")}
+        ${chip(gone, "non rispondono", "mdi:wifi-off", "#c77dff")}
+        ${chip(flat, "batteria scarica", "mdi:battery-alert", "#ff924c")}
+        ${!problems.length && !open.length
+          ? `<span class="az-ok"><ha-icon icon="mdi:shield-check"></ha-icon> ${rows.length} sensori, tutto a posto</span>` : ""}
+      </div>
+      ${open.length ? `<div class="az-list">
+        <h6>Aperte adesso — inserendo, la centrale le escluderà o rifiuterà</h6>
+        ${detail(open)}</div>` : ""}
+      ${problems.length ? `<div class="az-list bad">
+        <h6>Da guardare</h6>${detail(problems)}</div>` : ""}
+    </div>`;
+  }
+
   _alarmBody(item, st) {
     if (!st) {
       return `<div class="ov-empty"><ha-icon icon="mdi:shield-off-outline"></ha-icon>
@@ -5552,7 +5669,7 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
 
     if (!modes.length) {
-      return `${head}<div class="al-note">Questa centrale non dichiara nessuna modalità di attivazione.</div>`;
+      return `${head}${this._alarmZonesBlock(item)}<div class="al-note">Questa centrale non dichiara nessuna modalità di attivazione.</div>`;
     }
 
     const keypad = needsCode ? `<label class="al-code">CODICE
@@ -5584,6 +5701,7 @@ class CyborgDashboard extends HTMLElement {
         </button>` : "";
 
     return `${head}${keypad}
+      ${this._alarmZonesBlock(item)}
       <div class="al-grid">${armed || moving ? disarm + armButtons : armButtons + disarm}</div>
       ${panic}${changed}`;
   }
@@ -8804,6 +8922,54 @@ class CyborgDashboard extends HTMLElement {
           </div>`).join("")}
       </div>`}`;
     }
+    return this._compositeEditorRest(card);
+  }
+
+  /**
+   * Le zone, per qualunque card puntata a una centrale.
+   *
+   * Non e' un ramo dell'editor delle card composite: una card di allarme puo'
+   * avere qualunque `type`, e li' dentro non ci passerebbe mai.
+   */
+  _alarmZonesEditor(card) {
+    if (domainOf(card.entity_id) !== "alarm_control_panel") return "";
+      const classes = this._alarmZoneClasses();
+      const auto = Object.keys(this._hass.states).filter((id) => {
+        if (domainOf(id) !== "binary_sensor") return false;
+        const st2 = this._hass.states[id];
+        return st2 && classes[st2.attributes.device_class];
+      });
+      const chosen = Array.isArray(card.zones) && card.zones.length ? card.zones : null;
+      const shown = this._alarmZones(card).filter((z) => !z.missing);
+      return `<div class="section">
+        <strong>ZONE E SENSORI</strong>
+        <span class="hint">Prima di inserire, la domanda vera è «posso?»: quale contatto è aperto, quale sensore ha la batteria a terra, quale ha smesso di rispondere. ${
+          chosen ? `<strong>Elenco scelto da te</strong>: ${chosen.length} sensori.`
+                 : `Trovati da soli per classe: <strong>${auto.length}</strong> sensori.`}</span>
+        <label class="check"><input type="checkbox" data-alarm-zones ${card.show_zones !== false ? "checked" : ""}> Mostra zone e sensori sopra i pulsanti</label>
+        <span class="hint">Il riconoscimento è per <em>device_class</em> — porta, finestra, movimento, fumo, allagamento, manomissione — e non per marca: il giorno che la centrale cambia, questa parte non cambia.</span>
+        <label>BATTERIA SOTTO IL<input type="number" min="1" max="99" step="1"
+          data-alarm-batt value="${card.battery_warn ?? 20}"> %</label>
+        <div class="eco-dev-list" data-keep-scroll="alarm-zones">${auto.map((id) => {
+          const st2 = this._hass.states[id];
+          const on = chosen ? chosen.includes(id) : true;
+          return `<div class="eco-dev-edit">
+            <div class="ede-txt"><strong>${esc(st2.attributes.friendly_name || id)}</strong>
+              <small>${esc(classes[st2.attributes.device_class] || "")}${
+                (this._registry && this._registry.entityArea && this._registry.entityArea[id])
+                  ? " · " + esc(this._registry.entityArea[id]) : ""}</small></div>
+            <button class="mini ${on ? "on" : ""}" data-alarm-zone="${esc(id)}"
+              title="${on ? "Sorvegliato" : "Escluso"}"><ha-icon icon="${
+              on ? "mdi:eye-outline" : "mdi:eye-off-outline"}"></ha-icon></button>
+          </div>`;
+        }).join("") || '<div class="entity-result-empty">Nessun sensore con una classe riconoscibile. Assegna a ogni contatto la sua <code>device_class</code> in Home Assistant e compariranno da soli.</div>'}</div>
+        ${chosen ? `<button class="secondary wide" data-alarm-zone-auto>TORNA A TROVARLI DA SOLO</button>` : ""}
+        <span class="hint">${shown.length} sensori mostrati adesso.</span>
+      </div>`;
+  }
+
+  /** Il resto dell'editor delle card composite. */
+  _compositeEditorRest(card) {
     if (card.type === "economy") {
       const energyStats = Object.keys(this._hass.states).filter((id) => {
         const st = this._hass.states[id];
@@ -9965,6 +10131,7 @@ class CyborgDashboard extends HTMLElement {
         <label>CERCA<input type="text" data-entity-search value="${esc(this._entityQuery)}" placeholder="nome o entity_id..." autocomplete="off"></label>
         <div class="entity-results" data-entity-results data-keep-scroll="entities">${this._entityResults()}</div>
       </div>`}
+      ${this._alarmZonesEditor(card)}
 
       <div class="section">
         <strong>PRESENTAZIONE</strong>
@@ -12342,6 +12509,40 @@ class CyborgDashboard extends HTMLElement {
     if (sysTempAuto && card) sysTempAuto.onclick = () => { card.temps = []; this._touch(); };
     const sysDiskAuto = q("[data-sys-disk-auto]");
     if (sysDiskAuto && card) sysDiskAuto.onclick = () => { card.disks = []; this._touch(); };
+    const alarmZones = q("[data-alarm-zones]");
+    if (alarmZones && card) alarmZones.onchange = () => {
+      card.show_zones = alarmZones.checked;
+      this._touch();
+    };
+    const alarmBatt = q("[data-alarm-batt]");
+    if (alarmBatt && card) alarmBatt.onchange = () => {
+      const v = parseInt(alarmBatt.value, 10);
+      card.battery_warn = Number.isFinite(v) ? Math.max(1, Math.min(99, v)) : 20;
+      this._touch();
+    };
+    all("[data-alarm-zone]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const classes = this._alarmZoneClasses();
+        const autoIds = Object.keys(this._hass.states).filter((id) => {
+          if (domainOf(id) !== "binary_sensor") return false;
+          const st2 = this._hass.states[id];
+          return st2 && classes[st2.attributes.device_class];
+        });
+        const id = el.getAttribute("data-alarm-zone");
+        const cur = Array.isArray(card.zones) && card.zones.length ? card.zones.slice() : autoIds.slice();
+        const i = cur.indexOf(id);
+        if (i >= 0) cur.splice(i, 1); else cur.push(id);
+        // Riscelto tutto = torna automatico: un elenco identico a quello
+        // trovato da solo non deve congelarsi e smettere di seguire i sensori
+        // nuovi.
+        card.zones = cur.length === autoIds.length && autoIds.every((x) => cur.includes(x))
+          ? [] : cur;
+        this._touch();
+      };
+    });
+    const alarmZoneAuto = q("[data-alarm-zone-auto]");
+    if (alarmZoneAuto && card) alarmZoneAuto.onclick = () => { card.zones = []; this._touch(); };
     const sysGauges = q("[data-sys-gauges]");
     if (sysGauges && card) sysGauges.onchange = () => {
       card.gauges = sysGauges.checked;
@@ -13478,6 +13679,27 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .th-hint:hover{border-color:var(--accent);color:var(--accent)}
 
 /* Centrale di allarme */
+.al-zones{display:flex;flex-direction:column;gap:7px;margin:10px 0 2px}
+.az-chips{display:flex;flex-wrap:wrap;gap:6px}
+.az-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:99px;
+  font-size:10.5px;cursor:pointer;color:var(--zc);
+  border:1px solid color-mix(in srgb,var(--zc) 45%,transparent);
+  background:color-mix(in srgb,var(--zc) 12%,transparent)}
+.az-chip b{font-size:12.5px}
+.az-chip ha-icon{--mdc-icon-size:14px}
+.az-ok{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:#06d6a0;opacity:.85}
+.az-ok ha-icon{--mdc-icon-size:15px}
+.az-list>h6{margin:6px 0 3px;font:600 9.5px ui-monospace,monospace;letter-spacing:.1em;
+  opacity:.42;text-transform:uppercase}
+.az-row{display:grid;grid-template-columns:1fr auto auto;gap:9px;align-items:center;
+  width:100%;padding:4px 0;background:transparent;border:0;color:inherit;text-align:left;
+  font-size:11px;cursor:pointer;border-bottom:1px solid color-mix(in srgb,var(--divider-color) 55%,transparent)}
+.az-row:last-child{border-bottom:0}
+.az-row:hover .az-k{color:var(--accent)}
+.az-k{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.az-a{font:10px ui-monospace,monospace;opacity:.4}
+.az-s{font:600 10px ui-monospace,monospace;opacity:.65}
+.al-zones .az-list.bad .az-s{color:#ff924c}
 .al-head{display:flex;align-items:center;gap:11px;margin-top:12px;padding:11px 12px;border-radius:13px;
   background:color-mix(in srgb,var(--al) 11%,transparent);border:1px solid color-mix(in srgb,var(--al) 34%,transparent)}
 .al-head>ha-icon{--mdc-icon-size:26px;color:var(--al);flex-shrink:0}
@@ -14802,7 +15024,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.48.0";
+const CYBORG_BUILD = "0.49.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
