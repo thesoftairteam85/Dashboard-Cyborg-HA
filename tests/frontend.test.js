@@ -4508,6 +4508,33 @@ console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
      mine.length === 8, JSON.stringify(mine.map((z) => z.id)));
   ok("una classe che non c'entra con la sicurezza resta fuori",
      !zones.some((z) => z.id === "binary_sensor.z_aggiornamento"));
+
+  // --- 0.51.0: le prese non sono zone d'allarme.
+  // Una presa Shelly pubblica surriscaldamento, sovracorrente, sovratensione e
+  // sovra potenza tutte e quattro come `problem`, marcate diagnostica. Staccata
+  // dalla rete, diventavano quattro "non risponde" dentro la sicurezza.
+  B("binary_sensor.dz_presa_surriscaldamento", "problem", "unavailable");
+  B("binary_sensor.dz_presa_sovracorrente", "problem", "unavailable");
+  B("binary_sensor.dz_presa_sovratensione", "problem", "unavailable");
+  B("binary_sensor.dz_presa_sovrapotenza", "problem", "unavailable");
+  B("binary_sensor.dz_diag_porta", "door", "unavailable");
+  el._registry.category["binary_sensor.dz_presa_surriscaldamento"] = "diagnostic";
+  el._registry.category["binary_sensor.dz_diag_porta"] = "diagnostic";
+  const auto51 = el._alarmAutoZones();
+  ok("una presa che pubblica il proprio guasto non è una zona d'allarme",
+     !auto51.some((id) => id.indexOf("binary_sensor.dz_presa_") === 0),
+     JSON.stringify(auto51.filter((id) => id.indexOf("binary_sensor.dz_") === 0)));
+  ok("e nemmeno un contatto che l'apparecchio marca come diagnostica",
+     !auto51.includes("binary_sensor.dz_diag_porta"));
+  ok("il numero dei sensori sorvegliati non cambia per colpa delle prese",
+     el._alarmZones(alCard).filter((z) => !z.missing).length === zones.length,
+     el._alarmZones(alCard).length + " vs " + zones.length);
+  ok("quindi la card non annuncia le prese fra i sensori spariti",
+     !/<b>[2-9]<\/b> non rispondono/.test(el._renderCard(alCard, alSec)),
+     (el._renderCard(alCard, alSec).match(/<b>\d<\/b> non rispondono/) || [""])[0]);
+  ok("ma scelta a mano una di quelle entra lo stesso: l'utente sceglie",
+     el._alarmZones(Object.assign({}, alCard,
+       { zones: ["binary_sensor.dz_presa_surriscaldamento"] }))[0].kind === "Guasto");
   ok("la batteria viene letta dall'entità sorella dello stesso apparecchio",
      (zones.find((z) => z.id === "binary_sensor.z_porta") || {}).battery === 8,
      JSON.stringify(zones.find((z) => z.id === "binary_sensor.z_porta")));
@@ -4570,16 +4597,21 @@ console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
   el._selected = { kind: "card", sectionId: "als", itemId: "al1" };
   el._editing = true; el._signature = ""; el.render();
   const e49 = el.innerHTML;
+  const eyes49 = (e49.match(/data-alarm-zone="/g) || []).length;
   ok("l'editor elenca i sensori con un occhio ciascuno",
-     (e49.match(/data-alarm-zone=/g) || []).length === zones.length,
-     (e49.match(/data-alarm-zone=/g) || []).length + " vs " + zones.length);
+     eyes49 >= zones.length, eyes49 + " vs " + zones.length);
+  ok("e tiene le escluse in un cassetto a parte, non le nasconde",
+     /al-extra/.test(e49)
+     && /data-alarm-zone="binary_sensor\.dz_presa_surriscaldamento"/.test(e49));
+  ok("dicendo che sono diagnostica", /diagnostica/.test(e49));
   ok("e fa scegliere la soglia di batteria", /data-alarm-batt/.test(e49));
   ok("e fa spegnere il blocco", /data-alarm-zones/.test(e49));
   ok("editor zone: nessun undefined", !/>undefined</.test(e49));
   el._editing = false;
 
   for (const id of Object.keys(states)) {
-    if (id.startsWith("binary_sensor.z_") || id === "sensor.z_porta_batteria"
+    if (id.startsWith("binary_sensor.z_") || id.startsWith("binary_sensor.dz_")
+        || id === "sensor.z_porta_batteria"
         || id === "alarm_control_panel.ajax") delete states[id];
   }
   el._registry = savedReg49; el._selected = savedSel49; el._dashboard = savedDash49;

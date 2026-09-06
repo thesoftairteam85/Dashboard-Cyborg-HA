@@ -4,6 +4,51 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.51.0] - 2026-09-06
+
+Le prese Shelly del phon non sono zone d'allarme.
+
+### Il difetto
+La card della sicurezza annunciava «4 non rispondono» ed elencava, sotto DA
+GUARDARE, quattro entità della stessa presa: Surriscaldamento, Sovracorrente,
+Sovratensione, Sovra potenza. La presa era staccata dalla rete, quindi tutte e
+quattro erano `unavailable`, e il riconoscimento automatico delle zone le aveva
+prese per sensori dell'impianto.
+
+Motivo: cercava **tutti** i `binary_sensor` con una `device_class` fra quelle
+riconosciute, e fra quelle c'era `problem`. Ma `problem` non è una classe di
+sicurezza: è la classe con cui **qualunque** apparecchio dice «ho qualcosa che
+non va». Shelly la usa per i propri quattro allarmi elettrici, e li marca anche
+`entity_category: diagnostic` — cioè dichiara lui stesso che parlano di sé, non
+della casa.
+
+### La correzione
+Due filtri, non uno, perché uno solo lascia sempre un buco:
+
+- la classe `problem` (e `safety`) **non viene più proposta da sola** — resta
+  però scegliibile a mano, perché un rilevatore tecnico vero marcato `problem`
+  esiste;
+- ogni entità con una `entity_category` (diagnostica o configurazione) è fuori
+  dal riconoscimento automatico.
+
+Il primo funziona subito; il secondo appena il registro entità è caricato. Se il
+registro non c'è ancora, il difetto non torna comunque.
+
+### L'utente sceglie, non il sistema
+Nell'editor della centrale compare un cassetto **«ALTRI n SENSORI, TENUTI
+FUORI»**: elenca esattamente ciò che il riconoscimento ha scartato, dice quali
+sono diagnostica, e ognuno si accende con un clic. Escludere non è nascondere.
+
+### Una funzione sola invece di tre copie
+La stessa condizione era scritta tre volte — nella card, nell'editor e nel
+gestore del pulsante di esclusione. Ora è `_alarmAutoZones()`, letta da tutte e
+tre: tre copie della stessa regola divergono sempre, ed è la seconda volta in
+due versioni che questo difetto si presenta.
+
+### Prove
+7 nuove asserzioni (1274 in totale). Rimettendo il difetto la suite fallisce
+con `<b>6</b> non rispondono`, cioè esattamente lo schermo di partenza.
+
 ## [0.50.0] - 2026-09-06
 
 Quella griglia non era l'elenco delle tue sezioni, e non lo diceva.

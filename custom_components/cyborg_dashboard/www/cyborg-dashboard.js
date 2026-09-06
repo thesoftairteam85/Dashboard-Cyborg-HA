@@ -5621,15 +5621,52 @@ class CyborgDashboard extends HTMLElement {
       safety: "Sicurezza", problem: "Guasto" };
   }
 
+  /**
+   * Le classi che NON vengono mai proposte da sole.
+   *
+   * `problem` e' la classe che ogni apparecchio usa per dire "ho qualcosa che
+   * non va": una presa Shelly pubblica surriscaldamento, sovracorrente,
+   * sovratensione e sovra potenza tutte e quattro come `problem`. Sono
+   * informazioni vere, ma non sono zone di un impianto d'allarme: se la presa
+   * si stacca dalla rete, la card della sicurezza non deve annunciare "4 non
+   * rispondono". Restano scegliibili a mano, perche' un rilevatore tecnico
+   * vero marcato `problem` esiste e deve poter entrare in due clic.
+   */
+  _alarmManualClasses() { return ["problem", "safety"]; }
+
+  /**
+   * I sensori che il riconoscimento automatico e' disposto a proporre.
+   *
+   * Una funzione sola, letta dalla card, dall'editor e dal pulsante di
+   * esclusione: tre copie della stessa condizione divergono sempre, e la
+   * terza copia e' esattamente il difetto che ha messo le prese in sicurezza.
+   *
+   * Due filtri, non uno. La classe scarta i guasti generici; `entity_category`
+   * scarta la diagnostica, cioe' il modo con cui un apparecchio dichiara da
+   * solo che quel sensore parla di se stesso e non della casa. Il primo
+   * funziona subito, il secondo appena il registro e' caricato: se il registro
+   * non c'e' ancora, il difetto non torna comunque.
+   */
+  _alarmAutoZones() {
+    const classes = this._alarmZoneClasses();
+    const manual = this._alarmManualClasses();
+    if (!this._registry && !this._registryLoading) this._loadRegistry();
+    const cat = (this._registry && this._registry.category) || {};
+    return Object.keys(this._hass.states).filter((id) => {
+      if (domainOf(id) !== "binary_sensor") return false;
+      if (cat[id]) return false;
+      const st = this._hass.states[id];
+      if (!st) return false;
+      const dc = st.attributes.device_class;
+      return !!classes[dc] && !manual.includes(dc);
+    });
+  }
+
   /** I sensori che la card considera: scelti a mano, o trovati per classe. */
   _alarmZones(item) {
     const classes = this._alarmZoneClasses();
     const picked = Array.isArray(item.zones) && item.zones.length ? item.zones : null;
-    const ids = picked || Object.keys(this._hass.states).filter((id) => {
-      if (domainOf(id) !== "binary_sensor") return false;
-      const st = this._hass.states[id];
-      return st && classes[st.attributes.device_class];
-    });
+    const ids = picked || this._alarmAutoZones();
     if (!this._registry && !this._registryLoading) this._loadRegistry();
     const reg = this._registry || {};
     const entDev = reg.entityDevice || {};
@@ -9019,11 +9056,7 @@ class CyborgDashboard extends HTMLElement {
   _alarmZonesEditor(card) {
     if (domainOf(card.entity_id) !== "alarm_control_panel") return "";
       const classes = this._alarmZoneClasses();
-      const auto = Object.keys(this._hass.states).filter((id) => {
-        if (domainOf(id) !== "binary_sensor") return false;
-        const st2 = this._hass.states[id];
-        return st2 && classes[st2.attributes.device_class];
-      });
+      const auto = this._alarmAutoZones();
       const chosen = Array.isArray(card.zones) && card.zones.length ? card.zones : null;
       const shown = this._alarmZones(card).filter((z) => !z.missing);
       return `<div class="section">
@@ -9032,7 +9065,7 @@ class CyborgDashboard extends HTMLElement {
           chosen ? `<strong>Elenco scelto da te</strong>: ${chosen.length} sensori.`
                  : `Trovati da soli per classe: <strong>${auto.length}</strong> sensori.`}</span>
         <label class="check"><input type="checkbox" data-alarm-zones ${card.show_zones !== false ? "checked" : ""}> Mostra zone e sensori sopra i pulsanti</label>
-        <span class="hint">Il riconoscimento è per <em>device_class</em> — porta, finestra, movimento, fumo, allagamento, manomissione — e non per marca: il giorno che la centrale cambia, questa parte non cambia.</span>
+        <span class="hint">Il riconoscimento è per <em>device_class</em> — porta, finestra, movimento, fumo, allagamento, manomissione — e non per marca: il giorno che la centrale cambia, questa parte non cambia. Restano fuori la <strong>diagnostica degli apparecchi</strong> e la classe generica <code>problem</code>, che una presa usa per il proprio surriscaldamento.</span>
         <label>BATTERIA SOTTO IL<input type="number" min="1" max="99" step="1"
           data-alarm-batt value="${card.battery_warn ?? 20}"> %</label>
         <div class="eco-dev-list" data-keep-scroll="alarm-zones">${auto.map((id) => {
@@ -9048,6 +9081,34 @@ class CyborgDashboard extends HTMLElement {
               on ? "mdi:eye-outline" : "mdi:eye-off-outline"}"></ha-icon></button>
           </div>`;
         }).join("") || '<div class="entity-result-empty">Nessun sensore con una classe riconoscibile. Assegna a ogni contatto la sua <code>device_class</code> in Home Assistant e compariranno da soli.</div>'}</div>
+        ${(() => {
+          // L'utente sceglie: quello che il riconoscimento scarta deve restare
+          // raggiungibile, altrimenti "automatico" diventa "vietato".
+          const extra = Object.keys(this._hass.states).filter((id) => {
+            if (domainOf(id) !== "binary_sensor" || auto.includes(id)) return false;
+            const st2 = this._hass.states[id];
+            return st2 && classes[st2.attributes.device_class];
+          });
+          if (!extra.length) return "";
+          const added = extra.filter((id) => chosen && chosen.includes(id));
+          return `<details class="al-extra" ${added.length ? "open" : ""}>
+            <summary>ALTRI ${extra.length} SENSORI, TENUTI FUORI${added.length ? ` · ${added.length} aggiunti da te` : ""}</summary>
+            <span class="hint">Guasti generici e diagnostica degli apparecchi. La presa che segnala il proprio sovraccarico non è una zona d'allarme; un rilevatore tecnico vero sì — se ce n'è uno qui dentro, accendilo.</span>
+            <div class="eco-dev-list" data-keep-scroll="alarm-extra">${extra.map((id) => {
+              const st2 = this._hass.states[id];
+              const on = !!(chosen && chosen.includes(id));
+              return `<div class="eco-dev-edit">
+                <div class="ede-txt"><strong>${esc(st2.attributes.friendly_name || id)}</strong>
+                  <small>${esc(classes[st2.attributes.device_class] || "")}${
+                    (this._registry && this._registry.category && this._registry.category[id])
+                      ? " · diagnostica" : ""}</small></div>
+                <button class="mini ${on ? "on" : ""}" data-alarm-zone="${esc(id)}"
+                  title="${on ? "Sorvegliato" : "Escluso"}"><ha-icon icon="${
+                  on ? "mdi:eye-outline" : "mdi:eye-off-outline"}"></ha-icon></button>
+              </div>`;
+            }).join("")}</div>
+          </details>`;
+        })()}
         ${chosen ? `<button class="secondary wide" data-alarm-zone-auto>TORNA A TROVARLI DA SOLO</button>` : ""}
         <span class="hint">${shown.length} sensori mostrati adesso.</span>
       </div>`;
@@ -12625,12 +12686,7 @@ class CyborgDashboard extends HTMLElement {
     all("[data-alarm-zone]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
-        const classes = this._alarmZoneClasses();
-        const autoIds = Object.keys(this._hass.states).filter((id) => {
-          if (domainOf(id) !== "binary_sensor") return false;
-          const st2 = this._hass.states[id];
-          return st2 && classes[st2.attributes.device_class];
-        });
+        const autoIds = this._alarmAutoZones();
         const id = el.getAttribute("data-alarm-zone");
         const cur = Array.isArray(card.zones) && card.zones.length ? card.zones.slice() : autoIds.slice();
         const i = cur.indexOf(id);
@@ -14219,6 +14275,13 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
   .eco-dev .ed-bar,.eco-dev .ed-pct{display:none}
 }
 .eco-dev-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.al-extra{margin-top:10px;border-top:1px dashed color-mix(in srgb,var(--accent) 22%,transparent);padding-top:8px}
+.al-extra summary{cursor:pointer;font:10px ui-monospace,monospace;letter-spacing:.08em;
+  opacity:.55;padding:4px 0;list-style:none}
+.al-extra summary::-webkit-details-marker{display:none}
+.al-extra summary::before{content:"▸ ";display:inline-block;transition:transform .15s}
+.al-extra[open] summary::before{transform:rotate(90deg)}
+.al-extra summary:hover{opacity:.9;color:var(--accent)}
 .eco-dev-edit{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;
   background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
 .cf-edit-row{padding:10px;margin-bottom:8px;border-radius:12px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 70%,transparent)}
@@ -15126,7 +15189,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.50.0";
+const CYBORG_BUILD = "0.51.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
