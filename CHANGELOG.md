@@ -4,6 +4,47 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.50.0] - 2026-09-06
+
+Quella griglia non era l'elenco delle tue sezioni, e non lo diceva.
+
+### Il difetto: due posti, due vocabolari, la stessa azione
+In alto quattro pulsanti — STANZE, LUCI, TEMPERATURE, CLIMA. Nell'editor della
+pagina una griglia di riquadri colorati — Sicurezza, Energia, Clima,
+Illuminazione, Presenza, Monitoraggio, Economia, Sistema. Sembravano due metà
+dello stesso elenco, e nessuna delle due diceva cosa fosse.
+
+Non erano l'elenco delle sezioni della dashboard: erano **modelli con cui
+crearne una nuova**. Ora la griglia lo scrive («questi non sono le tue
+sezioni»), **ogni modello dice cosa creerà**, e **i quattro generatori della
+barra stanno anche nella griglia** — un posto solo dove guardare.
+
+### Il modello Sistema è nato prima della card Sistema
+Costruiva una sezione di trenta card `sensor` pescando le entità **per nome**
+con una regex. Dalla 0.47.0 esiste una card che parte dall'**apparecchio** e
+trova tutto da sola: adesso il modello crea **quella**, con l'apparecchio già
+suggerito (quello con più letture numeriche). Suggerito, non imposto: resta una
+casella dell'editor come le altre, e senza un apparecchio adatto la card nasce
+da collegare a mano invece di inventarsi qualcosa.
+
+Il modello si chiama **«Mini PC · Server»**, che è il nome con cui uno lo cerca.
+
+I punteggi di quel modello **restano**, e servono: rivendicano i sensori
+diagnostici in composizione automatica, altrimenti la temperatura della CPU
+finisce fra quelle delle stanze. Ora però rivendicano e basta — una card sola,
+non trenta.
+
+### Nuovo modello: Aperture
+Tapparelle, tende e basculanti. In questa casa non esiste ancora **nessuna**
+entità `cover`, quindi oggi non produce niente: il giorno che arrivano gli
+attuatori la sezione si popola da sola invece di doverla inventare allora.
+
+### Verificato
+- 1267 asserzioni frontend, 474 misurate in Chromium.
+- Provato che il modello Mini PC crea **una** card di tipo `system` e non una
+  per sensore, e che la temperatura della CPU **non** finisce fra le
+  temperature delle stanze né come card singola da nessuna parte.
+
 ## [0.49.0] - 2026-09-05
 
 La centrale risponde anche alla domanda vera: **posso inserire?**

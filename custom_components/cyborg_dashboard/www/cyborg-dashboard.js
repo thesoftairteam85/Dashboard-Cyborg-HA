@@ -76,9 +76,27 @@ const SECTION_ICONS = [
  * an entity lands in exactly one place instead of being duplicated across
  * every section that vaguely matches it. Score 0 = not a match.
  */
+/**
+ * The four sections that are BUILT, not composed.
+ *
+ * They live in the top bar as buttons and, since 0.50.0, in the same grid as
+ * the templates. Averle solo lassu' faceva sembrare la griglia un elenco
+ * incompleto: due posti, due vocabolari, per la stessa azione.
+ */
+const SECTION_BUILDERS = [
+  { k: "rooms", l: "Stanze", icon: "mdi:home-group", accent: "#00e5ff",
+    d: "Una card per ogni area di Home Assistant, coi suoi dispositivi dentro." },
+  { k: "lights", l: "Luci", icon: "mdi:lightbulb-group", accent: "#c77dff",
+    d: "Una card Luci con tutte le luci della casa, per stanza." },
+  { k: "comfort", l: "Temperature", icon: "mdi:home-thermometer", accent: "#4cc9f0",
+    d: "Una card Temperature: temperatura e umidità stanza per stanza." },
+  { k: "thermostat", l: "Clima", icon: "mdi:thermostat-box", accent: "#ff924c",
+    d: "Una card Controllo temperatura: termostati e condizionatori, coi comandi." },
+];
+
 const SECTION_PRESETS = [
   {
-    id: "sicurezza", title: "Sicurezza", icon: "mdi:shield-home", accent: "#ff3d71", limit: 10,
+    id: "sicurezza", title: "Sicurezza", icon: "mdi:shield-home", accent: "#ff3d71", limit: 10, d: "Centrale, contatti, sirene e telecamere.",
     score(id, st) {
       const d = domainOf(id), dc = st.attributes.device_class;
       if (d === "alarm_control_panel") return 100;
@@ -90,7 +108,7 @@ const SECTION_PRESETS = [
     cardType: (id) => (domainOf(id) === "lock" || domainOf(id) === "siren" ? "control" : "status"),
   },
   {
-    id: "energia", title: "Energia", icon: "mdi:flash", accent: "#ffd166", limit: 10,
+    id: "energia", title: "Energia", icon: "mdi:flash", accent: "#ffd166", limit: 10, d: "Potenze, energie, correnti e tensioni dell'impianto.",
     score(id, st) {
       const d = domainOf(id), dc = st.attributes.device_class;
       if (d !== "sensor") return 0;
@@ -102,7 +120,7 @@ const SECTION_PRESETS = [
     cardType: () => "sensor",
   },
   {
-    id: "clima", title: "Clima", icon: "mdi:thermostat", accent: "#00e5ff", limit: 10,
+    id: "clima", title: "Clima", icon: "mdi:thermostat", accent: "#00e5ff", limit: 10, d: "Termostati, condizionatori, temperature e umidità.",
     score(id, st) {
       const d = domainOf(id), dc = st.attributes.device_class;
       if (d === "climate") return 100;
@@ -114,7 +132,7 @@ const SECTION_PRESETS = [
     cardType: (id) => (domainOf(id) === "climate" ? "climate" : domainOf(id) === "sensor" ? "sensor" : "control"),
   },
   {
-    id: "illuminazione", title: "Illuminazione", icon: "mdi:lightbulb-group", accent: "#c77dff", limit: 12,
+    id: "illuminazione", title: "Illuminazione", icon: "mdi:lightbulb-group", accent: "#c77dff", limit: 12, d: "Tutte le luci, e gli interruttori che comandano luci.",
     score(id, st) {
       const d = domainOf(id);
       const name = (st.attributes.friendly_name || id).toLowerCase();
@@ -126,7 +144,7 @@ const SECTION_PRESETS = [
     cardType: () => "control",
   },
   {
-    id: "presenza", title: "Presenza", icon: "mdi:account-group", accent: "#06d6a0", limit: 8,
+    id: "presenza", title: "Presenza", icon: "mdi:account-group", accent: "#06d6a0", limit: 8, d: "Chi è in casa e chi è fuori.",
     score(id, st) {
       const d = domainOf(id);
       if (d === "person") return 100;
@@ -139,24 +157,45 @@ const SECTION_PRESETS = [
   {
     // These two build nothing from entity scoring: they exist so the page
     // editor can drop in a ready-made section holding the composite card.
-    id: "monitoraggio", title: "Monitoraggio", icon: "mdi:gauge-full", accent: "#8ecae6", limit: 0,
+    id: "monitoraggio", title: "Monitoraggio", icon: "mdi:gauge-full", accent: "#8ecae6", limit: 0, d: "Una card Monitoraggio: tensioni, correnti, prelievo contro il limite.",
     score: () => 0, cardType: () => "monitor", seed: "monitor",
   },
   {
-    id: "economia", title: "Economia", icon: "mdi:cash-multiple", accent: "#ffd166", limit: 0,
+    id: "economia", title: "Economia", icon: "mdi:cash-multiple", accent: "#ffd166", limit: 0, d: "Una card Analisi economica: costi, fasce, risparmio.",
     score: () => 0, cardType: () => "economy", seed: "economy",
   },
   {
-    id: "sistema", title: "Sistema", icon: "mdi:chip", accent: "#8d99ae", limit: 8,
+    // Questo modello e' nato PRIMA della card Sistema (0.47.0) e costruiva una
+    // sezione di trenta card `sensor` pescate per nome. Adesso esiste una card
+    // che parte dall'apparecchio e trova tutto da sola: il modello deve usare
+    // quella, non ricostruirla a mano una entita' per volta.
+    id: "sistema", title: "Mini PC · Server", icon: "mdi:server", accent: "#8d99ae",
+    limit: 0, d: "Una card Sistema: CPU, memoria, temperature, dischi e rete di un computer.",
     score(id, st) {
+      // Rivendicare serve anche quando non si costruisce niente: senza questi
+      // punteggi la temperatura della CPU finirebbe fra quelle delle stanze,
+      // che e' esattamente dove non deve stare.
       const d = domainOf(id);
       const name = (st.attributes.friendly_name || id).toLowerCase();
-      if (d === "sensor" && /processor|cpu|memory|memoria|disk|disco|uptime|temperatura del processore/.test(name)) return 85;
-      if (d === "update") return 40;
+      if (d === "sensor" && /processor|cpu|memory|memoria|disk|disco|uptime|swap|container/.test(name)) return 85;
       if (d === "binary_sensor" && st.attributes.device_class === "connectivity") return 60;
       return 0;
     },
-    cardType: () => "sensor",
+    cardType: () => "system", seed: "system",
+  },
+  {
+    // Nessuna entita' `cover` esiste ancora in questa casa. Il modello c'e' lo
+    // stesso: il giorno che arrivano gli attuatori delle tapparelle, la sezione
+    // si popola da sola invece di dover tornare qui a inventarla.
+    id: "aperture", title: "Aperture", icon: "mdi:window-shutter", accent: "#8ecae6",
+    limit: 12, d: "Tapparelle, tende e basculanti: una riga per motore, con i comandi.",
+    score(id, st) {
+      const d = domainOf(id), dc = st.attributes.device_class;
+      if (d === "cover") return 100;
+      if (d === "binary_sensor" && ["garage_door", "opening"].includes(dc)) return 60;
+      return 0;
+    },
+    cardType: () => "control",
   },
 ];
 
@@ -2484,9 +2523,17 @@ class CyborgDashboard extends HTMLElement {
       if (base.seed === "economy") Object.assign(card, { grid_import: null, grid_export: null, solar: null,
         battery_in: null, battery_out: null,
         price_import: 0.25, price_export: 0.10, period: "month" });
+      if (base.seed === "system") {
+        Object.assign(card, { device: this._busiestDevice(), temps: [], disks: [],
+          cpu: null, gpu: null, mem_used: null, mem_free: null, mem_total: null,
+          swap: null, uptime: null, containers: null, gauges: true });
+      }
       section.items.push(card);
       if (base.seed === "monitor") { /* wired by the user in the card editor */ }
       if (base.seed === "economy") this._detectEconomy(card);
+      // Il modello suggerisce l'apparecchio piu' probabile, non lo impone: e'
+      // una casella come tutte le altre e si cambia dall'editor.
+      if (base.seed === "system" && !card.device && !this._registry) this._loadRegistry();
     }
     this._page().sections.push(section);
     this._selected = { kind: "section", sectionId: section.id };
@@ -2718,6 +2765,27 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /**
+   * The device with the most numeric readings.
+   *
+   * A guess, and dichiarata come tale: e' il candidato piu' probabile quando
+   * si crea una sezione «Mini PC · Server» a freddo, non una scelta. Resta una
+   * casella dell'editor come tutte le altre.
+   */
+  _busiestDevice() {
+    const reg = this._registry || {};
+    const devEnt = reg.deviceEntities || {};
+    let best = null, bestN = 2;
+    for (const [did, ids] of Object.entries(devEnt)) {
+      const n = ids.filter((id) => {
+        const st = this._hass.states[id];
+        return st && Number.isFinite(parseFloat(st.state));
+      }).length;
+      if (n > bestN) { bestN = n; best = did; }
+    }
+    return best;
+  }
+
   /** Set a dotted path on the selected card / section. */
   _set(target, path, value) {
     const keys = path.split(".");
@@ -2763,6 +2831,23 @@ class CyborgDashboard extends HTMLElement {
           String(a.st.attributes.friendly_name || a.entityId)
             .localeCompare(String(b.st.attributes.friendly_name || b.entityId)))
         .slice(0, preset.limit);
+      // Un modello con `seed` non fa una card per entita': ne fa UNA, quella
+      // composita, che poi le trova da sola. Le entita' rivendicate servivano
+      // solo a togliere di mezzo la concorrenza degli altri modelli.
+      if (preset.seed === "system") {
+        const device = buckets[preset.id].length ? this._busiestDevice() : null;
+        if (!device) continue;
+        built.push({
+          id: uid("sec"), title: preset.title, icon: preset.icon,
+          accent: preset.accent, collapsed: false,
+          items: [{ id: uid("card"), type: "system", entity_id: "", name: "", size: "lg",
+            appearance: { icon: preset.icon }, states: {}, actions: {},
+            device, temps: [], disks: [], cpu: null, gpu: null, mem_used: null,
+            mem_free: null, mem_total: null, swap: null, uptime: null,
+            containers: null, gauges: true }],
+        });
+        continue;
+      }
       if (!chosen.length) continue;
       built.push({
         id: uid("sec"), title: preset.title, icon: preset.icon,
@@ -10263,13 +10348,21 @@ class CyborgDashboard extends HTMLElement {
       ${this._kioskEditor(p)}
       ${this._hierarchyEditor()}
       <div class="section">
-        <strong>SEZIONI</strong>
-        <span class="hint">Clicca “SEZIONE” su un blocco per configurarlo, oppure aggiungine uno nuovo.</span>
+        <strong>AGGIUNGI UNA SEZIONE</strong>
+        <span class="hint"><strong>Questi non sono le tue sezioni</strong>: sono i modelli con cui crearne una nuova. Le tue sezioni stanno nella pagina, e si configurano col pulsante <em>SEZIONE</em> sopra ciascuna.</span>
         <div class="preset-grid">${SECTION_PRESETS.map((pr) =>
-          `<button type="button" class="preset" data-add-preset="${esc(pr.id)}" style="--accent:${esc(pr.accent)}">
+          `<button type="button" class="preset" data-add-preset="${esc(pr.id)}" style="--accent:${esc(pr.accent)}"
+             title="${esc(pr.d || "")}">
              <ha-icon icon="${esc(pr.icon)}"></ha-icon><span>${esc(pr.title)}</span></button>`).join("")}
-          <button type="button" class="preset" data-add-preset="__blank"><ha-icon icon="mdi:plus"></ha-icon><span>Vuota</span></button>
+          ${SECTION_BUILDERS.map((b) => `<button type="button" class="preset" data-add-builder="${esc(b.k)}"
+             style="--accent:${esc(b.accent)}" title="${esc(b.d)}">
+             <ha-icon icon="${esc(b.icon)}"></ha-icon><span>${esc(b.l)}</span></button>`).join("")}
+          <button type="button" class="preset" data-add-preset="__blank"
+            title="Una sezione vuota, da riempire a mano"><ha-icon icon="mdi:plus"></ha-icon><span>Vuota</span></button>
         </div>
+        <span class="hint">Cosa fa ciascuno:<br>${SECTION_PRESETS.map((pr) =>
+          `<strong>${esc(pr.title)}</strong> — ${esc(pr.d || "")}`).concat(
+          SECTION_BUILDERS.map((b) => `<strong>${esc(b.l)}</strong> — ${esc(b.d)}`)).join("<br>")}</span>
       </div>
       <div class="section">
         <strong>COMPOSIZIONE AUTOMATICA</strong>
@@ -10522,10 +10615,10 @@ class CyborgDashboard extends HTMLElement {
             ${this._kioskPreview ? `<button class="secondary" data-kiosk-exit><ha-icon icon="mdi:eye-off-outline"></ha-icon> ESCI DALL'ANTEPRIMA</button>` : ""}
             ${kiosk ? "" : `${this._editing ? `${floorplan
                  ? '<button class="secondary" data-add-room><ha-icon icon="mdi:plus-box-outline"></ha-icon> STANZA</button>'
-                 : `<button class="secondary" data-add-rooms title="Una card per ogni area di Home Assistant"><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
-                    <button class="secondary" data-add-lights title="Tutte le luci della casa, per stanza"><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
-                    <button class="secondary" data-add-comfort title="Temperatura e umidità stanza per stanza"><ha-icon icon="mdi:home-thermometer"></ha-icon> TEMPERATURE</button>
-                    <button class="secondary" data-add-thermostat title="Termostati e condizionatori, con i comandi"><ha-icon icon="mdi:thermostat-box"></ha-icon> CLIMA</button>
+                 : `<button class="secondary" data-add-rooms title="Scorciatoia: una card per ogni area di Home Assistant. L'elenco completo dei modelli è in SEZIONE."><ha-icon icon="mdi:home-group"></ha-icon> STANZE</button>
+                    <button class="secondary" data-add-lights title="Scorciatoia: tutte le luci della casa, per stanza. L'elenco completo dei modelli è in SEZIONE."><ha-icon icon="mdi:lightbulb-group"></ha-icon> LUCI</button>
+                    <button class="secondary" data-add-comfort title="Scorciatoia: temperatura e umidità stanza per stanza. L'elenco completo dei modelli è in SEZIONE."><ha-icon icon="mdi:home-thermometer"></ha-icon> TEMPERATURE</button>
+                    <button class="secondary" data-add-thermostat title="Scorciatoia: termostati e condizionatori, coi comandi. L'elenco completo dei modelli è in SEZIONE."><ha-icon icon="mdi:thermostat-box"></ha-icon> CLIMA</button>
                     <button class="secondary" data-add-section><ha-icon icon="mdi:plus-box-outline"></ha-icon> SEZIONE</button>`}
                <button data-save class="${this._dirty ? "urgent" : ""}"><ha-icon icon="mdi:content-save"></ha-icon> SALVA</button>` : ""}
             <button class="secondary" data-toggle-edit>
@@ -10692,6 +10785,15 @@ class CyborgDashboard extends HTMLElement {
     if (addLights) addLights.onclick = () => this._addLightSection();
     const addRooms = q("[data-add-rooms]");
     if (addRooms) addRooms.onclick = () => this._addRoomSection();
+    all("[data-add-builder]").forEach((el) => {
+      el.onclick = () => {
+        const k = el.getAttribute("data-add-builder");
+        if (k === "rooms") this._addRoomSection();
+        else if (k === "lights") this._addLightSection();
+        else if (k === "comfort") this._addComfortSection();
+        else if (k === "thermostat") this._addThermostatSection();
+      };
+    });
     const addSec = q("[data-add-section]");
     if (addSec) addSec.onclick = () => this._addSection(null);
 
@@ -15024,7 +15126,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.49.0";
+const CYBORG_BUILD = "0.50.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

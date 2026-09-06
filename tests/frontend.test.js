@@ -61,6 +61,12 @@ const el = new Cls();
 el._hass = hass;
 // const declarations do not escape a direct eval; read the build straight from
 // the source so the test cannot drift from the file it is testing
+// const declarations do not escape a direct eval: il modello che serve alla
+// sezione 50 si ricostruisce qui, con le stesse chiavi che il pannello legge.
+const SECTION_PRESETS_TEST = [
+  { id: "sistema", title: "Mini PC · Server", icon: "mdi:server", accent: "#8d99ae",
+    limit: 0, score: () => 0, cardType: () => "system", seed: "system" },
+];
 const CYBORG_BUILD_TEST = (/const CYBORG_BUILD = "([^"]+)"/.exec(src) || [, ""])[1];
 // const declarations do not escape a direct eval, so the group table is
 // reconstructed here from the same default limits the panel ships.
@@ -96,7 +102,17 @@ ok("potenza -> Energia", byTitle.Energia && byTitle.Energia.items.filter(i => i.
 ok("climate -> Clima", byTitle.Clima && byTitle.Clima.items.some(i => i.entity_id === "climate.thermostat"));
 ok("switch 'Luci scale' -> Illuminazione", byTitle.Illuminazione && byTitle.Illuminazione.items.some(i => i.entity_id === "switch.luci_scale"));
 ok("person -> Presenza", byTitle.Presenza && byTitle.Presenza.items.some(i => i.entity_id === "person.oscar"));
-ok("cpu temp -> Sistema (non Clima)", byTitle.Sistema && byTitle.Sistema.items.some(i => i.entity_id === "sensor.system_monitor_processor_temperature"));
+// Dalla 0.50.0 il modello Sistema non fa piu' una card per sensore: ne fa UNA
+// sola, la card Sistema, che parte dall'apparecchio e trova il resto da sola.
+// I punteggi restano pero' indispensabili, perche' servono a RIVENDICARE i
+// sensori diagnostici: senza, la temperatura della CPU finisce fra quelle
+// delle stanze, che e' esattamente dove non deve stare.
+ok("la temperatura della CPU NON finisce fra le temperature delle stanze",
+   !(byTitle.Clima && byTitle.Clima.items.some(i => i.entity_id === "sensor.system_monitor_processor_temperature")),
+   JSON.stringify((byTitle.Clima ? byTitle.Clima.items : []).map(i => i.entity_id)));
+ok("e nessun'altra sezione se la prende come card singola",
+   !secs.some(sec => sec.items.some(i => i.entity_id === "sensor.system_monitor_processor_temperature")),
+   secs.filter(sec => sec.items.some(i => i.entity_id === "sensor.system_monitor_processor_temperature")).map(x => x.title).join());
 ok("climate card = tipo climate", byTitle.Clima.items.find(i=>i.entity_id==="climate.thermostat").type === "climate");
 ok("power card = tipo sensor", byTitle.Energia.items.filter(i => i.entity_id)[0].type === "sensor");
 ok("luce card = tipo control", byTitle.Illuminazione.items[0].type === "control");
@@ -4389,6 +4405,69 @@ console.log("\n== 37. DISPOSITIVI SENZA AREA ==");
                     if (savedUser === undefined) delete el._hass.user;
                     ok("stato ripristinato dopo la sezione 46", !states["light.sala"]);
                   }
+
+console.log("\n== 50. I MODELLI DI SEZIONE DICONO COSA SONO ==");
+{
+  const savedDash50 = el._dashboard, savedSel50 = el._selected, savedReg50 = el._registry;
+  el._selected = { kind: "page" };
+  el._editing = true; el._signature = ""; el.render();
+  const h50 = el.innerHTML;
+
+  // Il difetto segnalato: la griglia sembrava l'elenco DELLE SUE sezioni, e
+  // non lo era. Adesso deve dirlo.
+  ok("la griglia dichiara di essere un elenco di modelli, non delle sue sezioni",
+     /AGGIUNGI UNA SEZIONE/.test(h50) && /non sono le tue sezioni/i.test(h50), "");
+  ok("e ogni modello dice cosa creerà",
+     /Una card Sistema/.test(h50) && /Tapparelle, tende e basculanti/.test(h50), "");
+
+  // I quattro generatori stavano SOLO nella barra in alto: due posti, due
+  // vocabolari, per la stessa azione.
+  ok("i generatori della barra stanno anche nella griglia",
+     (h50.match(/data-add-builder=/g) || []).length === 4,
+     String((h50.match(/data-add-builder=/g) || []).length));
+  ok("c'è un modello per le aperture, anche se di cover non ce n'è ancora una",
+     /data-add-preset="aperture"/.test(h50));
+  ok("e il modello Sistema si chiama col nome che uno cerca",
+     /Mini PC · Server/.test(h50));
+
+  // Il modello Sistema deve creare la CARD Sistema, non trenta card sensore.
+  el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
+    { id: "p50", title: "P", icon: "mdi:home", type: "sections", sections: [] }] };
+  el._pageIndex = 0;
+  el._registry = { areas: [], byArea: {}, entityArea: {}, category: {},
+    entityDevice: {}, deviceName: { dpc: "Mini PC" },
+    deviceEntities: { dpc: [] }, orphans: [] };
+  // un apparecchio con abbastanza letture numeriche
+  for (let i = 0; i < 6; i++) {
+    states["sensor.mpc50_" + i] = S(String(i + 1), { friendly_name: "MPC " + i,
+      unit_of_measurement: "%", state_class: "measurement" });
+    el._registry.deviceEntities.dpc.push("sensor.mpc50_" + i);
+    el._registry.entityDevice["sensor.mpc50_" + i] = "dpc";
+  }
+  el._addSection(SECTION_PRESETS_TEST.find((p) => p.id === "sistema"));
+  const secNew = el._sections()[el._sections().length - 1];
+  ok("il modello Mini PC crea UNA card, non una per sensore",
+     secNew.items.length === 1, String(secNew.items.length));
+  ok("ed è la card Sistema", secNew.items[0].type === "system", secNew.items[0].type);
+  ok("con l'apparecchio già suggerito",
+     secNew.items[0].device === "dpc", String(secNew.items[0].device));
+  ok("suggerito, non imposto: è una casella come le altre",
+     "device" in secNew.items[0] && secNew.items[0].temps.length === 0);
+
+  // senza apparecchi con letture, non si inventa niente
+  el._registry.deviceEntities = {}; el._registry.entityDevice = {};
+  el._addSection(SECTION_PRESETS_TEST.find((p) => p.id === "sistema"));
+  const secVuota = el._sections()[el._sections().length - 1];
+  ok("senza un apparecchio adatto la card resta da collegare a mano",
+     secVuota.items[0].type === "system" && !secVuota.items[0].device,
+     JSON.stringify(secVuota.items[0].device));
+
+  for (let i = 0; i < 6; i++) delete states["sensor.mpc50_" + i];
+  el._editing = false;
+  el._dashboard = savedDash50; el._selected = savedSel50; el._registry = savedReg50;
+  el._pageIndex = 0;
+  ok("stato ripristinato dopo la sezione 50", !states["sensor.mpc50_0"]);
+}
 
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
 {
