@@ -710,6 +710,44 @@ states["sensor.lavatrice_w"] = S("2010", { friendly_name: "Lavatrice",
      el._flowLoads(bogus, 2180).filter((l) => !l.other).length === 1
      && el._flowLoads(bogus, 2180)[0].entity === "sensor.lavatrice_w");
 }
+
+// --- 0.52.0: il sensore di "Casa" non e' anche un ramo.
+// Lo schema mostrava CASA 356 W e, appesa sotto, la stessa identica lettura
+// col nome dell'interruttore generale: la parentela dichiarata nell'analisi
+// economica puntava all'entita' che e' gia' la radice. Somma dei rami piu'
+// alta del totale di casa, "Non misurato" sparito.
+{
+  const homeFlow = { home: "sensor.generale", devices: [
+    { entity: "sensor.lavatrice_w", name: "Lavatrice", parent: "sensor.generale" },
+    { entity: "sensor.forno", name: "Forno" }] };
+  const hr = el._flowLoads(homeFlow, 2180);
+  ok("un carico dichiarato sotto il sensore di Casa e' una radice dello schema",
+     hr.some((l) => l.entity === "sensor.lavatrice_w"),
+     JSON.stringify(hr.map((l) => l.name)));
+  ok("e il sensore di Casa non viene disegnato una seconda volta come ramo",
+     !hr.some((l) => l.entity === "sensor.generale"),
+     JSON.stringify(hr.map((l) => l.name)));
+  ok("nemmeno se lo si aggiunge fra i carichi monitorati",
+     !el._flowLoads({ home: "sensor.generale", devices: [
+       { entity: "sensor.generale", name: "Generale" },
+       { entity: "sensor.lavatrice_w", name: "Lavatrice" }] }, 2180)
+       .some((l) => l.entity === "sensor.generale"));
+  // Col difetto i rami sommavano piu' del totale di casa e il "Non misurato"
+  // spariva: e' il sintomo che si vede sullo schermo.
+  const solaLav = el._flowLoads({ home: "sensor.generale", devices: [
+    { entity: "sensor.lavatrice_w", name: "Lavatrice", parent: "sensor.generale" }] }, 2180);
+  ok("e il «Non misurato» torna a esistere invece di essere mangiato",
+     solaLav.some((l) => l.other && Math.abs(l.watts - 170) < 1),
+     JSON.stringify(solaLav.map((l) => [l.name, Math.round(l.watts)])));
+  // ...ma con un generale diverso da casa la parentela vale ancora
+  const both = { home: "sensor.casa_w", main: "sensor.generale", devices: [
+    { entity: "sensor.lavatrice_w", name: "Lavatrice", parent: "sensor.casa_w" }] };
+  const br = el._flowLoads(both, 2180).filter((l) => !l.other);
+  ok("con un generale diverso da Casa, chi stava sotto Casa passa al generale",
+     br.length === 1 && br[0].entity === "sensor.generale"
+     && br[0].children.some((c) => c.entity === "sensor.lavatrice_w"),
+     JSON.stringify(br.map((l) => [l.name, l.children.map((c) => c.name)])));
+}
 delete states["sensor.generale"]; delete states["sensor.lavatrice_w"];
 
 // a parent that is not itself a monitored load must not swallow its child
@@ -4430,6 +4468,26 @@ console.log("\n== 50. I MODELLI DI SEZIONE DICONO COSA SONO ==");
   ok("e il modello Sistema si chiama col nome che uno cerca",
      /Mini PC · Server/.test(h50));
 
+  // --- 0.52.0: "Luci" e "Illuminazione", "Clima" e "Clima".
+  // Non erano doppioni ma sinonimi di due cose diverse, messi uno accanto
+  // all'altro senza dire quale fa UNA card e quale ne fa una per entita'.
+  ok("la griglia separa i modelli in due famiglie dichiarate",
+     /UNA CARD SOLA/.test(h50) && /UNA CARD PER OGNI ENTIT/.test(h50), "");
+  ok("nessun modello ha lo stesso nome di un altro",
+     (() => {
+       const names = (h50.match(/<span>[^<]+<\/span>/g) || [])
+         .filter((x) => /preset|Luci|Clima|Stanze|Vuota/.test(x));
+       const only = (h50.match(/data-add-(?:preset|builder)="[^"]+"[^>]*>\s*<ha-icon[^>]*><\/ha-icon><span>([^<]+)<\/span>/g) || [])
+         .map((x) => /<span>([^<]+)<\/span>/.exec(x)[1]);
+       return only.length > 10 && new Set(only).size === only.length;
+     })(), "");
+  ok("il generatore delle luci dice che fa UNA card sola",
+     /Tutte le luci/.test(h50) && /UNA card Luci/.test(h50), "");
+  ok("e il preset illuminazione dice che ne fa una per lampada",
+     /UNA CARD PER OGNI luce/.test(h50), "");
+  ok("c'è un modello per l'irrigazione e il giardino",
+     /data-add-preset="irrigazione"/.test(h50) && /Irrigazione · Giardino/.test(h50), "");
+
   // Il modello Sistema deve creare la CARD Sistema, non trenta card sensore.
   el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
     { id: "p50", title: "P", icon: "mdi:home", type: "sections", sections: [] }] };
@@ -4467,6 +4525,77 @@ console.log("\n== 50. I MODELLI DI SEZIONE DICONO COSA SONO ==");
   el._dashboard = savedDash50; el._selected = savedSel50; el._registry = savedReg50;
   el._pageIndex = 0;
   ok("stato ripristinato dopo la sezione 50", !states["sensor.mpc50_0"]);
+}
+
+console.log("\n== 51. IRRIGAZIONE E PADRI A MONTE ==");
+{
+  const savedDash51 = el._dashboard, savedSel51 = el._selected, savedIdx51 = el._pageIndex;
+
+  // --- il modello irrigazione, provato attraverso la composizione vera
+  states["valve.settore_prato"] = S("closed", { friendly_name: "Settore prato" });
+  states["switch.elettrovalvola_orto"] = S("off", { friendly_name: "Elettrovalvola orto" });
+  states["sensor.umidita_terreno_aiuola"] = S("34", { friendly_name: "Umidità terreno aiuola",
+    device_class: "moisture", unit_of_measurement: "%" });
+  el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
+    { id: "p51", title: "P", icon: "mdi:home", type: "sections", sections: [] }] };
+  el._pageIndex = 0;
+  el._autoCompose(true);
+  const irr = el._sections().find((x) => /Irrigazione/.test(x.title || ""));
+  ok("la composizione automatica crea la sezione Irrigazione · Giardino",
+     !!irr, JSON.stringify(el._sections().map((x) => x.title)));
+  ok("con dentro l'elettrovalvola e il settore",
+     !!irr && irr.items.some((i) => i.entity_id === "valve.settore_prato")
+     && irr.items.some((i) => i.entity_id === "switch.elettrovalvola_orto"),
+     JSON.stringify((irr || { items: [] }).items.map((i) => i.entity_id)));
+  ok("e l'umidità del TERRENO, che non è quella dell'aria",
+     !!irr && irr.items.some((i) => i.entity_id === "sensor.umidita_terreno_aiuola"),
+     JSON.stringify((irr || { items: [] }).items.map((i) => i.entity_id)));
+  ok("una valvola si comanda, non si guarda soltanto",
+     !!irr && (irr.items.find((i) => i.entity_id === "valve.settore_prato") || {}).type === "control");
+  delete states["valve.settore_prato"]; delete states["switch.elettrovalvola_orto"];
+  delete states["sensor.umidita_terreno_aiuola"];
+
+  // --- l'elenco «compreso dentro» deve contenere quello che il disegno usa
+  states["sensor.quadro_fem"] = S("356", { friendly_name: "Interruttore FEM",
+    device_class: "power", unit_of_measurement: "W" });
+  states["sensor.lav51"] = S("51", { friendly_name: "Lavatrice",
+    device_class: "power", unit_of_measurement: "W" });
+  states["sensor.fri51"] = S("26", { friendly_name: "Friggitrice",
+    device_class: "power", unit_of_measurement: "W" });
+  const fCard = { id: "f51", type: "energyflow", entity_id: "", name: "", size: "lg",
+    appearance: {}, states: {}, actions: {},
+    flow: { home: "sensor.quadro_fem", devices: [
+      { entity: "sensor.lav51", name: "Lavatrice" },
+      { entity: "sensor.fri51", name: "Friggitrice" }] } };
+  const fSec = { id: "fs51", title: "Energia", icon: "mdi:flash", accent: "#ffd166", items: [fCard] };
+  el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
+    { id: "p51b", title: "P", icon: "mdi:home", type: "sections", sections: [fSec] }] };
+  el._pageIndex = 0;
+  el._selected = { kind: "card", sectionId: "fs51", itemId: "f51" };
+  el._editing = true; el._signature = ""; el.render();
+  const e51 = el.innerHTML;
+  ok("l'editor spiega che il sensore di Casa è già la radice",
+     /è il sensore di <em>Casa<\/em>/.test(e51) && /senza un padre gli sta già sotto/.test(e51), "");
+  ok("e la voce vuota lo dice, invece di «è un carico a sé»",
+     /— sta sotto Casa —/.test(e51));
+
+  // un padre fuori dai carichi monitorati: il disegno lo usa, l'elenco no
+  el._dashboard.hierarchy = { "sensor.fri51": "sensor.quadro_altro" };
+  states["sensor.quadro_altro"] = S("120", { friendly_name: "Quadro cucina",
+    device_class: "power", unit_of_measurement: "W" });
+  el._signature = ""; el.render();
+  const e51b = el.innerHTML;
+  ok("un padre dichiarato altrove compare fra le scelte, non solo nel disegno",
+     /Contatori a monte/.test(e51b)
+     && /<option value="sensor\.quadro_altro"/.test(e51b),
+     (e51b.match(/Contatori a monte[\s\S]{0,120}/) || [""])[0]);
+  ok("editor del flusso: nessun undefined", !/>undefined</.test(e51b));
+
+  el._editing = false;
+  delete states["sensor.quadro_fem"]; delete states["sensor.lav51"];
+  delete states["sensor.fri51"]; delete states["sensor.quadro_altro"];
+  el._dashboard = savedDash51; el._selected = savedSel51; el._pageIndex = savedIdx51;
+  ok("stato ripristinato dopo la sezione 51", !states["sensor.lav51"]);
 }
 
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");

@@ -85,13 +85,13 @@ const SECTION_ICONS = [
  */
 const SECTION_BUILDERS = [
   { k: "rooms", l: "Stanze", icon: "mdi:home-group", accent: "#00e5ff",
-    d: "Una card per ogni area di Home Assistant, coi suoi dispositivi dentro." },
-  { k: "lights", l: "Luci", icon: "mdi:lightbulb-group", accent: "#c77dff",
-    d: "Una card Luci con tutte le luci della casa, per stanza." },
+    d: "Una card per ogni area di Home Assistant, coi dispositivi di quella stanza dentro." },
+  { k: "lights", l: "Tutte le luci", icon: "mdi:lightbulb-group", accent: "#c77dff",
+    d: "UNA card Luci con dentro tutte le luci della casa, raggruppate per stanza." },
   { k: "comfort", l: "Temperature", icon: "mdi:home-thermometer", accent: "#4cc9f0",
-    d: "Una card Temperature: temperatura e umidità stanza per stanza." },
-  { k: "thermostat", l: "Clima", icon: "mdi:thermostat-box", accent: "#ff924c",
-    d: "Una card Controllo temperatura: termostati e condizionatori, coi comandi." },
+    d: "UNA card Temperature con temperatura e umidità stanza per stanza." },
+  { k: "thermostat", l: "Controllo clima", icon: "mdi:thermostat-box", accent: "#ff924c",
+    d: "UNA card Controllo temperatura con termostati e condizionatori e i loro comandi." },
 ];
 
 const SECTION_PRESETS = [
@@ -120,7 +120,7 @@ const SECTION_PRESETS = [
     cardType: () => "sensor",
   },
   {
-    id: "clima", title: "Clima", icon: "mdi:thermostat", accent: "#00e5ff", limit: 10, d: "Termostati, condizionatori, temperature e umidità.",
+    id: "clima", title: "Clima", icon: "mdi:thermostat", accent: "#00e5ff", limit: 10, d: "UNA CARD PER OGNI termostato, condizionatore, temperatura e umidità (fino a 10).",
     score(id, st) {
       const d = domainOf(id), dc = st.attributes.device_class;
       if (d === "climate") return 100;
@@ -132,7 +132,7 @@ const SECTION_PRESETS = [
     cardType: (id) => (domainOf(id) === "climate" ? "climate" : domainOf(id) === "sensor" ? "sensor" : "control"),
   },
   {
-    id: "illuminazione", title: "Illuminazione", icon: "mdi:lightbulb-group", accent: "#c77dff", limit: 12, d: "Tutte le luci, e gli interruttori che comandano luci.",
+    id: "illuminazione", title: "Illuminazione", icon: "mdi:lightbulb-on-outline", accent: "#c77dff", limit: 12, d: "UNA CARD PER OGNI luce o interruttore che comanda luci (fino a 12).",
     score(id, st) {
       const d = domainOf(id);
       const name = (st.attributes.friendly_name || id).toLowerCase();
@@ -196,6 +196,35 @@ const SECTION_PRESETS = [
       return 0;
     },
     cardType: () => "control",
+  },
+  {
+    // Come "aperture": oggi non esiste nessuna entita' `valve` ne' un relè
+    // d'irrigazione in questa casa (verificato). Il modello c'e' lo stesso,
+    // perche' il giorno che arriva la centralina la sezione si costruisce da
+    // sola invece di dover tornare qui a inventarla.
+    //
+    // Il nome conta quanto la classe: un'elettrovalvola di irrigazione e'
+    // quasi sempre uno `switch` qualunque, e l'unica cosa che la distingue da
+    // una presa e' come l'ha chiamata chi l'ha installata.
+    id: "irrigazione", title: "Irrigazione · Giardino", icon: "mdi:sprinkler-variant",
+    accent: "#06d6a0", limit: 12,
+    d: "UNA CARD PER OGNI settore, elettrovalvola, umidità del terreno o pioggia (fino a 12).",
+    score(id, st) {
+      const d = domainOf(id), dc = st.attributes.device_class;
+      const name = (st.attributes.friendly_name || id).toLowerCase();
+      const green = /irrig|sprinkler|giardin|orto|prato|aiuol|siepe|goccia|settore|elettrovalvol/.test(name);
+      if (d === "valve") return 100;
+      if (green && (d === "switch" || d === "button" || d === "number")) return 92;
+      // Umidita' del TERRENO: su un `sensor` la classe `moisture` e' il
+      // contenuto d'acqua del suolo, non l'umidita' dell'aria (che e'
+      // `humidity`). Sono due grandezze diverse con due classi diverse.
+      if (d === "sensor" && dc === "moisture") return 84;
+      if (d === "sensor" && /pioggia|rain|precipit/.test(name)) return 70;
+      if (d === "binary_sensor" && /pioggia|rain/.test(name)) return 68;
+      if (green && d === "sensor") return 60;
+      return 0;
+    },
+    cardType: (id) => (["valve", "switch", "button", "number"].includes(domainOf(id)) ? "control" : "status"),
   },
 ];
 
@@ -4406,7 +4435,17 @@ class CyborgDashboard extends HTMLElement {
 
   _flowLoads(flow, homeWatts) {
     const all = [];
+    // Il sensore di "Casa" e' gia' la radice del disegno.
+    //
+    // Se un carico dichiara quel sensore come padre - e succede da solo,
+    // perche' la parentela dichiarata nell'analisi economica vale anche qui -
+    // il padre e' il nodo CASA, non un ramo nuovo. Disegnarlo una seconda
+    // volta come ramo conta due volte la stessa lettura: i rami sommano piu'
+    // del totale di casa, il "Non misurato" sparisce, e sullo schermo compare
+    // un interruttore generale appeso a se stesso.
+    const homeId = flow.home || null;
     for (const d of (flow.devices || [])) {
+      if (homeId && d.entity === homeId) continue;
       const st = this._hass.states[d.entity];
       if (!st) continue;
       const raw = powerWatts(st);
@@ -4446,6 +4485,11 @@ class CyborgDashboard extends HTMLElement {
         already.add(v.power);
       }
     }
+
+    // Chi sta sotto "Casa" sta sotto la radice, cioe' e' una radice del
+    // disegno. Va fatto PRIMA del generale, altrimenti un carico dichiarato
+    // sotto casa non verrebbe adottato dal contatore generale.
+    if (homeId) for (const l of all) if (l.parent === homeId) l.parent = null;
 
     // The main meter: one declaration instead of twenty.
     //
@@ -10171,6 +10215,7 @@ class CyborgDashboard extends HTMLElement {
       <strong>CARICHI MONITORATI</strong>
       <span class="hint">${devices.length} carichi mostrati sotto lo schema, con la quota sul consumo di casa.</span>
       <span class="hint">Se un carico e' misurato a valle di un altro — la friggitrice sulla presa della cucina, la cucina sul quadro FEM — dichiaralo con <em>compreso dentro</em>: viene disegnato sotto il suo padre invece che accanto. La stessa parentela vale anche nell'analisi economica: dichiararla qui o li' e' lo stesso.</span>
+      ${flow.home ? `<span class="hint"><strong>${esc((this._hass.states[flow.home] && this._hass.states[flow.home].attributes.friendly_name) || flow.home)}</strong> è il sensore di <em>Casa</em>, cioè la radice dello schema: <strong>ogni carico senza un padre gli sta già sotto</strong>. Per questo non compare fra le scelte — sceglierlo e lasciare vuoto sarebbero la stessa cosa, e disegnarlo come ramo lo conterebbe due volte.</span>` : ""}
       ${devices.map((d, i) => {
         const nameOf = (id) => {
           const dev = devices.find((x) => x.entity === id);
@@ -10178,6 +10223,22 @@ class CyborgDashboard extends HTMLElement {
           return (dev && dev.name) || (est && est.attributes.friendly_name) || id;
         };
         const others = devices.filter((x, j) => j !== i && x.entity);
+        // Quello che il disegno sa gia' fare ma l'elenco non offriva.
+        //
+        // Un padre puo' stare FUORI dai carichi monitorati: il generale, o un
+        // quadro dichiarato nell'analisi economica. La card lo disegna lo
+        // stesso, quindi l'elenco che non lo contiene sta mentendo - e chi
+        // guarda vede un nodo sullo schema che non riesce a scegliere.
+        // Il sensore di Casa invece resta fuori apposta: e' gia' la radice, e
+        // "sta sotto Casa" e' la voce vuota in cima.
+        const upstream = [];
+        const seenUp = new Set([d.entity, flow.home].filter(Boolean));
+        for (const o of others) seenUp.add(o.entity);
+        for (const cand of [flow.main].concat(devices.map((x) => this._parentOf(x.entity, x.parent)))) {
+          if (!cand || seenUp.has(cand) || !this._hass.states[cand]) continue;
+          seenUp.add(cand);
+          upstream.push(cand);
+        }
         // Quello che la card disegnerebbe COMUNQUE, risolto attraverso
         // l'apparecchio: e' il "doppio controllo" - la parentela dichiarata
         // sull'altra card si vede gia' scelta qui invece di dover essere
@@ -10195,8 +10256,10 @@ class CyborgDashboard extends HTMLElement {
             <button class="mini danger" data-flow-dev-remove="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>
           <label>COMPRESO DENTRO<select data-flow-dev-parent="${i}">
-            <option value="">— è un carico a sé —</option>
+            <option value="">${esc(flow.home ? "— sta sotto Casa —" : "— è un carico a sé —")}</option>
             ${others.map((o) => `<option value="${esc(o.entity)}" ${chosen === o.entity ? "selected" : ""}>${esc(nameOf(o.entity))}</option>`).join("")}
+            ${upstream.length ? `<optgroup label="Contatori a monte, non fra i carichi">${
+              upstream.map((id) => `<option value="${esc(id)}" ${chosen === id ? "selected" : ""}>${esc(nameOf(id))}</option>`).join("")}</optgroup>` : ""}
           </select></label>
           ${inherited ? `<em class="wiz-tip">già dichiarato nell'analisi economica</em>` : ""}
           ${outside ? `<em class="wiz-tip" style="background:#8d99ae">dipende da ${esc(nameOf(shared))}, che non è fra questi carichi: viene disegnato lo stesso come padre</em>` : ""}
@@ -10411,19 +10474,35 @@ class CyborgDashboard extends HTMLElement {
       <div class="section">
         <strong>AGGIUNGI UNA SEZIONE</strong>
         <span class="hint"><strong>Questi non sono le tue sezioni</strong>: sono i modelli con cui crearne una nuova. Le tue sezioni stanno nella pagina, e si configurano col pulsante <em>SEZIONE</em> sopra ciascuna.</span>
-        <div class="preset-grid">${SECTION_PRESETS.map((pr) =>
-          `<button type="button" class="preset" data-add-preset="${esc(pr.id)}" style="--accent:${esc(pr.accent)}"
-             title="${esc(pr.d || "")}">
-             <ha-icon icon="${esc(pr.icon)}"></ha-icon><span>${esc(pr.title)}</span></button>`).join("")}
-          ${SECTION_BUILDERS.map((b) => `<button type="button" class="preset" data-add-builder="${esc(b.k)}"
-             style="--accent:${esc(b.accent)}" title="${esc(b.d)}">
-             <ha-icon icon="${esc(b.icon)}"></ha-icon><span>${esc(b.l)}</span></button>`).join("")}
-          <button type="button" class="preset" data-add-preset="__blank"
-            title="Una sezione vuota, da riempire a mano"><ha-icon icon="mdi:plus"></ha-icon><span>Vuota</span></button>
-        </div>
-        <span class="hint">Cosa fa ciascuno:<br>${SECTION_PRESETS.map((pr) =>
-          `<strong>${esc(pr.title)}</strong> — ${esc(pr.d || "")}`).concat(
-          SECTION_BUILDERS.map((b) => `<strong>${esc(b.l)}</strong> — ${esc(b.d)}`)).join("<br>")}</span>
+        ${(() => {
+          // "Luci" e "Illuminazione", "Clima" e "Clima": erano due famiglie di
+          // modelli mescolate in una griglia sola. Non sono doppioni - uno fa
+          // UNA card riepilogativa, l'altro ne fa UNA PER ENTITA' - ma la
+          // griglia non lo diceva da nessuna parte, e due etichette sinonime
+          // una accanto all'altra sembrano un errore. Separarle in due gruppi
+          // con un titolo e' l'unica cosa che rende la differenza visibile
+          // prima del clic invece che dopo.
+          const tile = (attr, key, label, icon, accent, d) => `<button type="button" class="preset"
+            data-add-${attr}="${esc(key)}" style="--accent:${esc(accent)}" title="${esc(d || "")}">
+            <ha-icon icon="${esc(icon)}"></ha-icon><span>${esc(label)}</span></button>`;
+          const solo = SECTION_PRESETS.filter((pr) => !pr.limit);
+          const molte = SECTION_PRESETS.filter((pr) => !!pr.limit);
+          return `<span class="preset-fam">UNA CARD SOLA, GIÀ PIENA</span>
+          <div class="preset-grid">
+            ${SECTION_BUILDERS.map((b) => tile("builder", b.k, b.l, b.icon, b.accent, b.d)).join("")}
+            ${solo.map((pr) => tile("preset", pr.id, pr.title, pr.icon, pr.accent, pr.d)).join("")}
+          </div>
+          <span class="preset-fam">UNA CARD PER OGNI ENTITÀ TROVATA</span>
+          <div class="preset-grid">
+            ${molte.map((pr) => tile("preset", pr.id, pr.title, pr.icon, pr.accent, pr.d)).join("")}
+            ${tile("preset", "__blank", "Vuota", "mdi:plus", "#8d99ae", "Una sezione vuota, da riempire a mano")}
+          </div>
+          <span class="hint">Cosa fa ciascuno:<br>${
+            SECTION_BUILDERS.map((x) => `<strong>${esc(x.l)}</strong> — ${esc(x.d)}`)
+              .concat(solo.map((pr) => `<strong>${esc(pr.title)}</strong> — ${esc(pr.d || "")}`))
+              .concat(molte.map((pr) => `<strong>${esc(pr.title)}</strong> — ${esc(pr.d || "")}`))
+              .join("<br>")}</span>`;
+        })()}
       </div>
       <div class="section">
         <strong>COMPOSIZIONE AUTOMATICA</strong>
@@ -13706,6 +13785,9 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
 .icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+.preset-fam{display:block;margin-top:14px;font:9.5px ui-monospace,monospace;letter-spacing:.12em;
+  color:var(--accent);opacity:.75}
+.preset-fam+.preset-grid{margin-top:5px}
 .preset{--accent:#00e5ff;flex-direction:column;gap:5px;padding:12px 8px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);color:var(--primary-text-color);font-size:10px;letter-spacing:.06em}
 .preset ha-icon{--mdc-icon-size:20px;color:var(--accent)}
 
@@ -15189,7 +15271,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.51.0";
+const CYBORG_BUILD = "0.52.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

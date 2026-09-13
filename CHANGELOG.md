@@ -4,6 +4,65 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.52.0] - 2026-09-12
+
+Tre cose che lo schema sapeva fare e l'editor non diceva.
+
+### 1. «Perché la lavatrice non può stare sotto l'interruttore FEM?»
+Perché **ci stava già**. L'interruttore FEM è il sensore collegato a **Casa**,
+cioè la radice dello schema: ogni carico senza un padre gli sta sotto per
+costruzione. Offrirlo nell'elenco «compreso dentro» sarebbe stato un doppione
+della voce vuota.
+
+Il vero difetto era il **disegno**: la parentela dichiarata nell'analisi
+economica puntava a quell'entità, e la card la disegnava come un **ramo nuovo**
+sotto Casa — con la stessa identica lettura. Risultato: 356 W appesi a 356 W, la
+somma dei rami più alta del totale di casa e il «Non misurato» sparito.
+
+- un carico dichiarato sotto il sensore di Casa è una **radice**, non un figlio
+  di un nodo duplicato;
+- il sensore di Casa non viene disegnato come carico nemmeno se lo si aggiunge
+  a mano fra i carichi monitorati;
+- con un **generale** diverso da Casa, chi stava sotto Casa passa al generale;
+- la voce vuota adesso si chiama **«— sta sotto Casa —»**, e sotto l'elenco c'è
+  la frase che spiega perché quel sensore non compare fra le scelte.
+
+E per i casi veri in cui un padre **esiste ma non è fra i carichi monitorati**
+(il generale, o un quadro dichiarato nell'analisi economica), l'elenco ha un
+gruppo nuovo — **«Contatori a monte, non fra i carichi»** — perché un elenco che
+non contiene ciò che il disegno usa sta mentendo.
+
+### 2. «Illuminazione e Luci: qual è la differenza?»
+Nessuna, a leggere le etichette. Tutta, a guardare cosa fanno: **Luci** crea
+UNA card con dentro tutte le luci; **Illuminazione** crea UNA CARD PER OGNI
+luce. Lo stesso valeva per i due **Clima**.
+
+La griglia dei modelli ora è divisa in due famiglie dichiarate:
+
+- **UNA CARD SOLA, GIÀ PIENA** — Stanze, Tutte le luci, Temperature, Controllo
+  clima, Monitoraggio, Economia, Mini PC · Server
+- **UNA CARD PER OGNI ENTITÀ TROVATA** — Sicurezza, Energia, Clima,
+  Illuminazione, Presenza, Aperture, Irrigazione · Giardino
+
+Ogni descrizione dice in maiuscolo quante card produce. Nessuna etichetta è più
+uguale a un'altra.
+
+### 3. Nuovo modello «Irrigazione · Giardino»
+Come «Aperture»: oggi in questa casa non esiste nessuna entità `valve` né un
+relè d'irrigazione, quindi non produce niente. Il giorno che arriva la
+centralina la sezione si costruisce da sola.
+
+Riconosce elettrovalvole (`valve`), relè e pulsanti col nome da giardino
+(irrigazione, settore, prato, orto, aiuola, goccia), l'**umidità del terreno**
+(`sensor` + `device_class: moisture`, che è il contenuto d'acqua del suolo, non
+l'umidità dell'aria) e i sensori di pioggia.
+
+### Prove
+14 asserzioni nuove (1293 in totale) più 474 misurate in Chromium. Rimettendo
+il difetto del punto 1, la suite fallisce disegnando l'interruttore generale
+come ramo da 2180 W con il resto della casa inghiottito: esattamente lo schermo
+di partenza.
+
 ## [0.51.0] - 2026-09-06
 
 Le prese Shelly del phon non sono zone d'allarme.
