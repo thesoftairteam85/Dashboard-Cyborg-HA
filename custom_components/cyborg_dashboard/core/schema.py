@@ -66,7 +66,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -155,8 +155,10 @@ def normalize_vehicle(vehicle: Any, index: int) -> dict[str, Any] | None:
 # classic architectural-render angle: high enough to read the floor layout,
 # shallow enough that extruded walls still communicate height.
 DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
+                "wall_thickness": 9,
                 "show_walls": True, "show_labels": True, "level_gap": 150,
-                "active_level": None, "tap_action": "toggle"}
+                "active_level": None, "tap_action": "toggle",
+                "badges": "sintesi"}
 
 # A storey index is deliberately signed and bounded: -3 covers cellars and
 # garages below grade, +8 is far past any residential building. Bounding it at
@@ -326,6 +328,18 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
         result["wall_height"] = max(0, min(200, int(float(result["wall_height"]))))
     except (TypeError, ValueError):
         result["wall_height"] = DEFAULT_VIEW["wall_height"]
+    # Lo spessore del muro e' una misura di pianta, non un effetto grafico:
+    # sotto i 3 px il volume non si legge, sopra i 30 la stanza si mangia se
+    # stessa.
+    try:
+        result["wall_thickness"] = max(3, min(30, int(float(result.get("wall_thickness", 9)))))
+    except (TypeError, ValueError):
+        result["wall_thickness"] = DEFAULT_VIEW["wall_thickness"]
+    # Quante etichette galleggiano sopra una stanza. "sintesi" e' il default
+    # perche' sei pastiglie per stanza coprono la pianta che dovrebbero
+    # descrivere: la mappa diventa un mucchio di pillole invece di una casa.
+    if result.get("badges") not in ("sintesi", "tutte", "nessuna"):
+        result["badges"] = DEFAULT_VIEW["badges"]
     try:
         result["level_gap"] = max(40, min(400, int(float(result.get("level_gap", 150)))))
     except (TypeError, ValueError):
@@ -758,8 +772,8 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
         # che volesse dire zero righe renderebbe impossibile tornare indietro.
         value = result.get("device")
         result["device"] = value if isinstance(value, str) and value else None
-        for key in ("cpu", "gpu", "mem_used", "mem_free", "mem_total", "swap",
-                    "uptime", "containers"):
+        for key in ("cpu", "gpu", "mem_used", "mem_free", "mem_total", "mem_pct",
+                    "swap", "uptime", "containers"):
             value = result.get(key)
             result[key] = value if isinstance(value, str) and "." in value else None
         # Il confronto con le soglie e' acceso di fabbrica: e' la ragione per

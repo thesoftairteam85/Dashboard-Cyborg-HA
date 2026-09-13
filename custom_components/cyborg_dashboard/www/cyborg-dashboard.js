@@ -3132,6 +3132,54 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /** Entities shown as badges in a room: explicit list, or derived from its area. */
+  /**
+   * Le poche cose che meritano di stare SOPRA la pianta.
+   *
+   * Con sei pastiglie per stanza la mappa non e' piu' una mappa: le etichette
+   * coprono esattamente la geometria che dovrebbero descrivere, e cinque
+   * stanze diventano trenta pillole sovrapposte. La sintesi tiene solo quello
+   * che si guarda da lontano, in quest'ordine:
+   *
+   *   1. cio' che e' fuori posto - una porta aperta, un allagamento, un fumo;
+   *   2. la temperatura della stanza, che e' l'unico numero che si legge
+   *      davvero a colpo d'occhio;
+   *   3. una sola pastiglia riassuntiva "N accese" per luci e prese.
+   *
+   * Il resto non sparisce: sta nella stanza, che si apre con un tocco sul
+   * nome. Chi preferisce vedere tutto lo dice nell'editor della pagina.
+   */
+  _roomSummary(room) {
+    const ids = this._roomEntities(room);
+    const out = [];
+    const alerts = ids.filter((id) => {
+      const st = this._hass.states[id];
+      if (!st || !ON_STATES.has(st.state)) return false;
+      return domainOf(id) === "binary_sensor"
+        && ["door", "window", "garage_door", "opening", "smoke", "gas",
+            "carbon_monoxide", "moisture", "problem", "safety", "tamper"]
+          .includes(st.attributes.device_class);
+    });
+    for (const id of alerts.slice(0, 2)) out.push({ id });
+    const temp = ids.find((id) => {
+      const st = this._hass.states[id];
+      return st && st.attributes.device_class === "temperature"
+        && Number.isFinite(parseFloat(st.state));
+    }) || ids.find((id) => domainOf(id) === "climate");
+    if (temp && out.length < 3) out.push({ id: temp });
+    // Una sola pastiglia per tutto cio' che e' acceso: il numero e' piu'
+    // informativo di tre "ON" affiancati, e occupa un terzo dello spazio.
+    const on = ids.filter((id) => {
+      const st = this._hass.states[id];
+      return st && ON_STATES.has(st.state)
+        && ["light", "switch", "fan", "media_player"].includes(domainOf(id));
+    });
+    if (on.length && out.length < 4) {
+      out.push(on.length === 1 ? { id: on[0] }
+        : { count: on.length, ids: on, icon: "mdi:lightbulb-group" });
+    }
+    return out;
+  }
+
   _roomEntities(room) {
     if (Array.isArray(room.entities)) return room.entities.filter((e) => this._hass.states[e]);
     if (!room.area_id || !this._registry) return [];
@@ -3385,8 +3433,15 @@ class CyborgDashboard extends HTMLElement {
     // point of zooming into a room is to see *where* things are, so a floating
     // list of chips would defeat the whole gesture.
     const allEnts = focused ? this._roomAllEntities(room) : [];
-    const entities = focused ? [] : this._roomEntities(room);
-    const badges = entities.map((e) => this._badgeMarkup(e, room)).join("");
+    const mode = view.badges || "sintesi";
+    const badges = focused || mode === "nessuna" ? ""
+      : mode === "tutte"
+        ? this._roomEntities(room).map((e) => this._badgeMarkup(e, room)).join("")
+        : this._roomSummary(room).map((b) => b.count
+            ? `<button class="fp-badge on count" data-fp-badge="${esc(b.ids[0])}"
+                 title="${esc(b.count + " accese in " + room.title)}">
+                 <ha-icon icon="${esc(b.icon)}"></ha-icon><span>${b.count}</span></button>`
+            : this._badgeMarkup(b.id, room)).join("");
     const spots = focused
       ? `<div class="fp-spots">${allEnts.map((e, i) => this._spotMarkup(room, e, i, allEnts.length)).join("")}</div>`
       : "";
@@ -3429,10 +3484,22 @@ class CyborgDashboard extends HTMLElement {
       if (wt.ribs) cls.push("garage");
       if (wt.door) cls.push("door");
       if (wt.band) cls.push("window");
+      // Un muro non e' un foglio.
+      //
+      // Fino a 0.52.0 ogni lato era UN piano ruotato di 90 gradi: visto
+      // dall'alto spariva in una riga di un pixel, e la casa sembrava fatta di
+      // cartoncino. Tre superfici lo rendono un volume: la faccia esterna
+      // (questa), la faccia interna traslata dello spessore, e il **coronamento**,
+      // cioe' la striscia orizzontale in cima che e' l'unica cosa che dice
+      // "questo muro ha uno spessore" quando lo si guarda da sopra.
+      //
+      // Le due figlie ereditano sfondo e bordo dalla classe del lato, cosi'
+      // vetrate, ringhiere e serrande restano quello che sono senza dover
+      // duplicare ogni regola.
       return `<div class="${cls.join(" ")}" data-wall="${i}"
         style="width:${e.len.toFixed(2)}px;height:${h.toFixed(2)}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
         transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);
-        opacity:${wt.opacity};--face:${e.shade.toFixed(3)}"></div>`;
+        opacity:${wt.opacity};--face:${e.shade.toFixed(3)}"><i class="fp-wall-back"></i><i class="fp-wall-cap"></i></div>`;
     }).join("") : "";
 
     const [cx, cy] = polygonCentroid(pts);
@@ -3629,7 +3696,8 @@ class CyborgDashboard extends HTMLElement {
    */
   _renderFloorplanViewport({ view, rooms, bounds, focus, zoom, shift, persp, grounds, levelBar, focusBar }) {
     return `<div class="fp-viewport${this._editing ? " editing" : ""}${focus ? " focusing" : ""}" data-fp-viewport data-keep-scroll="map"
-        style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${zoom};--persp:${persp}px">
+        style="--yaw:${view.yaw}deg;--pitch:${view.pitch}deg;--zoom:${zoom};--persp:${persp}px;--wt:${
+          Math.max(3, Math.min(30, Number(view.wall_thickness) || 9))}px">
         <div class="fp-stage">
           <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px;
             transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw))${shift}">
@@ -4249,9 +4317,17 @@ class CyborgDashboard extends HTMLElement {
         <label>INCLINAZIONE · ${Math.round(view.pitch)}°<input type="range" min="0" max="85" step="1" data-view-prop="pitch" value="${view.pitch}"></label>
         <label>ZOOM · ${Number(view.zoom).toFixed(2)}×<input type="range" min="0.3" max="3" step="0.05" data-view-prop="zoom" value="${view.zoom}"></label>
         <label>ALTEZZA MURI · ${view.wall_height}<input type="range" min="0" max="200" step="2" data-view-prop="wall_height" value="${view.wall_height}"></label>
+        <label>SPESSORE MURI · ${view.wall_thickness ?? 9}<input type="range" min="3" max="30" step="1" data-view-prop="wall_thickness" value="${view.wall_thickness ?? 9}"></label>
+        <span class="hint">Lo spessore è quello che si vede dall'alto: senza, un muro è un foglio di carta e la casa sembra di cartoncino.</span>
         <label>DISTANZA TRA I PIANI · ${view.level_gap}<input type="range" min="40" max="400" step="5" data-view-prop="level_gap" value="${view.level_gap}"></label>
         <label class="check"><input type="checkbox" data-view-prop="show_walls" ${view.show_walls ? "checked" : ""}> Mostra muri</label>
         <label class="check"><input type="checkbox" data-view-prop="show_labels" ${view.show_labels ? "checked" : ""}> Mostra nomi stanze</label>
+        <label>ETICHETTE SOPRA LE STANZE<select data-view-badges>
+          <option value="sintesi" ${(view.badges || "sintesi") === "sintesi" ? "selected" : ""}>Sintesi — solo quello che conta da lontano</option>
+          <option value="tutte" ${view.badges === "tutte" ? "selected" : ""}>Tutte — fino a sei per stanza</option>
+          <option value="nessuna" ${view.badges === "nessuna" ? "selected" : ""}>Nessuna — solo il nome</option>
+        </select></label>
+        <span class="hint">In <strong>sintesi</strong> restano al massimo quattro pastiglie: ciò che è fuori posto (una porta aperta, un allagamento), la temperatura, e una sola pastiglia <em>N accese</em>. Il resto non sparisce — è dentro la stanza, che si apre toccandone il nome. Sei pastiglie per stanza coprivano la pianta che dovevano descrivere.</span>
         <label>AZIONE AL TOCCO SUI DISPOSITIVI
           <select data-view-tap>
             <option value="toggle" ${(view.tap_action || "toggle") === "toggle" ? "selected" : ""}>Accendi / spegni</option>
@@ -7280,6 +7356,16 @@ class CyborgDashboard extends HTMLElement {
       && /liber|free|available|disponib/.test(hay(id)) && !/swap/.test(hay(id)));
     const memTotal = first((id) => isSize(id) && memRe.test(hay(id))
       && /total/.test(hay(id)) && !/swap/.test(hay(id)));
+    // La percentuale di memoria che l'apparecchio pubblica GIA' calcolata.
+    //
+    // Quando c'e', e' la fonte piu' attendibile: la calcola chi conosce la
+    // macchina, con la sua definizione di "occupata" (Glances toglie cache e
+    // buffer, che a una divisione usata/totale sfuggono). Usarla evita anche
+    // l'errore piu' facile del mondo, cioe' appaiare due entita' che non
+    // parlano della stessa cosa.
+    const memPct = first((id) => isPct(id) && memRe.test(hay(id))
+      && /utilizzo|usage|uso|percent/.test(hay(id))
+      && !/swap|container|cache|gpu/.test(hay(id)));
     const swap = first((id) => isSize(id) && /swap/.test(hay(id))
       && /uso|used|utilizzat/.test(hay(id)));
     const containers = first((id) => /container/.test(hay(id)) && !unit(id) && num(id) !== null);
@@ -7348,7 +7434,7 @@ class CyborgDashboard extends HTMLElement {
       return !(m && stems.has(m[1]));
     });
 
-    return { cpu, gpu, memUsed, memFree, memTotal, swap, containers, containersMem,
+    return { cpu, gpu, memUsed, memFree, memTotal, memPct, swap, containers, containersMem,
       uptime, temps, disks, net, io };
   }
 
@@ -7376,6 +7462,7 @@ class CyborgDashboard extends HTMLElement {
       cpu: pick("cpu", auto.cpu), gpu: pick("gpu", auto.gpu),
       memUsed: pick("mem_used", auto.memUsed), memFree: pick("mem_free", auto.memFree),
       memTotal: pick("mem_total", auto.memTotal), swap: pick("swap", auto.swap),
+      memPct: pick("mem_pct", auto.memPct),
       containers: pick("containers", auto.containers),
       containersMem: auto.containersMem,
       uptime: pick("uptime", auto.uptime),
@@ -7393,20 +7480,83 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /**
-   * Quanta memoria e' occupata, in percentuale.
+   * Quanta memoria e' occupata, e da dove viene il numero.
    *
-   * Il totale a volte c'e' e a volte no. Quando manca si ricava da usata piu'
-   * libera: e' la stessa cosa, ed e' meglio che dichiarare "non disponibile"
-   * un dato che si ha sotto un'altra forma.
+   * Tre strade, in ordine di attendibilita':
+   *   1. la percentuale che l'apparecchio pubblica gia' calcolata;
+   *   2. usata diviso totale;
+   *   3. usata diviso (usata + libera), quando il totale non esiste.
+   *
+   * E due controlli, perche' la 2 e la 3 appaiano entita' SCELTE A MANO e una
+   * scelta sbagliata non deve diventare un numero rosso convincente:
+   *
+   *   - **le unita' devono combaciare**. 1753 MiB "su" 220,6 GiB non e' una
+   *     memoria all'80%: e' la memoria usata divisa per la dimensione di un
+   *     DISCO. E' successo davvero, e la card mostrava 100% fisso perche' il
+   *     795% veniva tagliato a 100.
+   *   - **usata non puo' superare il totale**. Se succede, l'accoppiata e'
+   *     sbagliata: meglio un trattino e una frase che spiega, che una
+   *     percentuale inventata.
+   *
+   * Restituisce sempre un oggetto: `pct` a null vuol dire "non lo so", e
+   * `problem` dice perche', cosi' la card puo' scriverlo invece di tacere.
    */
-  _sysMemPct(slots) {
+  _sysMemInfo(slots) {
+    const unitOf = (id) => {
+      const st = id && this._hass.states[id];
+      return (st && st.attributes.unit_of_measurement) || "";
+    };
+    const direct = this._sysNum(slots.memPct);
+    if (direct !== null) {
+      return { pct: Math.max(0, Math.min(100, direct)), source: "pct",
+        id: slots.memPct, whole: null, problem: null };
+    }
     const used = this._sysNum(slots.memUsed);
-    if (used === null) return null;
+    if (used === null) return { pct: null, source: null, whole: null, problem: null };
     const total = this._sysNum(slots.memTotal);
     const free = this._sysNum(slots.memFree);
-    const whole = total !== null ? total : (free !== null ? used + free : null);
-    if (whole === null || whole <= 0) return null;
-    return Math.max(0, Math.min(100, (used / whole) * 100));
+    const uu = unitOf(slots.memUsed);
+    const partner = total !== null ? slots.memTotal : (free !== null ? slots.memFree : null);
+    if (!partner) return { pct: null, source: null, whole: null, problem: null };
+    const pu = unitOf(partner);
+    if (uu && pu && uu !== pu) {
+      return { pct: null, source: null, whole: null, problem: {
+        kind: "unit", a: slots.memUsed, au: uu, b: partner, bu: pu } };
+    }
+    const whole = total !== null ? total : used + free;
+    if (!(whole > 0)) return { pct: null, source: null, whole: null, problem: null };
+    const raw = (used / whole) * 100;
+    if (raw > 105) {
+      return { pct: null, source: null, whole: null, problem: {
+        kind: "impossible", a: slots.memUsed, au: uu, b: partner, bu: pu,
+        used, whole, raw } };
+    }
+    return { pct: Math.max(0, Math.min(100, raw)),
+      source: total !== null ? "total" : "sum", id: slots.memUsed, whole, problem: null };
+  }
+
+  /** La sola percentuale, per chi non ha bisogno del resto. */
+  _sysMemPct(slots) { return this._sysMemInfo(slots).pct; }
+
+  /** La frase che spiega perche' la memoria non si puo' calcolare. */
+  _sysMemWhy(problem) {
+    if (!problem) return "";
+    const nm = (id) => {
+      const st = this._hass.states[id];
+      return (st && st.attributes.friendly_name) || id;
+    };
+    if (problem.kind === "unit") {
+      return `<span class="hint sys-bad"><strong>La memoria non si puo' calcolare</strong>:
+        «${esc(nm(problem.a))}» e' in <strong>${esc(problem.au)}</strong> e
+        «${esc(nm(problem.b))}» in <strong>${esc(problem.bu)}</strong>. Due unita' diverse
+        non sono la stessa grandezza: quasi sempre vuol dire che una delle due non e'
+        memoria — la dimensione di un disco, per esempio. Correggile nell'editor della card.</span>`;
+    }
+    return `<span class="hint sys-bad"><strong>La memoria non si puo' calcolare</strong>:
+      «${esc(nm(problem.a))}» segna ${esc(problem.used.toFixed(0))} e
+      «${esc(nm(problem.b))}» ${esc(problem.whole.toFixed(0))} ${esc(problem.bu || "")},
+      cioe' il ${esc(problem.raw.toFixed(0))}%. Usata non puo' superare il totale:
+      l'accoppiata e' sbagliata. Correggila nell'editor della card.</span>`;
   }
 
   /** Il colore di una percentuale rispetto alle sue due soglie. */
@@ -7453,7 +7603,8 @@ class CyborgDashboard extends HTMLElement {
 
     const cpu = this._sysNum(slots.cpu);
     const gpu = this._sysNum(slots.gpu);
-    const mem = this._sysMemPct(slots);
+    const memInfo = this._sysMemInfo(slots);
+    const mem = memInfo.pct;
     const memUsed = this._sysNum(slots.memUsed);
     const memUnit = (slots.memUsed && this._hass.states[slots.memUsed]
       && this._hass.states[slots.memUsed].attributes.unit_of_measurement) || "";
@@ -7496,31 +7647,39 @@ class CyborgDashboard extends HTMLElement {
         ${this._sysRing("CPU", cpu, "%", this._sysLevel(cpu, wCpu, aCpu),
           gpu !== null ? "GPU " + Math.round(gpu) + "%" : "")}
         ${this._sysRing("MEMORIA", mem, "%", this._sysLevel(mem, wMem, aMem),
-          memUsed !== null ? Math.round(memUsed) + " " + memUnit : "")}
+          memInfo.problem ? "dati incoerenti"
+            : memUsed !== null ? Math.round(memUsed) + " " + memUnit : "")}
         ${disk ? this._sysRing("DISCO", disk.pct, "%", this._sysLevel(disk.pct, wDisk, aDisk),
           disk.free !== null ? Math.round(disk.free) + " " + disk.unit + " liberi" : disk.name) : ""}
         ${hot ? this._sysRing("TEMPERATURA", hot.v === null ? null : Math.min(100, hot.v), "°C",
           this._sysLevel(hot.v, wTemp, aTemp), hot.name) : ""}
       </div>
+      ${this._sysMemWhy(memInfo.problem)}
 
       ${item.gauges === false ? "" : (() => {
         // Le stesse letture degli anelli, ma messe contro le loro soglie e
         // contro dove sono state nelle ultime 24 ore.
         const rows = [];
-        const whole = (() => {
-          const u = this._sysNum(slots.memUsed), t = this._sysNum(slots.memTotal),
-                f = this._sysNum(slots.memFree);
-          return t !== null ? t : (u !== null && f !== null ? u + f : null);
-        })();
+        // Il totale e' quello che ha usato l'anello, non un secondo calcolo:
+        // due conti della stessa cosa divergono sempre, ed e' esattamente
+        // quello che e' successo (anello 100%, riga 771%-833%).
+        const whole = memInfo.whole;
         if (slots.cpu) rows.push({ id: slots.cpu, label: "CPU", unit: "%",
           value: cpu, warn: wCpu, alarm: aCpu, scale: 100 });
         if (slots.gpu && gpu !== null) rows.push({ id: slots.gpu, label: "GPU", unit: "%",
           value: gpu, warn: wCpu, alarm: aCpu, scale: 100 });
-        if (slots.memUsed && whole) rows.push({ id: slots.memUsed, label: "Memoria", unit: "%",
-          value: mem, warn: wMem, alarm: aMem, scale: 100,
-          // Le statistiche della memoria sono in MiB: la percentuale si ottiene
-          // sullo stesso totale con cui e' calcolata la lettura di adesso.
-          scaleStat: (v) => (v / whole) * 100 });
+        if (memInfo.source === "pct") {
+          // La percentuale ha statistiche sue: niente riscalatura, niente
+          // occasioni di sbagliarla.
+          rows.push({ id: slots.memPct, label: "Memoria", unit: "%",
+            value: mem, warn: wMem, alarm: aMem, scale: 100 });
+        } else if (slots.memUsed && whole) {
+          rows.push({ id: slots.memUsed, label: "Memoria", unit: "%",
+            value: mem, warn: wMem, alarm: aMem, scale: 100,
+            // Le statistiche della memoria sono in MiB: la percentuale si
+            // ottiene sullo stesso totale dell'anello, e resta dentro 0-100.
+            scaleStat: (v) => Math.max(0, Math.min(100, (v / whole) * 100)) });
+        }
         for (const d of slots.disks) rows.push({ id: d.entity, label: d.name, unit: "%",
           value: d.pct, warn: wDisk, alarm: aDisk, scale: 100 });
         for (const t of temps) rows.push({ id: t.id, label: t.name, unit: "°",
@@ -8982,7 +9141,7 @@ class CyborgDashboard extends HTMLElement {
         const ids = this._systemEntities(card).filter(test);
         const chosen = card[key] || "";
         const found = auto ? (auto[({ cpu: "cpu", gpu: "gpu", mem_used: "memUsed",
-          mem_free: "memFree", mem_total: "memTotal", swap: "swap",
+          mem_free: "memFree", mem_total: "memTotal", mem_pct: "memPct", swap: "swap",
           containers: "containers", uptime: "uptime" })[key]] || null) : null;
         return `<label>${esc(title)}
           <select data-sys-slot="${esc(key)}">
@@ -9022,9 +9181,21 @@ class CyborgDashboard extends HTMLElement {
         <strong>LETTURE PRINCIPALI</strong>
         ${picker("cpu", "CARICO CPU", isPct, "In percentuale. Se la macchina pubblica anche il <em>load average</em>, non è questo: quello è un numero di processi, non una percentuale.")}
         ${picker("gpu", "CARICO GPU", isPct, "")}
+        ${picker("mem_pct", "MEMORIA IN PERCENTUALE", isPct, "Se l'apparecchio la pubblica già calcolata, <strong>vince su tutto il resto</strong>: la calcola chi conosce la macchina. Le tre caselle qui sotto servono solo quando questa non c'è.")}
         ${picker("mem_used", "MEMORIA IN USO", isSize, "")}
-        ${picker("mem_free", "MEMORIA LIBERA", isSize, "La percentuale di memoria si calcola da queste due, oppure dal totale se c'è. Basta una delle due strade.")}
-        ${picker("mem_total", "MEMORIA TOTALE", isSize, "")}
+        ${picker("mem_free", "MEMORIA LIBERA", isSize, "La percentuale si calcola da queste due, oppure dal totale se c'è. Basta una delle due strade.")}
+        ${picker("mem_total", "MEMORIA TOTALE", isSize, "<strong>Attenzione a non scegliere un disco</strong>: anche i dischi sono <em>data_size</em> e compaiono in questo elenco.")}
+        ${(() => {
+          // Il conto vivo, qui dove si sceglie. Una percentuale sbagliata vista
+          // sulla card e' un enigma; vista accanto alle due entita' che la
+          // producono e' ovvia.
+          const info = this._sysMemInfo(slots || {});
+          if (info.problem) return this._sysMemWhy(info.problem);
+          if (info.pct === null) return `<span class="hint">Con queste caselle la percentuale di memoria non si può calcolare.</span>`;
+          const da = info.source === "pct" ? "dal sensore in percentuale"
+            : info.source === "total" ? "da usata ÷ totale" : "da usata ÷ (usata + libera)";
+          return `<span class="hint">Adesso: <strong>${esc(info.pct.toFixed(1))}%</strong> — ${esc(da)}.</span>`;
+        })()}
         ${picker("swap", "SWAP IN USO", isSize, "")}
         ${picker("uptime", "ACCESO DA", (id) => {
           const st = this._hass.states[id];
@@ -11282,6 +11453,13 @@ class CyborgDashboard extends HTMLElement {
       const view = this._page().view;
       if (view) { view.tap_action = viewTap.value; this._touch(); }
     };
+    const viewBadges = q("[data-view-badges]");
+    if (viewBadges) viewBadges.onchange = () => {
+      // Come tap_action: e' una parola, non un numero, e il gestore generico
+      // la passerebbe a parseFloat.
+      const view = this._page().view;
+      if (view) { view.badges = viewBadges.value; this._touch(); }
+    };
     all("[data-view-prop]").forEach((el) => {
       const apply = () => {
         const key = el.getAttribute("data-view-prop");
@@ -12711,7 +12889,7 @@ class CyborgDashboard extends HTMLElement {
       card.device = sysDevice.value || null;
       // Cambiare apparecchio azzera le caselle scritte a mano: puntavano a
       // entita' di un'altra macchina, e lasciarle sarebbe peggio che perderle.
-      for (const k of ["cpu", "gpu", "mem_used", "mem_free", "mem_total", "swap",
+      for (const k of ["cpu", "gpu", "mem_used", "mem_free", "mem_total", "mem_pct", "swap",
                        "uptime", "containers"]) card[k] = null;
       card.temps = [];
       card.disks = [];
@@ -13785,6 +13963,10 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
 .icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+.hint.sys-bad{display:block;margin-top:8px;padding:8px 10px;border-radius:9px;
+  color:#ffb3b3;opacity:1;background:color-mix(in srgb,#ff3d71 14%,transparent);
+  border:1px solid color-mix(in srgb,#ff3d71 34%,transparent)}
+.hint.sys-bad strong{color:#ff6b6b}
 .preset-fam{display:block;margin-top:14px;font:9.5px ui-monospace,monospace;letter-spacing:.12em;
   color:var(--accent);opacity:.75}
 .preset-fam+.preset-grid{margin-top:5px}
@@ -14772,7 +14954,23 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
     color-mix(in srgb,var(--rc) 12%,#0a1017) 55%,
     color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);
   border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0;
+  transform-style:preserve-3d;
   filter:brightness(calc((0.7 + 0.55 * var(--lit,0)) * var(--face,1)))}
+/* Lo spessore del muro: faccia interna e coronamento.
+   La variabile --wt e' lo spessore in pixel di pianta, scelto dall'utente.
+   La faccia interna sta piu' lontana dalla luce, quindi e' piu' scura; il
+   coronamento guarda in su, quindi e' la superficie piu' chiara: e' cosi' che
+   l'occhio legge un volume invece di una figura piatta. */
+.fp-wall>i{position:absolute;display:block;pointer-events:none;
+  background:inherit;border:inherit;border-bottom:0}
+.fp-wall-back{inset:0;transform:translateZ(calc(var(--wt,8px) * -1));
+  filter:brightness(.62)}
+.fp-wall-cap{left:0;top:100%;width:100%;height:var(--wt,8px);
+  transform-origin:0 0;transform:rotateX(-90deg);
+  border-top:0;filter:brightness(1.5)}
+/* Una vetrata non ha un coronamento opaco, e una ringhiera nemmeno: il vetro
+   si vede attraverso, e il corrimano e' gia' il bordo superiore. */
+.fp-wall.glass>i,.fp-wall.railing>i{opacity:.5}
 .fp-wall::after{content:"";position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to top,
     color-mix(in srgb,var(--lc,#ffd7a3) 34%,transparent) 0%,
@@ -15271,7 +15469,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.52.0";
+const CYBORG_BUILD = "0.53.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

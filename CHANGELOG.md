@@ -4,6 +4,62 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.53.0] - 2026-09-13
+
+La memoria non era al 100%, e la mappa era coperta dalle sue stesse etichette.
+
+### 1. «MEMORIA 100%» era un errore di accoppiata, e la card lo nascondeva
+Nella card Sistema la casella **MEMORIA TOTALE** era impostata su
+`/hostroot disk size` — **la dimensione di un disco**, 220,6 GiB. Diviso per
+1753,9 MiB di memoria usata fa **795%**, che la card tagliava a 100 e mostrava
+in rosso. La riga delle ultime 24 ore, che non tagliava niente, scriveva
+`771% – 833%`: due conti della stessa cosa, e nessuno dei due vero.
+
+Il difetto vero non è la scelta sbagliata — è che **la card la faceva sembrare
+giusta**. Adesso:
+
+- **`_sysMemInfo()` controlla le unità.** 1753 MiB «su» 220,6 GiB non è una
+  percentuale: sono due grandezze diverse. Quando le unità non combaciano la
+  card scrive **quali due entità** non vanno d'accordo e con che unità, invece
+  di disegnare un anello rosso.
+- **Usata non può superare il totale.** Oltre il 105% l'accoppiata è sbagliata
+  per definizione: trattino e spiegazione, non un 100% inventato.
+- **Nuova casella «MEMORIA IN PERCENTUALE»** (schema v20). Se l'apparecchio la
+  pubblica già calcolata — e Glances lo fa, `Utilizzo della memoria` = 11,1% —
+  **vince su tutto il resto**: la calcola chi conosce la macchina, con la sua
+  definizione di «occupata» (cache e buffer esclusi). Viene trovata da sola.
+- **La riga dei limiti e l'anello leggono lo stesso totale.** Erano due calcoli
+  separati, ed è esattamente per questo che dicevano numeri diversi.
+- Nell'editor, sotto le caselle della memoria, ora c'è **il conto vivo**:
+  «Adesso: 11,1% — dal sensore in percentuale». Una percentuale sbagliata vista
+  sulla card è un enigma; vista accanto alle due entità che la producono è ovvia.
+
+### 2. Mappa 3D: i muri hanno uno spessore, e le etichette si sono ritirate
+Il difetto più grosso non era il 3D: erano **trenta pastiglie sovrapposte alla
+pianta**. Sei etichette per stanza coprivano esattamente la geometria che
+dovevano descrivere.
+
+- **Muri come volumi.** Ogni lato era un piano ruotato di 90°: visto dall'alto
+  spariva in una riga di un pixel. Adesso ha tre superfici — faccia esterna,
+  faccia interna e **coronamento** in cima, la striscia orizzontale che è
+  l'unica cosa che dice «questo muro ha uno spessore». Nuovo cursore
+  **SPESSORE MURI** (3-30, di fabbrica 9).
+- **Etichette in sintesi** (di fabbrica): al massimo quattro per stanza, in
+  quest'ordine — ciò che è fuori posto (una porta aperta, un allagamento, un
+  fumo), la temperatura, e **una sola** pastiglia «N accese» al posto di tre
+  «ON» affiancati. Il resto non sparisce: è dentro la stanza, che si apre
+  toccandone il nome. In un clic si torna a **Tutte**, o si spengono con
+  **Nessuna**.
+
+### Prove
+20 asserzioni nuove (1311) e 474 misurate in Chromium. Rimettendo il difetto
+della memoria la suite fallisce con `pct: 100`, cioè lo schermo di partenza.
+
+### Ancora da fare sulla mappa
+Arredi come volumi estrusi, e porte e finestre come **aperture dentro il muro**
+invece che come tipi di lato. Sono il passo successivo: questa versione mette
+la casa in piedi, non la arreda.
+
 ## [0.52.0] - 2026-09-12
 
 Tre cose che lo schema sapeva fare e l'editor non diceva.

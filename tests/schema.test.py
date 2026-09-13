@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 19, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 20, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -943,3 +943,31 @@ assert _al(battery_warn="boh")["battery_warn"] == 20
 altro = schema.normalize_item({"id": "x", "type": "entity", "entity_id": "light.sala"}, 0)
 assert "zones" not in altro and "battery_warn" not in altro
 print("schema: zone della centrale (v19) ok")
+
+
+# ---------------------------------------------------------------------------
+# v20: la memoria in percentuale.
+#
+# La card Sistema aveva quattro caselle di memoria tutte in byte, e la
+# percentuale la calcolava lei. Con un totale scelto male (la dimensione di un
+# disco) il risultato era 795%, tagliato a 100 e mostrato in rosso. La casella
+# nuova prende la percentuale gia' pronta dall'apparecchio, che e' la fonte
+# giusta quando esiste.
+def _sysmem(**kw):
+    item = {"id": "sy", "type": "system", "device": "dev1"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+assert _sysmem()["mem_pct"] is None
+assert _sysmem(mem_pct="sensor.mem_percent")["mem_pct"] == "sensor.mem_percent"
+# come le altre caselle: quello che non e' un entity_id non passa
+for junk in ("", "niente", 7, [], {"a": 1}, None):
+    assert _sysmem(mem_pct=junk)["mem_pct"] is None, junk
+# e le caselle vecchie restano dove sono
+old_sys = {"id": "sy", "type": "system", "device": "dev1",
+           "mem_used": "sensor.u", "mem_free": "sensor.f", "mem_total": "sensor.t"}
+n = schema.normalize_item(old_sys, 0)
+assert n["mem_used"] == "sensor.u" and n["mem_free"] == "sensor.f"
+assert n["mem_total"] == "sensor.t" and n["mem_pct"] is None
+print("schema: memoria in percentuale (v20) ok")

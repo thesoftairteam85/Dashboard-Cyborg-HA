@@ -350,7 +350,47 @@ ok("badge sensore con unita", el._badgeMarkup("sensor.soggiorno_temp", rooms[0])
 el.render();
 const fp = el.innerHTML;
 ok("render 3D contiene le stanze", (fp.match(/class="fp-room/g) || []).length === 3);
-ok("render 3D contiene 4 muri per stanza", (fp.match(/class="fp-wall/g) || []).length === 12);
+ok("render 3D contiene 4 muri per stanza", (fp.match(/data-wall="/g) || []).length === 12);
+// 0.53.0: un muro e' un volume, non un foglio - faccia esterna, faccia interna
+// e coronamento in cima. Senza il coronamento, visto dall'alto lo spessore
+// sparisce e la casa torna di cartoncino.
+ok("ogni muro ha la sua faccia interna e il suo coronamento",
+   (fp.match(/class="fp-wall-back"/g) || []).length === 12
+   && (fp.match(/class="fp-wall-cap"/g) || []).length === 12,
+   (fp.match(/class="fp-wall-back"/g) || []).length + " / "
+     + (fp.match(/class="fp-wall-cap"/g) || []).length);
+ok("e lo spessore e' una misura dichiarata, non un numero nel foglio di stile",
+   /--wt:\d+px/.test(fp), (fp.match(/--wt:[^;"]*/) || [""])[0]);
+// 0.53.0: la sintesi delle etichette. Il difetto non era il 3D: erano trenta
+// pastiglie sovrapposte alla pianta.
+{
+  const pg53 = el._page();
+  const savedBadges = pg53.view.badges;
+  const count = () => { el._signature = ""; el.render();
+    return (el.innerHTML.match(/class="fp-badge/g) || []).length; };
+  pg53.view.badges = "tutte";   const tutte = count();
+  pg53.view.badges = "sintesi"; const sintesi = count();
+  pg53.view.badges = "nessuna"; const nessuna = count();
+  ok("la sintesi mostra meno etichette dell'elenco completo",
+     sintesi < tutte && sintesi > 0, sintesi + " vs " + tutte);
+  ok("al massimo quattro per stanza", sintesi <= 4 * 3, String(sintesi));
+  ok("e si possono spegnere del tutto", nessuna === 0, String(nessuna));
+  ok("mentre «tutte» riporta l'elenco di prima", tutte >= 4, String(tutte));
+  pg53.view.badges = savedBadges;
+  el._signature = ""; el.render();
+  // L'utente sceglie: le due leve nuove devono esistere nell'editor, non solo
+  // nello schema.
+  const savedSel53 = el._selected, savedEd53 = el._editing;
+  el._selected = { kind: "page" }; el._editing = true; el._signature = ""; el.render();
+  const ed53 = el.innerHTML;
+  ok("l'editor della mappa fa scegliere lo spessore dei muri",
+     /data-view-prop="wall_thickness"/.test(ed53));
+  ok("e quante etichette mostrare",
+     /data-view-badges/.test(ed53) && /value="tutte"/.test(ed53)
+     && /value="nessuna"/.test(ed53));
+  el._selected = savedSel53; el._editing = savedEd53;
+  el._signature = ""; el.render();
+}
 ok("controrotazione anti-camera sulle targhette", fp.includes("rotateZ(calc(var(--yaw) * -1))"));
 ok("tab pagine presenti", fp.includes("data-page-tab"));
 ok("div bilanciati (3D)", (fp.match(/<div/g) || []).length === (fp.match(/<\/div>/g) || []).length);
@@ -1274,8 +1314,8 @@ ok("due piani -> selettore dei piani", html.includes('data-level-pick="1"') && h
 ok("il pavimento e' ritagliato sulla forma", html.includes("clip-path:polygon("));
 ok("il contorno e' un poligono svg", html.includes("fp-outline") && html.includes("<polygon"));
 ok("la stanza a L ha 6 muri",
-   (html.split('data-room="r-sopra"')[1] || "").split("fp-wall").length - 1 === 6,
-   String((html.split('data-room="r-sopra"')[1] || "").split("fp-wall").length - 1));
+   (html.split('data-room="r-sopra"')[1] || "").split("data-wall=").length - 1 === 6,
+   String((html.split('data-room="r-sopra"')[1] || "").split("data-wall=").length - 1));
 ok("il nome della stanza porta dentro la stanza", html.includes('data-room-focus="r-terra"'));
 ok("il piano e' scritto sull'etichetta", html.includes('fp-lv">+1'));
 ok("senza selezione non ci sono maniglie", !html.includes("data-resize="));
@@ -4852,6 +4892,62 @@ console.log("\n== 48. CARD SISTEMA: UN COMPUTER, NON UN IMPIANTO ==");
        memFree: P2 + "memoria_libera" }) - 25) < 0.01);
   ok("senza memoria non si inventa una percentuale",
      el._sysMemPct({ memUsed: null, memFree: null, memTotal: null }) === null);
+
+  // --- 0.53.0: una percentuale sbagliata non deve sembrare giusta.
+  // Caso reale: "MEMORIA TOTALE" impostata a mano sulla dimensione di un
+  // DISCO. 2000 MiB su 220,6 GiB fa 906%, che tagliato a 100 diventava un
+  // rosso fisso convincente, mentre la riga delle ultime 24 ore mostrava
+  // 771%-833%. Due conti della stessa cosa, e nessuno dei due vero.
+  const badPair = { memUsed: P2 + "uso_della_memoria", memFree: null,
+    memTotal: P2 + "hostroot_disk_size" };
+  const badInfo = el._sysMemInfo(badPair);
+  ok("MiB contro GiB non fanno una percentuale",
+     badInfo.pct === null && badInfo.problem && badInfo.problem.kind === "unit",
+     JSON.stringify(badInfo));
+  ok("e la card lo scrive invece di mostrare 100%",
+     /non si puo' calcolare/.test(el._sysMemWhy(badInfo.problem))
+     && /MiB/.test(el._sysMemWhy(badInfo.problem))
+     && /GiB/.test(el._sysMemWhy(badInfo.problem)));
+  const badBody = el._systemBody(Object.assign({}, card48,
+    { mem_used: P2 + "uso_della_memoria", mem_total: P2 + "hostroot_disk_size",
+      mem_free: null }));
+  ok("nel corpo della card compare l'avviso, non un anello rosso al 100%",
+     /sys-bad/.test(badBody), "");
+  ok("e nessuna percentuale a tre cifre finisce nella riga dei limiti",
+     !/>[1-9]\d\d(\.\d)?%</.test(badBody),
+     (badBody.match(/>[1-9]\d\d(\.\d)?%</) || [""])[0]);
+
+  // stesse unita' ma numeri impossibili: usata non puo' superare il totale
+  const imp = el._sysMemInfo({ memUsed: P2 + "uso_della_memoria", memFree: null,
+    memTotal: P2 + "memoria_utilizzata_dai_container" });
+  ok("usata piu' grande del totale e' un'accoppiata sbagliata, non un 100%",
+     imp.pct === null && imp.problem && imp.problem.kind === "impossible",
+     JSON.stringify(imp));
+
+  // la percentuale pubblicata dall'apparecchio vince su tutto
+  states[P2 + "utilizzo_della_memoria"] = S("11.1",
+    { friendly_name: "Mini PC Utilizzo della memoria", unit_of_measurement: "%",
+      state_class: "measurement" });
+  el._registry.entityDevice[P2 + "utilizzo_della_memoria"] = D;
+  el._registry.deviceEntities[D].push(P2 + "utilizzo_della_memoria");
+  const withPct = el._systemSlots(card48);
+  ok("la percentuale pubblicata dall'apparecchio viene trovata da sola",
+     withPct.memPct === P2 + "utilizzo_della_memoria", String(withPct.memPct));
+  ok("e vince sul calcolo usata/libera",
+     Math.abs(el._sysMemInfo(withPct).pct - 11.1) < 0.01
+     && el._sysMemInfo(withPct).source === "pct",
+     JSON.stringify(el._sysMemInfo(withPct)));
+  ok("e salva anche un totale scelto male",
+     el._sysMemInfo(Object.assign({}, withPct,
+       { memTotal: P2 + "hostroot_disk_size" })).pct !== null);
+  ok("ma la memoria dei container non viene scambiata per la percentuale",
+     el._systemAuto(card48).memPct !== P2 + "memoria_utilizzata_dai_container");
+  delete states[P2 + "utilizzo_della_memoria"];
+  delete el._registry.entityDevice[P2 + "utilizzo_della_memoria"];
+  el._registry.deviceEntities[D] = el._registry.deviceEntities[D]
+    .filter((x) => x !== P2 + "utilizzo_della_memoria");
+  ok("tolta la percentuale, si torna al calcolo di prima",
+     Math.abs(el._sysMemPct(el._systemSlots(card48)) - 25) < 0.01);
 
   // --- soglie
   ok("sotto la soglia è verde", el._sysLevel(10, 80, 95).k === "ok");

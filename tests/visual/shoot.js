@@ -140,7 +140,12 @@ const DEFAULT_DASH = {
   ok("toggle muri funziona", nowall.wallCount === 0, String(nowall.wallCount));
   ok("targhetta sopra la stanza", iso.tagTop < iso.floorMidY, iso.tagTop + " vs " + iso.floorMidY);
   ok("nome stanza dall'area HA", iso.labelText === "Soggiorno", String(iso.labelText));
-  ok("badge popolati dal registro aree", iso.badges >= 4 && iso.badges <= 6, String(iso.badges));
+  // 0.53.0: la sintesi. Sei pastiglie per stanza coprivano la pianta che
+  // dovevano descrivere; adesso ne restano al massimo quattro, e sono quelle
+  // che si guardano da lontano. L'elenco completo torna con badges:"tutte"
+  // (provato nella suite logica, che non ha bisogno di un browser).
+  ok("le etichette sopra la stanza sono poche e scelte, non tutte",
+     iso.badges >= 1 && iso.badges <= 4, String(iso.badges));
 
   // ---- storeys: a room one floor up must be measurably higher on screen ---
   const scene = async (opts) => {
