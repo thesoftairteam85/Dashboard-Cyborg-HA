@@ -922,7 +922,7 @@ const CARD_TYPES = [
   { k: "status", l: "Stato", d: "Badge colorato: verde se tutto a posto, acceso se richiede attenzione." },
   { k: "climate", l: "Clima", d: "Temperatura attuale, temperatura impostata e modalità." },
   { k: "gauge", l: "Gauge", d: "Barra percentuale. Per batterie, umidità, livelli." },
-  { k: "chart", l: "Grafico", d: "Andamento delle ultime 24 ore dallo storico." },
+  { k: "chart", l: "Grafico", d: "Il numero con sotto l'andamento dello storico, nel periodo che scegli." },
   { k: "energyflow", l: "Flusso energetico", solo: true, d: "Schema animato Solare / Rete / Batteria / Casa. Si configura da solo." },
   { k: "weather", l: "Meteo", d: "Condizioni e previsioni. Vuole un'entità meteo." },
   { k: "active", l: "Attivi ora", solo: true, d: "Elenco di tutto ciò che è acceso in casa, con spegnimento al tocco." },
@@ -1036,9 +1036,28 @@ const SERIES_COLORS = ["#00e5ff", "#ffd166", "#06d6a0", "#c77dff", "#ff8fab",
 const MAX_TREND_SERIES = 12;
 
 const TREND_RANGES = [
+  // L'ultima ora c'e' perche' e' la finestra con cui si guarda una cosa che
+  // sta succedendo ADESSO: una pompa che parte, un forno che sale, un carico
+  // che cicla. A 24 ore quei minuti sono quattro pixel.
+  { h: 1, l: "1 ora" },
   { h: 6, l: "6 ore" }, { h: 24, l: "24 ore" },
   { h: 72, l: "3 giorni" }, { h: 168, l: "7 giorni" },
 ];
+
+/**
+ * Ogni quanto si ridisegna l'asse del tempo, secondo la finestra.
+ *
+ * Con l'etichetta fissa a "HH:00" una finestra di un'ora scriveva cinque volte
+ * la stessa ora: un asse che non distingue niente e' peggio di nessun asse.
+ * Sotto le due ore contano i minuti, oltre i tre giorni contano i giorni.
+ */
+function trendTimeLabel(t, hours) {
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, "0");
+  if (hours > 72) return d.getDate() + "/" + (d.getMonth() + 1);
+  if (hours > 2) return two(d.getHours()) + ":00";
+  return two(d.getHours()) + ":" + two(d.getMinutes());
+}
 
 /** Ready-made colours, so setting a scene does not require a colour picker. */
 const LIGHT_SWATCHES = [
@@ -2931,14 +2950,27 @@ class CyborgDashboard extends HTMLElement {
 
   // -------------------------------------------------------------- history --
 
-  _requestHistory(entityId) {
+  /**
+   * Lo storico della sparkline, per la finestra che la card chiede.
+   *
+   * La chiave della cache porta anche le ore: due card sulla stessa entita'
+   * con periodi diversi sono due domande diverse, e una chiave sola faceva
+   * vincere la prima che arrivava. E la durata della cache segue la finestra,
+   * come per la card Andamento: cinque minuti su un'ora sono l'8% del grafico.
+   */
+  _historyKey(entityId, hours) { return entityId + "|" + hours; }
+
+  _requestHistory(entityId, hoursRaw) {
     if (!entityId) return;
-    const cached = this._history[entityId];
-    if (cached && Date.now() - cached.ts < 300000) return;
-    if (this._pendingHistory.has(entityId)) return;
-    this._pendingHistory.add(entityId);
+    const hours = Math.max(1, Math.min(720, Number(hoursRaw) || 24));
+    const key = this._historyKey(entityId, hours);
+    const cached = this._history[key];
+    const ttl = Math.max(30000, Math.min(300000, (hours * 3600000) / 60));
+    if (cached && Date.now() - cached.ts < ttl) return;
+    if (this._pendingHistory.has(key)) return;
+    this._pendingHistory.add(key);
     const end = new Date();
-    const start = new Date(end.getTime() - 24 * 3600 * 1000);
+    const start = new Date(end.getTime() - hours * 3600 * 1000);
     this._hass.callWS({
       type: "history/history_during_period",
       start_time: start.toISOString(),
@@ -2950,11 +2982,11 @@ class CyborgDashboard extends HTMLElement {
       const raw = (res && res[entityId]) || [];
       const points = raw.map((p) => parseFloat(p.s !== undefined ? p.s : p.state))
         .filter((n) => Number.isFinite(n));
-      this._history[entityId] = { ts: Date.now(), points };
+      this._history[key] = { ts: Date.now(), points };
     }).catch(() => {
-      this._history[entityId] = { ts: Date.now(), points: [] };
+      this._history[key] = { ts: Date.now(), points: [] };
     }).then(() => {
-      this._pendingHistory.delete(entityId);
+      this._pendingHistory.delete(key);
       this._touch();
     });
   }
@@ -6673,10 +6705,14 @@ class CyborgDashboard extends HTMLElement {
     const key = item.id + "|" + hours + "|" + ids.join(",");
     this._trend = this._trend || {};
     const cached = this._trend[key];
-    // 5 minutes: long enough not to hammer the recorder while scrolling,
-    // short enough that the chart is never visibly behind the card's own
-    // live value.
-    if (cached && Date.now() - cached.ts < 300000) return cached;
+    // La cache dura una frazione della finestra, non un tempo fisso.
+    //
+    // Cinque minuti su sette giorni sono niente; su UN'ORA sono l'8% del
+    // grafico, cioe' un pezzo di storia visibilmente vecchio proprio nella
+    // finestra che si guarda per vedere cosa sta succedendo adesso. Un
+    // sessantesimo della finestra, fra mezzo minuto e cinque.
+    const ttl = Math.max(30000, Math.min(300000, (hours * 3600000) / 60));
+    if (cached && Date.now() - cached.ts < ttl) return cached;
     if (this._trendPending === key) return cached || null;
     if (!ids.length) return null;
 
@@ -6718,6 +6754,15 @@ class CyborgDashboard extends HTMLElement {
 
   _trendBody(item) {
     const series = this._trendSeries(item);
+    // Le schede del periodo si disegnano SEMPRE, anche mentre lo storico
+    // arriva o quando non c'e' niente da disegnare. Sparivano insieme al
+    // grafico, e finche' sparivano non si poteva cambiare finestra: proprio
+    // nel momento in cui uno vuole stringere a un'ora perche' a 24 non vede
+    // niente, il comando per farlo non c'era.
+    const tabsOf = (h) => `<div class="tr-tabs">${TREND_RANGES.map((r) =>
+      `<button class="eco-tab ${r.h === h ? "on" : ""}" data-trend-hours="${r.h}">${esc(r.l)}</button>`).join("")}</div>`;
+    const withTabs = (inner) =>
+      `<div class="tr">${tabsOf(Math.max(1, Math.min(720, item.hours || 24)))}${inner}</div>`;
     if (!series.length) {
       // Deliberately NOT a temperature example. This card compares any
       // quantity — the temperatures of four motors, the voltages of three
@@ -6729,12 +6774,12 @@ class CyborgDashboard extends HTMLElement {
     }
     const data = this._loadTrend(item);
     if (!data) {
-      return `<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon>
-        <span>Lettura dello storico…</span></div>`;
+      return withTabs(`<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon>
+        <span>Lettura dello storico…</span></div>`);
     }
     if (data.error) {
-      return `<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
-        <span>${esc(data.message)}. Serve il recorder attivo sulle entità scelte.</span></div>`;
+      return withTabs(`<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
+        <span>${esc(data.message)}. Serve il recorder attivo sulle entità scelte.</span></div>`);
     }
 
     const W = 600, H = 220, PAD_L = 38, PAD_R = 10, PAD_T = 12, PAD_B = 22;
@@ -6743,8 +6788,8 @@ class CyborgDashboard extends HTMLElement {
       for (const [, v] of (data.data[row.entity] || [])) { if (v < lo) lo = v; if (v > hi) hi = v; }
     }
     if (!Number.isFinite(lo)) {
-      return `<div class="ov-empty"><ha-icon icon="mdi:chart-line"></ha-icon>
-        <span>Nessun dato registrato nel periodo scelto.</span></div>`;
+      return withTabs(`<div class="ov-empty"><ha-icon icon="mdi:chart-line"></ha-icon>
+        <span>Nessun dato registrato in questo periodo. Prova una finestra più larga: se la lettura non cambia mai, il recorder non ha niente da restituire.</span></div>`);
     }
     // Number(null) is 0 and Number("") is 0, both of which are finite: testing
     // the coerced value treated "no manual bound" as a bound of zero and
@@ -6772,15 +6817,18 @@ class CyborgDashboard extends HTMLElement {
     const hours = Math.max(1, Math.min(720, item.hours || 24));
     const xLabels = Array.from({ length: 5 }, (_, i) => {
       const t = data.start + ((data.end - data.start) * i) / 4;
-      const d = new Date(t);
-      const label = hours > 72
-        ? `${d.getDate()}/${d.getMonth() + 1}`
-        : String(d.getHours()).padStart(2, "0") + ":00";
+      const label = trendTimeLabel(t, hours);
       return `<text class="tr-xlab" x="${x(t).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${esc(label)}</text>`;
     }).join("");
 
     const paths = series.map((row, i) => {
-      const pts = data.data[row.entity] || [];
+      let pts = data.data[row.entity] || [];
+      // Un solo campione non vuol dire "nessun dato": vuol dire che in quella
+      // finestra la lettura NON E' CAMBIATA, e il recorder restituisce solo lo
+      // stato al bordo iniziale. Su una finestra di un'ora capita di continuo
+      // — un termostato fermo, una tensione stabile — e scartarla lasciava il
+      // grafico vuoto proprio quando la risposta giusta era "e' piatta".
+      if (pts.length === 1) pts = [[data.start, pts[0][1]], [data.end, pts[0][1]]];
       if (pts.length < 2) return "";
       const color = row.color || SERIES_COLORS[i % SERIES_COLORS.length];
       const d = pts.map((pt, j) => (j ? "L" : "M") + x(pt[0]).toFixed(1) + "," + y(pt[1]).toFixed(1)).join(" ");
@@ -6829,8 +6877,7 @@ class CyborgDashboard extends HTMLElement {
     }).join("");
 
     return `<div class="tr">
-      <div class="tr-tabs">${TREND_RANGES.map((r) =>
-        `<button class="eco-tab ${r.h === hours ? "on" : ""}" data-trend-hours="${r.h}">${esc(r.l)}</button>`).join("")}</div>
+      ${tabsOf(hours)}
       <div class="tr-plot">
         <svg class="tr-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
              data-trend-svg="${esc(item.id)}">
@@ -8902,14 +8949,22 @@ class CyborgDashboard extends HTMLElement {
         </div>`;
     }
     if (type === "chart") {
-      this._requestHistory(item.entity_id);
-      const hist = this._history[item.entity_id];
-      const chart = hist && hist.points.length > 1
-        ? sparkline(hist.points, 220, 54)
+      const hours = Math.max(1, Math.min(720, Number(item.hours) || 24));
+      this._requestHistory(item.entity_id, hours);
+      const hist = this._history[this._historyKey(item.entity_id, hours)];
+      // Una linea piatta e' un dato, non un'assenza: se in quell'ora la
+      // lettura non e' cambiata, il recorder restituisce un campione solo.
+      const pts = hist && hist.points.length === 1
+        ? [hist.points[0], hist.points[0]] : (hist ? hist.points : []);
+      const chart = pts.length > 1
+        ? sparkline(pts, 220, 54)
         : `<div class="chart-empty">${hist ? "STORICO NON DISPONIBILE" : "CARICAMENTO STORICO..."}</div>`;
+      const label = (TREND_RANGES.find((r) => r.h === hours) || {}).l
+        || (hours + (hours === 1 ? " ora" : " ore"));
       return `<div class="chart-body">
           <div class="value">${esc(state)}<span class="unit-inline">${esc(unit)}</span></div>
           ${chart}
+          <div class="chart-range">${esc(label)}</div>
         </div>`;
     }
     if (type === "sensor") {
@@ -10528,6 +10583,9 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint type-hint">${esc(cardTypeInfo(card.type).d)}${
           cardTypeInfo(card.type).solo && card.entity_id
             ? " <strong>Questa card non usa l'entità collegata sopra.</strong>" : ""}</span>
+        ${card.type === "chart" ? `<label>PERIODO<select data-prop="hours">
+          ${TREND_RANGES.map((r) => `<option value="${r.h}" ${(Number(card.hours) || 24) === r.h ? "selected" : ""}>${esc(r.l)}</option>`).join("")}
+        </select><span class="hint">Quanto storico disegna la linea sotto il numero. <strong>Un'ora</strong> serve per guardare una cosa che sta succedendo adesso — una pompa che parte, un forno che sale: a 24 ore quei minuti sono quattro pixel.</span></label>` : ""}
         <label>DIMENSIONE<select data-prop="size">${Object.keys(SIZE_LABEL).map((v) =>
           `<option value="${v}" ${(card.size || "md") === v ? "selected" : ""}>${esc(SIZE_LABEL[v])}</option>`).join("")}</select></label>
         <label>NOME<input data-prop="name" value="${esc(card.name || "")}" placeholder="${esc((st && st.attributes.friendly_name) || "Nome automatico")}"></label>
@@ -13963,6 +14021,8 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
 .icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+.chart-range{margin-top:3px;font:8.5px ui-monospace,monospace;letter-spacing:.1em;
+  text-transform:uppercase;opacity:.38;text-align:right}
 .hint.sys-bad{display:block;margin-top:8px;padding:8px 10px;border-radius:9px;
   color:#ffb3b3;opacity:1;background:color-mix(in srgb,#ff3d71 14%,transparent);
   border:1px solid color-mix(in srgb,#ff3d71 34%,transparent)}
@@ -15469,7 +15529,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.53.0";
+const CYBORG_BUILD = "0.54.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

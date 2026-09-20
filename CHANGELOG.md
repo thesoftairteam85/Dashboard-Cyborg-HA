@@ -4,6 +4,61 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.54.0] - 2026-09-20
+
+L'ultima ora — e le tre cose che si rompevano solo su una finestra così stretta.
+
+### Il periodo richiesto
+**1 ora** entra fra i periodi, prima di 6 ore, 24 ore, 3 giorni, 7 giorni. Vale
+per la card **Andamento** (le schede sopra il grafico e la tendina dell'editor)
+e per la card **Grafico**, che fino a ieri guardava *sempre* le ultime 24 ore
+senza che si potesse dirlo: adesso ha il suo PERIODO, e scrive sotto la linea
+quale sta mostrando.
+
+### Le tre cose che una finestra di un'ora rompe
+
+Aggiungere la voce all'elenco sarebbe stato un minuto. Il lavoro è che a
+un'ora **tre cose smettevano di funzionare**, e nessuna si vedeva a 24 ore:
+
+1. **L'asse del tempo scriveva cinque volte la stessa ora.** L'etichetta era
+   fissa a `HH:00`: su una finestra di sessanta minuti diventava
+   `11:00 12:00 12:00 12:00 12:00`. Adesso la granularità segue la finestra —
+   minuti sotto le due ore, ore tonde fino a tre giorni, giorni oltre.
+2. **Una lettura che non cambia spariva.** Con `minimal_response` il recorder
+   restituisce *un solo campione* quando nell'intervallo non è successo niente,
+   e il grafico scartava le serie con meno di due punti: su un'ora capita di
+   continuo — un termostato fermo, una tensione stabile — e il risultato era un
+   grafico vuoto quando la risposta giusta era «è piatta». Un campione solo ora
+   diventa una riga piatta, nel grafico e nella sparkline.
+3. **La cache durava cinque minuti fissi.** Su sette giorni è niente; su
+   un'ora è l'**8%** della finestra, cioè storia visibilmente vecchia proprio
+   dove si guarda cosa sta succedendo adesso. Ora la cache dura un
+   sessantesimo della finestra, fra mezzo minuto e cinque.
+
+### Due difetti trovati per strada
+- **Le schede del periodo sparivano mentre lo storico caricava**, e con loro il
+  modo di cambiare finestra: proprio quando uno vuole stringere a un'ora
+  perché a 24 non vede niente, il comando non c'era. Adesso si disegnano
+  sempre, anche sopra un grafico vuoto o in errore.
+- **La cache della sparkline era per entità, non per (entità + periodo)**: due
+  card sulla stessa grandezza con periodi diversi si rubavano il risultato, e
+  vinceva la prima arrivata.
+
+### Prove
+9 asserzioni nuove (1320) e 474 misurate in Chromium. Rimettendo i difetti la
+suite fallisce con `["11:00","12:00","12:00","12:00","12:00"]` e col grafico
+vuoto: esattamente quello che si sarebbe visto.
+
+### Dove l'«ultima ora» NON è stata messa, e perché
+- **Analisi economica**: i suoi periodi sono di *calendario* (oggi, settimana,
+  mese, anno) perché la bolletta arriva per mese solare. «Ultima ora» contro
+  una tariffa non vuol dire niente.
+- **Bande «ultime 24 ore»** della card Sistema e della card Monitoraggio: sono
+  costruite sulle **statistiche orarie** di Home Assistant, dove un'ora è *un
+  solo bucket* — una banda di un punto. Per farle a un'ora servono le
+  statistiche a 5 minuti (`period: "5minute"`), che sono un'altra chiamata e
+  un'altra scala: è un lavoro a sé, non un'opzione da aggiungere all'elenco.
+
 ## [0.53.0] - 2026-09-13
 
 La memoria non era al 100%, e la mappa era coperta dalle sue stesse etichette.

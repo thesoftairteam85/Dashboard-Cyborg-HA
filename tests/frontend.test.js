@@ -2568,7 +2568,91 @@ console.log("\n== 28. GRAFICO CHE SEGUE LE STANZE ==");
   el._signature = ""; el.render();
   ok("a mano compare il riempimento in un colpo solo",
      el.innerHTML.includes("data-trend-fill"));
+
+  // --- 0.54.0: l'ultima ora.
+  // La finestra con cui si guarda una cosa che sta succedendo ADESSO: una
+  // pompa che parte, un forno che sale. A 24 ore quei minuti sono quattro
+  // pixel.
+  ok("fra i periodi c'e' anche l'ultima ora",
+     /<option value="1"[^>]*>1 ora</.test(el.innerHTML), "");
   el._editing = ed;
+
+  // la barra dei periodi sulla card, fuori dalla modifica
+  el._signature = ""; el.render();
+  const trBody = el.innerHTML;
+  ok("e la barra sulla card la offre come prima scheda",
+     /data-trend-hours="1"/.test(trBody)
+     && trBody.indexOf('data-trend-hours="1"') < trBody.indexOf('data-trend-hours="6"'), "");
+
+  // --- l'asse del tempo deve seguire la finestra
+  {
+    const saved = el._trend, savedH = tc.hours;
+    const now = Date.now();
+    const flat = [];
+    for (let i = 0; i <= 12; i++) flat.push([now - (12 - i) * 5 * 60000, 20 + i * 0.1]);
+    const key1 = (h) => "tr|" + h + "|" + el._trendSeries(tc).map((r) => r.entity).join(",");
+    const put = (h) => { el._trend = {}; el._trend[key1(h)] = { ts: Date.now(),
+      start: now - h * 3600000, end: now, data: { [el._trendSeries(tc)[0].entity]: flat } }; };
+
+    tc.hours = 1; put(1);
+    const lab1 = (el._trendBody(tc).match(/class="tr-xlab"[^>]*>([^<]+)</g) || [])
+      .map((x) => /">([^<]+)</.exec(x)[1]);
+    ok("su un'ora le etichette dell'asse portano i minuti",
+       lab1.length === 5 && new Set(lab1).size >= 4 && lab1.every((x) => /^\d\d:\d\d$/.test(x)),
+       JSON.stringify(lab1));
+
+    tc.hours = 24; put(24);
+    const lab24 = (el._trendBody(tc).match(/class="tr-xlab"[^>]*>([^<]+)</g) || [])
+      .map((x) => /">([^<]+)</.exec(x)[1]);
+    ok("su 24 ore restano le ore tonde",
+       lab24.every((x) => /:00$/.test(x)), JSON.stringify(lab24));
+
+    // --- una lettura che non cambia e' una riga piatta, non un buco
+    tc.hours = 1;
+    el._trend = {}; el._trend[key1(1)] = { ts: Date.now(),
+      start: now - 3600000, end: now,
+      data: { [el._trendSeries(tc)[0].entity]: [[now - 3600000, 21.5]] } };
+    ok("un solo campione nella finestra disegna una riga piatta, non il vuoto",
+       /class="tr-line"/.test(el._trendBody(tc)),
+       (el._trendBody(tc).match(/ov-empty|tr-line/) || [""])[0]);
+
+    el._trend = saved; tc.hours = savedH;
+  }
+
+  // --- la card "Grafico": la sparkline guardava sempre 24 ore, senza dirlo
+  {
+    const savedHist = el._history, savedPend = el._pendingHistory;
+    el._history = {}; el._pendingHistory = new Set();
+    const calls = [];
+    const savedWS = el._hass.callWS;
+    el._hass.callWS = (msg) => {
+      if (msg && msg.type === "history/history_during_period") {
+        calls.push((Date.parse(msg.end_time) - Date.parse(msg.start_time)) / 3600000);
+        return Promise.resolve({ [msg.entity_ids[0]]: [] });
+      }
+      return savedWS.call(el._hass, msg);
+    };
+    states["sensor.graf"] = S("21.5", { friendly_name: "Grafico test",
+      unit_of_measurement: "°C", device_class: "temperature" });
+    const ch = { id: "ch1", type: "chart", entity_id: "sensor.graf", name: "", size: "md",
+      appearance: {}, states: {}, actions: {}, hours: 1 };
+    el._cardBody(ch, states["sensor.graf"]);
+    ok("la card Grafico chiede allo storico la finestra che le e' stata detta",
+       calls.length === 1 && Math.abs(calls[0] - 1) < 0.01, JSON.stringify(calls));
+    el._cardBody(Object.assign({}, ch, { id: "ch2", hours: 24 }));
+    ok("e due periodi diversi sono due domande diverse, non una cache sola",
+       calls.length === 2 && Math.abs(calls[1] - 24) < 0.01, JSON.stringify(calls));
+    // una lettura ferma da un'ora: un campione solo, che deve diventare una riga
+    el._history[el._historyKey("sensor.graf", 1)] = { ts: Date.now(), points: [21.5] };
+    ok("un solo campione disegna una riga piatta anche nella sparkline",
+       /<svg|<path|<polyline/.test(el._cardBody(ch, states["sensor.graf"])),
+       el._cardBody(ch, states["sensor.graf"]).slice(0, 80));
+    ok("e la card dice a colpo d'occhio che periodo sta guardando",
+       /chart-range">1 ora</.test(el._cardBody(ch, states["sensor.graf"])), "");
+    el._hass.callWS = savedWS;
+    el._history = savedHist; el._pendingHistory = savedPend;
+    delete states["sensor.graf"];
+  }
 
   for (const id of ["sensor.temperatura_esterna","sensor.sog_t","sensor.sog_h","sensor.bag_t",
       "sensor.bag_h","sensor.cam_t","sensor.sop_t","sensor.sop_h","sensor.nuovo_t"]) delete states[id];

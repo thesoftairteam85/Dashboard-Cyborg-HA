@@ -575,6 +575,15 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                 result[key] = float(result[key]) if result.get(key) not in (None, "") else None
             except (TypeError, ValueError):
                 result[key] = None
+    # La card "Grafico" e' una sparkline sotto un numero, e fino alla 0.53.0
+    # guardava SEMPRE le ultime 24 ore, senza che si potesse dirlo. Adesso
+    # porta lo stesso `hours` della card Andamento: stessa parola, stesso
+    # significato, stesso elenco di periodi.
+    if result.get("type") == "chart":
+        try:
+            result["hours"] = max(1, min(720, int(float(result.get("hours", 24)))))
+        except (TypeError, ValueError):
+            result["hours"] = 24
     if result.get("type") == "thermostat":
         # Empty list means "every climate entity there is", which is what makes
         # a unit installed next month appear without editing the card. A
