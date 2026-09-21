@@ -64,9 +64,16 @@ the user having to rebuild anything.
 """
 from __future__ import annotations
 
+import datetime
+import re
 from typing import Any
 
-SCHEMA_VERSION = 21
+# AAAA-MM-GG, la chiave con cui la card Turni segna un giorno. Solo forma:
+# la validita' del giorno non conta, un 2026-02-31 semplicemente non verra'
+# mai disegnato da nessuna vista.
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+SCHEMA_VERSION = 22
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -816,6 +823,89 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["refresh"] = max(5, min(120, int(result.get("refresh", 10))))
         except (TypeError, ValueError):
             result["refresh"] = 10
+    # La card Turni: il turnario dipinto a dita.
+    #
+    # Il dato sta QUI, nel dashboard, e non in un'integrazione: e' la ragione
+    # per cui non serve nessun account, nessun OAuth e nessuna configurazione
+    # esterna. Un anno di turni per due persone sono ~700 voci da una
+    # ventina di byte: quindici kilobyte, che il dashboard regge senza
+    # accorgersene. Si tiene comunque un tetto, e si buttano i giorni piu'
+    # vecchi di due anni: un turnario non e' un archivio storico.
+    if result.get("type") == "shifts":
+        rows = result.get("people")
+        people = []
+        if isinstance(rows, list):
+            for row in rows[:4]:
+                if not isinstance(row, dict):
+                    continue
+                pid = str(row.get("id") or "")[:40]
+                if not pid:
+                    continue
+                people.append({
+                    "id": pid,
+                    "name": str(row.get("name") or "Senza nome")[:24],
+                    "color": str(row.get("color") or "#ff8fab")[:32],
+                })
+        result["people"] = people
+        rows = result.get("types")
+        types = []
+        seen_k = set()
+        if isinstance(rows, list):
+            for row in rows[:10]:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("k") or "").strip()[:3].upper()
+                # Due turni con la stessa sigla renderebbero ambiguo ogni
+                # giorno dipinto: il secondo si scarta.
+                if not key or key in seen_k:
+                    continue
+                seen_k.add(key)
+                types.append({
+                    "k": key,
+                    "l": str(row.get("l") or key)[:24],
+                    "color": str(row.get("color") or "#00e5ff")[:32],
+                    "from": str(row.get("from") or "")[:5],
+                    "to": str(row.get("to") or "")[:5],
+                    "off": row.get("off") is True,
+                })
+        result["types"] = types
+        if result.get("view") not in ("settimana", "mese"):
+            result["view"] = "mese"
+        data = result.get("data")
+        clean_data = {}
+        if isinstance(data, dict):
+            cutoff = (datetime.date.today() - datetime.timedelta(days=730)).isoformat()
+            for pid, days in list(data.items())[:4]:
+                if not isinstance(pid, str) or not isinstance(days, dict):
+                    continue
+                kept = {}
+                for day, value in days.items():
+                    if not isinstance(day, str) or not DAY_RE.match(day):
+                        continue
+                    if day < cutoff:
+                        continue
+                    if isinstance(value, str) and value.strip():
+                        kept[day] = value.strip()[:3].upper()
+                    if len(kept) >= 1200:
+                        break
+                clean_data[pid] = kept
+        result["data"] = clean_data
+        rot = result.get("rotation")
+        if isinstance(rot, dict):
+            seq = rot.get("seq")
+            clean_rot = {
+                "person": str(rot.get("person") or "")[:40],
+                "seq": ([str(x)[:3].upper() for x in seq if isinstance(x, str)][:30]
+                        if isinstance(seq, list) else []),
+                "start": str(rot.get("start") or "")[:10],
+            }
+            try:
+                clean_rot["weeks"] = max(1, min(52, int(float(rot.get("weeks", 8)))))
+            except (TypeError, ValueError):
+                clean_rot["weeks"] = 8
+            result["rotation"] = clean_rot
+        else:
+            result["rotation"] = {"person": "", "seq": [], "start": "", "weeks": 8}
     # La card Calendari: quali calendari, con che vista e con che colori.
     # Lista vuota = "trovali tu", come ovunque.
     if result.get("type") == "calendar":

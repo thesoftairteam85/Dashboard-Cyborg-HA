@@ -4,6 +4,56 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.56.0] - 2026-09-21
+
+Card **Turni**: il turnario si dipinge. Niente account, niente eventi da compilare.
+
+### Perché non bastava un calendario
+Un calendario chiede, per ogni voce, titolo + data + ora inizio + ora fine:
+**sei campi per dire «martedì pomeriggio»**. Ma un turnario non è fatto di
+eventi diversi fra loro — è un piccolo insieme di turni **ripetuti** su dei
+giorni. La domanda giusta non è «che evento metto qui», è «che turno fa oggi»:
+due tocchi, il turno e il giorno.
+
+### Come funziona
+- **I tipi di turno si dichiarano una volta**: sigla, nome, colore, orari, e se
+  conta come tempo libero. Di fabbrica ci sono già M / P / N / R con gli orari
+  tipici: si può cominciare senza configurare niente.
+- **Il calendario si dipinge**: scegli il turno nella barra, tocchi i giorni.
+  Toccare due volte lo stesso turno lo toglie; c'è anche la gomma.
+- **Si salva da solo**, con un secondo di ritardo: dieci tocchi di fila fanno
+  **una** scrittura, non dieci. Chi inserisce i turni può non essere il
+  proprietario della dashboard, e chiedergli di premere SALVA dopo trenta
+  tocchi vuol dire perdere trenta tocchi.
+- **La rotazione**: se il turnario è ciclico, scrivi la sequenza una volta
+  (`M P N R`), il giorno di partenza e per quante settimane — e copre mesi in
+  un clic. La rotazione è la regola, i cambi sono le eccezioni che correggi a
+  dita.
+- **Fino a quattro persone**, ognuna col suo colore. Con due, la card risponde
+  alla domanda che nessun calendario sa fare: **«prossimo giorno libero
+  insieme»**, incrociando i turnari.
+
+### Niente da configurare fuori
+Il dato sta nel dashboard: **nessuna integrazione, nessun account Google,
+nessun OAuth, nessun server**. Un anno per due persone sono ~15 KB. Lo schema
+scarta i giorni più vecchi di due anni, le sigle duplicate (renderebbero
+ambiguo ogni giorno dipinto) e le persone senza id.
+
+### Dettagli che si vedono solo quando sbagliano
+- **La chiave del giorno è locale, non UTC.** `toISOString()` alle 01:00 di
+  martedì in Italia scriverebbe lunedì: il turno di una persona è un fatto del
+  suo giorno, non del meridiano di Greenwich.
+- **«Libero» vuol dire un turno dichiarato riposo**, non «non ho scritto
+  niente»: il vuoto è ignoranza, non tempo libero.
+- **Rinominare una sigla riscrive i giorni già dipinti**, altrimenti il
+  calendario si svuoterebbe a sorpresa.
+- **Il bordo sinistro di ogni fascia porta il colore della persona**, il corpo
+  quello del turno: con due turnari sovrapposti, senza bordo non si sa quale
+  riga sia di chi.
+
+### Prove
+30 asserzioni nuove (1381) e 474 misurate in Chromium. Schema v22.
+
 ## [0.55.0] - 2026-09-21
 
 Card **Calendari**: giorno, settimana, mese. E i turni si riconoscono da soli.

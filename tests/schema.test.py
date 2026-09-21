@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 21, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 22, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -994,3 +994,48 @@ for junk in ("anno", "", None, 3, []):
 assert _cal(colors={"calendar.turni": "#ff0000", "light.x": "#00ff00",
                     "calendar.b": 5})["colors"] == {"calendar.turni": "#ff0000"}
 print("schema: card Calendari (v21) ok")
+
+
+# ---------------------------------------------------------------------------
+# v22: la card Turni. Il dato sta nel dashboard, quindi lo schema e' l'unica
+# difesa: sigle duplicate, giorni inventati e archivi infiniti vanno fermati
+# qui, non sullo schermo.
+import datetime as _dt
+
+
+def _sh(**kw):
+    item = {"id": "sh", "type": "shifts"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+base = _sh()
+assert base["people"] == [] and base["types"] == []   # vuoto = valori di fabbrica nel JS
+assert base["view"] == "mese"
+assert base["data"] == {}
+assert base["rotation"] == {"person": "", "seq": [], "start": "", "weeks": 8}
+
+# due turni con la stessa sigla renderebbero ambiguo ogni giorno dipinto
+dup = _sh(types=[{"k": "M", "l": "Mattino"}, {"k": "m", "l": "Altro"},
+                 {"k": "N", "l": "Notte"}])
+assert [t["k"] for t in dup["types"]] == ["M", "N"], dup["types"]
+# la sigla si normalizza maiuscola e corta
+assert _sh(types=[{"k": " mat ", "l": "x"}])["types"][0]["k"] == "MAT"
+# il flag "riposo" e' un booleano vero, non un valore qualunque
+assert _sh(types=[{"k": "R", "off": "si"}])["types"][0]["off"] is False
+assert _sh(types=[{"k": "R", "off": True}])["types"][0]["off"] is True
+
+# i giorni: solo AAAA-MM-GG, e niente piu' vecchio di due anni
+vecchio = (_dt.date.today() - _dt.timedelta(days=900)).isoformat()
+recente = (_dt.date.today() - _dt.timedelta(days=10)).isoformat()
+d = _sh(data={"p1": {recente: "M", vecchio: "N", "ieri": "P", "2026-13": "R"}})
+assert list(d["data"]["p1"].keys()) == [recente], d["data"]
+assert d["data"]["p1"][recente] == "M"
+
+# il tetto delle persone e delle rotazioni
+assert len(_sh(people=[{"id": "p%d" % i, "name": str(i)} for i in range(9)])["people"]) == 4
+assert _sh(rotation={"seq": ["m", "p"], "start": "2026-09-21", "weeks": 999})["rotation"]["weeks"] == 52
+assert _sh(rotation={"seq": ["m", "p"]})["rotation"]["seq"] == ["M", "P"]
+# una persona senza id non e' indirizzabile: si scarta
+assert _sh(people=[{"name": "senza id"}])["people"] == []
+print("schema: card Turni (v22) ok")

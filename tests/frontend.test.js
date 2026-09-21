@@ -4611,6 +4611,9 @@ console.log("\n== 50. I MODELLI DI SEZIONE DICONO COSA SONO ==");
      /UNA CARD PER OGNI luce/.test(h50), "");
   ok("c'è un modello per l'irrigazione e il giardino",
      /data-add-preset="irrigazione"/.test(h50) && /Irrigazione · Giardino/.test(h50), "");
+  ok("e uno per i turni",
+     /data-add-preset="turni"/.test(h50)
+     && h50.indexOf('data-add-preset="turni"') < h50.indexOf("UNA CARD PER OGNI ENTIT"), "");
   ok("e uno per i calendari, nella famiglia delle card singole",
      /data-add-preset="calendari"/.test(h50)
      && h50.indexOf('data-add-preset="calendari"') < h50.indexOf("UNA CARD PER OGNI ENTIT"), "");
@@ -4880,6 +4883,136 @@ console.log("\n== 52. CALENDARI: GIORNO, SETTIMANA, MESE ==");
   el._cal = {}; el._calOffset = {};
   el._dashboard = savedDash52; el._selected = savedSel52; el._pageIndex = savedIdx52;
   ok("stato ripristinato dopo la sezione 52", !states["calendar.turni"]);
+}
+
+console.log("\n== 53. TURNI: IL CALENDARIO SI DIPINGE ==");
+{
+  const savedDash53 = el._dashboard, savedSel53 = el._selected, savedIdx53 = el._pageIndex;
+  const savedEd53 = el._editing;
+  const saves = [];
+  const savedWS53 = el._hass.callWS;
+  el._hass.callWS = (msg) => {
+    if (msg && msg.type === "cyborg_dashboard/save") {
+      saves.push(msg); return Promise.resolve({ saved: true, revision: 1 });
+    }
+    return savedWS53.call(el._hass, msg);
+  };
+
+  const sh = { id: "sh1", type: "shifts", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, people: [], types: [], view: "mese",
+    data: {}, rotation: { person: "", seq: [], start: "", weeks: 8 } };
+  const sec53 = { id: "s53", title: "Turni", icon: "mdi:calendar-account",
+    accent: "#ff8fab", items: [sh] };
+  el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, revision: 0, pages: [
+    { id: "p53", title: "P", icon: "mdi:home", type: "sections", sections: [sec53] }] };
+  el._pageIndex = 0; el._editing = false;
+  el._shiftOffset = {}; el._shiftBrush = {}; el._shiftPerson = {};
+
+  // --- i valori di fabbrica: si deve poter cominciare senza configurare niente
+  ok("i turni di fabbrica coprono il caso normale",
+     el._shiftTypes(sh).map((t) => t.k).join() === "M,P,N,R",
+     el._shiftTypes(sh).map((t) => t.k).join());
+  ok("e uno di essi è dichiarato tempo libero",
+     el._shiftTypes(sh).filter((t) => t.off).map((t) => t.k).join() === "R");
+  ok("c'è già una persona, senza doverla creare",
+     el._shiftPeople(sh).length === 1);
+
+  // --- la chiave del giorno deve essere LOCALE, non UTC
+  ok("la chiave del giorno è quella locale, non quella di Greenwich",
+     el._dayKey(new Date(2026, 8, 21, 1, 0, 0)) === "2026-09-21",
+     el._dayKey(new Date(2026, 8, 21, 1, 0, 0)));
+  ok("e a fine mese non slitta",
+     el._dayKey(new Date(2026, 8, 30, 23, 30, 0)) === "2026-09-30");
+
+  // --- dipingere un giorno
+  const pid = el._shiftPeople(sh)[0].id;
+  el._shiftSet(sh, pid, "2026-09-21", "M");
+  ok("un tocco segna il turno", el._shiftGet(sh, pid, "2026-09-21") === "M");
+  ok("e toglierlo lo cancella davvero",
+     (el._shiftSet(sh, pid, "2026-09-21", ""), el._shiftGet(sh, pid, "2026-09-21") === ""));
+
+  // --- la rotazione: la ragione per cui la card esiste
+  sh.rotation = { person: pid, seq: ["M", "P", "N", "R"], start: "2026-09-21", weeks: 4 };
+  const n = el._shiftsApplyRotation(sh);
+  ok("la rotazione riempie quattro settimane in un colpo", n === 28, String(n));
+  ok("e rispetta la sequenza giorno per giorno",
+     el._shiftGet(sh, pid, "2026-09-21") === "M"
+     && el._shiftGet(sh, pid, "2026-09-22") === "P"
+     && el._shiftGet(sh, pid, "2026-09-23") === "N"
+     && el._shiftGet(sh, pid, "2026-09-24") === "R"
+     && el._shiftGet(sh, pid, "2026-09-25") === "M",
+     ["21", "22", "23", "24", "25"].map((d) => el._shiftGet(sh, pid, "2026-09-" + d)).join());
+  ok("una rotazione senza sequenza non scrive niente",
+     el._shiftsApplyRotation(Object.assign({}, sh,
+       { rotation: { person: pid, seq: [], start: "2026-09-21", weeks: 4 } })) === 0);
+  ok("e nemmeno senza data di partenza",
+     el._shiftsApplyRotation(Object.assign({}, sh,
+       { rotation: { person: pid, seq: ["M"], start: "", weeks: 4 } })) === 0);
+
+  // --- liberi insieme: la domanda che un calendario non sa rispondere
+  const due = Object.assign({}, sh, {
+    people: [{ id: "a", name: "Lei", color: "#ff8fab" }, { id: "b", name: "Io", color: "#00e5ff" }],
+    data: { a: { "2026-09-21": "M", "2026-09-22": "R", "2026-09-23": "R" },
+            b: { "2026-09-21": "R", "2026-09-22": "M", "2026-09-23": "R" } } });
+  const libero = el._shiftsFreeTogether(due, new Date(2026, 8, 21), 10);
+  ok("il primo giorno libero per tutti e due è il 23, non il 22",
+     libero && el._dayKey(libero) === "2026-09-23",
+     libero ? el._dayKey(libero) : "nessuno");
+  ok("un giorno senza turno segnato NON conta come libero",
+     el._shiftsFreeTogether(Object.assign({}, due,
+       { data: { a: { "2026-09-21": "R" }, b: {} } }), new Date(2026, 8, 21), 3) === null);
+  ok("con una persona sola la domanda non si pone",
+     el._shiftsFreeTogether(sh, new Date(2026, 8, 21), 10) === null);
+
+  // --- il disegno
+  const hs = el._shiftsBody(sh);
+  ok("il mese disegna quarantadue caselle toccabili",
+     (hs.match(/data-sh-day=/g) || []).length === 42,
+     String((hs.match(/data-sh-day=/g) || []).length));
+  ok("la barra dei turni c'è, con la gomma",
+     /data-sh-brush="sh1\|M"/.test(hs) && /data-sh-brush="sh1\|"/.test(hs));
+  ok("e le due viste", /data-sh-view="sh1\|settimana"/.test(hs) && /data-sh-view="sh1\|mese"/.test(hs));
+  ok("turni: nessun undefined", !/undefined/.test(hs),
+     (hs.match(/.{30}undefined.{20}/) || [""])[0]);
+  ok("turni: div bilanciati",
+     (hs.match(/<div/g) || []).length === (hs.match(/<\/div>/g) || []).length);
+  const hs7 = el._shiftsBody(Object.assign({}, sh, { view: "settimana" }));
+  ok("la settimana ne disegna sette",
+     (hs7.match(/data-sh-day=/g) || []).length === 7);
+  ok("con due persone la card annuncia il giorno libero insieme",
+     /libero insieme/.test(el._shiftsBody(due)), "");
+
+  // --- editor
+  el._selected = { kind: "card", sectionId: "s53", itemId: "sh1" };
+  el._editing = true; el._signature = ""; el.render();
+  const e53 = el.innerHTML;
+  ok("l'editor fa cambiare sigla, nome, orari e colore di ogni turno",
+     /data-sh-tk="0"/.test(e53) && /data-sh-tl="0"/.test(e53)
+     && /data-sh-tfrom="0"/.test(e53) && /data-sh-tcolor="0"/.test(e53));
+  ok("e dichiarare quale turno è tempo libero", /data-sh-toff="3"/.test(e53));
+  ok("e impostare la rotazione", /data-sh-rseq/.test(e53) && /data-sh-rstart/.test(e53)
+     && /data-sh-rot/.test(e53));
+  ok("e aggiungere una persona", /data-sh-padd/.test(e53));
+  ok("editor turni: nessun undefined", !/>undefined</.test(e53));
+  el._editing = savedEd53;
+
+  // Il salvataggio e' ritardato di un secondo apposta: dieci tocchi di
+  // seguito devono fare UNA scrittura, non dieci. Quello che si verifica qui
+  // e' che la scrittura sia gia' in coda - chi dipinge non deve ricordarsi di
+  // premere SALVA, e la suite non puo' aspettare un secondo per ogni tocco.
+  el._shiftSet(sh, pid, "2026-10-01", "M");
+  ok("dipingere mette in coda il salvataggio, senza chiedere SALVA",
+     el._shiftSaveT !== null && el._shiftSaveT !== undefined, String(el._shiftSaveT));
+  el._shiftSet(sh, pid, "2026-10-02", "M");
+  el._shiftSet(sh, pid, "2026-10-03", "M");
+  ok("e tre tocchi di fila restano una sola scrittura in coda", saves.length === 0,
+     String(saves.length));
+
+  el._hass.callWS = savedWS53;
+  if (el._shiftSaveT) { clearTimeout(el._shiftSaveT); el._shiftSaveT = null; }
+  el._dashboard = savedDash53; el._selected = savedSel53; el._pageIndex = savedIdx53;
+  el._shiftOffset = {}; el._shiftBrush = {}; el._shiftPerson = {};
+  ok("stato ripristinato dopo la sezione 53", el._hass.callWS === savedWS53);
 }
 
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");

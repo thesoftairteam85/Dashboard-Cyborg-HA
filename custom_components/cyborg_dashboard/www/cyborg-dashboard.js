@@ -173,6 +173,11 @@ const SECTION_PRESETS = [
     score: () => 0, cardType: () => "calendar", seed: "calendar",
   },
   {
+    id: "turni", title: "Turni", icon: "mdi:calendar-account", accent: "#ff8fab",
+    limit: 0, d: "Una card Turni: scegli il turno e tocchi i giorni. Niente account, niente eventi da compilare.",
+    score: () => 0, cardType: () => "shifts", seed: "shifts",
+  },
+  {
     // Questo modello e' nato PRIMA della card Sistema (0.47.0) e costruiva una
     // sezione di trenta card `sensor` pescate per nome. Adesso esiste una card
     // che parte dall'apparecchio e trova tutto da sola: il modello deve usare
@@ -940,6 +945,7 @@ const CARD_TYPES = [
   { k: "system", l: "Sistema", solo: true, d: "Un computer sorvegliato: CPU, memoria, temperature, dischi, rete. Scegli l'apparecchio, il resto lo trova da sé." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "calendar", l: "Calendari", solo: true, d: "Giorno, settimana e mese di uno o più calendari: turni, impegni, scadenze." },
+  { k: "shifts", l: "Turni", solo: true, d: "Il turnario dipinto a dita: scegli il turno, tocchi i giorni. Rotazione automatica e riposi in comune." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
   { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
   { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
@@ -1293,7 +1299,7 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "system", "camera", "calendar", "economy", "lights", "irrigation", "trend", "room", "ev",
+  "monitor", "system", "camera", "calendar", "shifts", "economy", "lights", "irrigation", "trend", "room", "ev",
   "comfort", "thermostat"]);
 
 const COMPOSITE_META = {
@@ -1311,6 +1317,7 @@ const COMPOSITE_META = {
   system:        ["Sistema", "Salute di un computer", "mdi:server", "lg"],
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
   calendar:      ["Calendari", "Giorno, settimana, mese", "mdi:calendar-month", "lg"],
+  shifts:        ["Turni", "Chi lavora e quando", "mdi:calendar-account", "lg"],
   thermostat:    ["Controllo temperatura", "Termostati e clima", "mdi:thermostat-box", "lg"],
   economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
 };
@@ -2582,6 +2589,8 @@ class CyborgDashboard extends HTMLElement {
         battery_in: null, battery_out: null,
         price_import: 0.25, price_export: 0.10, period: "month" });
       if (base.seed === "calendar") Object.assign(card, { calendars: [], view: "settimana", colors: {} });
+      if (base.seed === "shifts") Object.assign(card, { people: [], types: [], view: "mese",
+        data: {}, rotation: { person: "", seq: [], start: "", weeks: 8 } });
       if (base.seed === "system") {
         Object.assign(card, { device: this._busiestDevice(), temps: [], disks: [],
           cpu: null, gpu: null, mem_used: null, mem_free: null, mem_total: null,
@@ -7965,6 +7974,244 @@ class CyborgDashboard extends HTMLElement {
     return Object.keys(this._hass.states).filter((id) => id.startsWith("camera."));
   }
 
+  // ---------------------------------------------------------------- turni --
+
+  /*
+   * Perche' i turni NON sono eventi di calendario.
+   *
+   * Un calendario chiede, per ogni voce, titolo + data + ora inizio + ora
+   * fine: sei campi per dire "martedi' pomeriggio". Un turnario non e' fatto
+   * di eventi diversi fra loro: e' un piccolo insieme di turni RIPETUTI su
+   * dei giorni. La domanda giusta non e' "che evento metto qui", e'
+   * "che turno fa oggi": due tocchi, il turno e il giorno.
+   *
+   * Da qui tutto il resto: i tipi di turno sono dichiarati una volta (sigla,
+   * colore, orari), il calendario si DIPINGE, e una rotazione ciclica si
+   * riempie da sola per mesi. Il dato sta nel dashboard, quindi non serve
+   * nessuna integrazione, nessun account e nessuna configurazione esterna.
+   */
+
+  /** I tipi di turno, coi valori di fabbrica se non ne sono stati dichiarati. */
+  _shiftTypes(item) {
+    const rows = Array.isArray(item.types) && item.types.length ? item.types : null;
+    return rows || [
+      { k: "M", l: "Mattino", color: "#ffd166", from: "06:00", to: "14:00", off: false },
+      { k: "P", l: "Pomeriggio", color: "#ff924c", from: "14:00", to: "22:00", off: false },
+      { k: "N", l: "Notte", color: "#c77dff", from: "22:00", to: "06:00", off: false },
+      { k: "R", l: "Riposo", color: "#06d6a0", from: "", to: "", off: true },
+    ];
+  }
+
+  _shiftType(item, k) {
+    return this._shiftTypes(item).find((t) => t.k === k) || null;
+  }
+
+  /** Le persone del turnario. Una di fabbrica: la maggior parte dei casi. */
+  _shiftPeople(item) {
+    const rows = Array.isArray(item.people) && item.people.length ? item.people : null;
+    return rows || [{ id: "p1", name: "Lei", color: "#ff8fab" }];
+  }
+
+  /**
+   * La chiave di un giorno: AAAA-MM-GG **locale**.
+   *
+   * `toISOString()` qui sarebbe un difetto: converte in UTC, e alle 01:00 di
+   * martedi' in Italia scriverebbe lunedi'. Il turno di una persona e' un
+   * fatto del suo giorno, non del meridiano di Greenwich.
+   */
+  _dayKey(d) {
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  }
+
+  _shiftGet(item, personId, key) {
+    const all = (item && item.data) || {};
+    return (all[personId] || {})[key] || "";
+  }
+
+  /**
+   * Dipinge un giorno, e SALVA.
+   *
+   * Il salvataggio automatico non e' una comodita': chi inserisce i turni
+   * puo' non essere il proprietario della dashboard, e chiedergli di
+   * ricordarsi di premere SALVA dopo trenta tocchi vuol dire perdere trenta
+   * tocchi. Il salvataggio e' ritardato di un secondo cosi' una passata di
+   * dieci giorni fa una sola scrittura invece di dieci.
+   */
+  _shiftSet(item, personId, key, k) {
+    item.data = Object.assign({}, item.data || {});
+    item.data[personId] = Object.assign({}, item.data[personId] || {});
+    if (k) item.data[personId][key] = k; else delete item.data[personId][key];
+    this._dirty = true;
+    this._signature = "";
+    this.render();
+    if (this._shiftSaveT) clearTimeout(this._shiftSaveT);
+    this._shiftSaveT = setTimeout(() => { this._shiftSaveT = null; this._save(); }, 1000);
+  }
+
+  /** La finestra della vista, spostata di `offset` passi. Stessa regola dei calendari. */
+  _shiftsWindow(item) {
+    const view = item.view === "settimana" ? "settimana" : "mese";
+    const off = (this._shiftOffset || {})[item.id] || 0;
+    const today = this._dayStart(new Date());
+    if (view === "settimana") {
+      const a = this._weekStart(today);
+      a.setDate(a.getDate() + off * 7);
+      const b = new Date(a); b.setDate(b.getDate() + 7);
+      const last = new Date(b); last.setDate(last.getDate() - 1);
+      return { view, start: a, end: b, days: 7,
+        label: cap1(a.getDate() + " - " + last.getDate() + " " + MONTHS_IT[last.getMonth()]) };
+    }
+    const first = new Date(today.getFullYear(), today.getMonth() + off, 1);
+    const a = this._weekStart(first);
+    const b = new Date(a); b.setDate(b.getDate() + 42);
+    return { view, start: a, end: b, days: 42, month: first,
+      label: cap1(MONTHS_IT[first.getMonth()]) + " " + first.getFullYear() };
+  }
+
+  /**
+   * Il prossimo giorno in cui sono liberi TUTTI.
+   *
+   * E' la domanda per cui vale la pena avere due turnari invece di uno solo,
+   * e non si puo' rispondere guardando un calendario: bisogna incrociare.
+   * "Libero" vuol dire un turno dichiarato `off` - riposo, ferie - non "non
+   * ho scritto niente": il vuoto e' ignoranza, non tempo libero.
+   */
+  _shiftsFreeTogether(item, fromDate, horizon) {
+    const people = this._shiftPeople(item);
+    if (people.length < 2) return null;
+    const d = this._dayStart(fromDate || new Date());
+    for (let i = 0; i < (horizon || 60); i++) {
+      const key = this._dayKey(d);
+      const all = people.every((p) => {
+        const t = this._shiftType(item, this._shiftGet(item, p.id, key));
+        return t && t.off;
+      });
+      if (all) return new Date(d);
+      d.setDate(d.getDate() + 1);
+    }
+    return null;
+  }
+
+  /** Come si legge un turno: sigla, nome e orario. */
+  _shiftLabel(t) {
+    if (!t) return "—";
+    return t.l + (t.from && t.to ? " " + t.from + "-" + t.to : "");
+  }
+
+  _shiftsBody(item) {
+    const types = this._shiftTypes(item);
+    const people = this._shiftPeople(item);
+    const win = this._shiftsWindow(item);
+    const today = this._dayKey(new Date());
+    const brush = (this._shiftBrush || {})[item.id] ?? (types[0] ? types[0].k : "");
+    const person = (this._shiftPerson || {})[item.id] || people[0].id;
+
+    // --- oggi, in una riga sola: e' quello che si guarda passando davanti
+    const oggi = people.map((p) => {
+      const t = this._shiftType(item, this._shiftGet(item, p.id, today));
+      return `<span class="sh-now" style="--pc:${esc(p.color || "#00e5ff")}">
+        <i></i><strong>${esc(p.name)}</strong>
+        <b style="color:${esc(t ? t.color : "inherit")}">${esc(this._shiftLabel(t))}</b></span>`;
+    }).join("");
+    const libero = this._shiftsFreeTogether(item);
+    const insieme = libero ? `<span class="sh-together"><ha-icon icon="mdi:heart-outline"></ha-icon>
+      Prossimo giorno libero insieme: <strong>${esc(cap1(WEEKDAYS_IT[libero.getDay()]) + " "
+        + libero.getDate() + " " + MONTHS_IT[libero.getMonth()])}</strong></span>` : "";
+
+    const head = `<div class="sh-top">
+      <div class="sh-today">${oggi}</div>
+      ${insieme}
+    </div>
+    <div class="cal-head">
+      <div class="cal-nav">
+        <button class="cal-arrow" data-sh-step="${esc(item.id)}|-1"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+        <strong>${esc(win.label)}</strong>
+        <button class="cal-arrow" data-sh-step="${esc(item.id)}|1"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+        ${((this._shiftOffset || {})[item.id] || 0) !== 0
+          ? `<button class="cal-today" data-sh-step="${esc(item.id)}|0">OGGI</button>` : ""}
+      </div>
+      <div class="cal-views">
+        ${[["settimana", "Settimana"], ["mese", "Mese"]].map(([k, l]) =>
+          `<button class="eco-tab ${win.view === k ? "on" : ""}" data-sh-view="${esc(item.id)}|${k}">${esc(l)}</button>`).join("")}
+      </div>
+    </div>`;
+
+    // --- il pennello: i turni come bottoni, piu' la gomma
+    const palette = `<div class="sh-brush">
+      ${people.length > 1 ? `<select class="sh-who" data-sh-person="${esc(item.id)}">
+        ${people.map((p) => `<option value="${esc(p.id)}" ${p.id === person ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+      </select>` : ""}
+      ${types.map((t) => `<button class="sh-key ${brush === t.k ? "on" : ""}"
+        style="--cc:${esc(t.color)}" data-sh-brush="${esc(item.id)}|${esc(t.k)}"
+        title="${esc(this._shiftLabel(t))}"><b>${esc(t.k)}</b><span>${esc(t.l)}</span></button>`).join("")}
+      <button class="sh-key erase ${brush === "" ? "on" : ""}" data-sh-brush="${esc(item.id)}|"
+        title="Cancella il turno"><ha-icon icon="mdi:eraser"></ha-icon></button>
+    </div>`;
+
+    const days = [];
+    for (let i = 0; i < win.days; i++) {
+      const d = new Date(win.start); d.setDate(d.getDate() + i); days.push(d);
+    }
+    const grid = `<div class="sh-grid ${esc(win.view)}">
+      ${["LUN", "MAR", "MER", "GIO", "VEN", "SAB", "DOM"].map((d) => `<span class="cal-dow">${d}</span>`).join("")}
+      ${days.map((d) => {
+        const key = this._dayKey(d);
+        const other = win.month && d.getMonth() !== win.month.getMonth();
+        const isToday = key === today;
+        return `<button class="sh-cell${isToday ? " today" : ""}${other ? " other" : ""}"
+          data-sh-day="${esc(item.id)}|${esc(key)}" title="${esc(cap1(WEEKDAYS_IT[d.getDay()]) + " " + d.getDate())}">
+          <span class="sh-dnum">${d.getDate()}</span>
+          ${people.map((p) => {
+            const t = this._shiftType(item, this._shiftGet(item, p.id, key));
+            // Il bordo a sinistra porta il colore della PERSONA, il corpo
+            // quello del turno: con due turnari sovrapposti, senza il bordo
+            // non si sa quale riga sia di chi - e due righe uguali di colore
+            // diverso non bastano, perche' il colore li' dentro parla del
+            // turno, non di chi lo fa.
+            return `<span class="sh-slot${t ? "" : " empty"}"
+              style="--cc:${esc(t ? t.color : "transparent")};--pc:${esc(p.color || "#00e5ff")}"
+              >${t ? esc(t.k) : ""}</span>`;
+          }).join("")}
+        </button>`;
+      }).join("")}
+    </div>`;
+
+    return `<div class="sh">${head}${palette}${grid}
+      <span class="hint">Scegli un turno qui sopra e tocca i giorni: si salva da solo. La gomma toglie.</span>
+    </div>`;
+  }
+
+  /**
+   * Riempie una rotazione ciclica.
+   *
+   * E' la ragione per cui questa card esiste invece di un calendario: un
+   * turnario a rotazione fissa - mattino, pomeriggio, notte, riposo - si
+   * dichiara UNA volta e copre mesi. Quello che non torna si corregge a dita
+   * dopo, che e' esattamente come funziona nella realta': la rotazione e' la
+   * regola, i cambi sono le eccezioni.
+   */
+  _shiftsApplyRotation(item) {
+    const rot = item.rotation || {};
+    const seq = (Array.isArray(rot.seq) ? rot.seq : []).filter((k) => this._shiftType(item, k));
+    const people = this._shiftPeople(item);
+    const pid = rot.person || people[0].id;
+    if (!seq.length || !rot.start) return 0;
+    const start = new Date(rot.start + "T00:00:00");
+    if (isNaN(start.getTime())) return 0;
+    const weeks = Math.max(1, Math.min(52, Number(rot.weeks) || 8));
+    const days = weeks * 7;
+    item.data = Object.assign({}, item.data || {});
+    item.data[pid] = Object.assign({}, item.data[pid] || {});
+    const d = new Date(start);
+    for (let i = 0; i < days; i++) {
+      item.data[pid][this._dayKey(d)] = seq[i % seq.length];
+      d.setDate(d.getDate() + 1);
+    }
+    this._touch();
+    return days;
+  }
+
   // ------------------------------------------------------------ calendari --
 
   /**
@@ -9181,6 +9428,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "system") return this._systemBody(item);
     if (type === "camera") return this._cameraBody(item);
     if (type === "calendar") return this._calendarBody(item);
+    if (type === "shifts") return this._shiftsBody(item);
     if (type === "economy") return this._economyBody(item);
     if (type === "comfort") return this._comfortBody(item);
     if (type === "thermostat") return this._thermostatBody(item);
@@ -9763,6 +10011,53 @@ class CyborgDashboard extends HTMLElement {
         <label>AGGIORNAMENTO ANTEPRIME (secondi)<input type="number" min="5" max="120" data-prop="refresh" value="${card.refresh || 10}"></label>
         <label class="check"><input type="checkbox" data-prop="live" ${card.live ? "checked" : ""}> Anteprime sempre in diretta</label>
         <span class="hint">In diretta l'immagine è immediata e non c'è nessun intervallo di aggiornamento, ma ogni riquadro tiene aperto un flusso video: con una o due videocamere è la scelta giusta, con otto satura un tablet da parete.</span>
+      </div>`;
+    }
+    if (card.type === "shifts") {
+      const types = this._shiftTypes(card);
+      const people = this._shiftPeople(card);
+      const rot = card.rotation || {};
+      const count = Object.values(card.data || {})
+        .reduce((t, m) => t + Object.keys(m || {}).length, 0);
+      return `<div class="section">
+        <strong>CHI</strong>
+        <span class="hint">Con <strong>due</strong> persone la card risponde anche alla domanda vera: quando siete liberi tutti e due.</span>
+        <div class="eco-dev-list">${people.map((p, i) => `<div class="eco-dev-edit">
+          <input class="sh-name" data-sh-pname="${i}" value="${esc(p.name)}">
+          <input type="color" data-sh-pcolor="${i}" value="${esc(p.color || "#ff8fab")}">
+          ${people.length > 1 ? `<button class="mini danger" data-sh-pdel="${i}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}
+        </div>`).join("")}</div>
+        ${people.length < 4 ? `<button class="secondary wide" data-sh-padd><ha-icon icon="mdi:account-plus-outline"></ha-icon> AGGIUNGI UNA PERSONA</button>` : ""}
+      </div>
+      <div class="section">
+        <strong>I TURNI</strong>
+        <span class="hint">La <strong>sigla</strong> è quella che si vede sul calendario: tienila corta, una o due lettere. Un turno segnato <em>riposo</em> è quello che conta come tempo libero.</span>
+        <div class="eco-dev-list">${types.map((t, i) => `<div class="eco-dev-edit sh-type">
+          <input class="sh-sig" data-sh-tk="${i}" value="${esc(t.k)}" maxlength="3">
+          <input class="sh-name" data-sh-tl="${i}" value="${esc(t.l)}">
+          <input type="time" data-sh-tfrom="${i}" value="${esc(t.from || "")}">
+          <input type="time" data-sh-tto="${i}" value="${esc(t.to || "")}">
+          <input type="color" data-sh-tcolor="${i}" value="${esc(t.color || "#00e5ff")}">
+          <button class="mini ${t.off ? "on" : ""}" data-sh-toff="${i}" title="${t.off ? "È tempo libero" : "È un turno di lavoro"}"><ha-icon icon="${t.off ? "mdi:beach" : "mdi:briefcase-outline"}"></ha-icon></button>
+          <button class="mini danger" data-sh-tdel="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+        </div>`).join("")}</div>
+        ${types.length < 10 ? `<button class="secondary wide" data-sh-tadd><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI UN TURNO</button>` : ""}
+      </div>
+      <div class="section">
+        <strong>ROTAZIONE</strong>
+        <span class="hint">Se il turnario è ciclico, scrivilo <strong>una volta</strong> e copre mesi: sequenza, giorno di partenza, per quante settimane. Quello che non torna lo correggi con un tocco sul calendario — la rotazione è la regola, i cambi sono le eccezioni.</span>
+        ${people.length > 1 ? `<label>DI CHI<select data-sh-rperson>
+          ${people.map((p) => `<option value="${esc(p.id)}" ${rot.person === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+        </select></label>` : ""}
+        <label>SEQUENZA<input data-sh-rseq value="${esc((rot.seq || []).join(" "))}"
+          placeholder="${esc(types.map((t) => t.k).join(" "))}"></label>
+        <span class="hint">Le sigle separate da uno spazio, nell'ordine in cui si ripetono.</span>
+        <div class="two">
+          <label>DAL GIORNO<input type="date" data-sh-rstart value="${esc(rot.start || "")}"></label>
+          <label>PER (settimane)<input type="number" min="1" max="52" data-sh-rweeks value="${esc(String(rot.weeks || 8))}"></label>
+        </div>
+        <button class="wide" data-sh-rot><ha-icon icon="mdi:auto-fix"></ha-icon> APPLICA LA ROTAZIONE</button>
+        <span class="hint">${count} giorni già segnati.</span>
       </div>`;
     }
     if (card.type === "calendar") {
@@ -12649,6 +12944,172 @@ class CyborgDashboard extends HTMLElement {
         if (row) { row.color = el.value; this._touch(); }
       };
     });
+    const shList = (key, fallback) => {
+      const cur = Array.isArray(card[key]) && card[key].length
+        ? card[key].slice() : fallback.slice();
+      return cur.map((x) => Object.assign({}, x));
+    };
+    all("[data-sh-pname],[data-sh-pcolor]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const isName = el.hasAttribute("data-sh-pname");
+        const i = Number(el.getAttribute(isName ? "data-sh-pname" : "data-sh-pcolor"));
+        const rows = shList("people", this._shiftPeople(card));
+        if (!rows[i]) return;
+        if (isName) rows[i].name = el.value.slice(0, 24) || "Senza nome";
+        else rows[i].color = el.value;
+        card.people = rows;
+        this._touch();
+      };
+    });
+    all("[data-sh-pdel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = shList("people", this._shiftPeople(card));
+        const gone = rows.splice(Number(el.getAttribute("data-sh-pdel")), 1)[0];
+        if (gone && card.data) { card.data = Object.assign({}, card.data); delete card.data[gone.id]; }
+        card.people = rows;
+        this._touch();
+      };
+    });
+    const shAdd = q("[data-sh-padd]");
+    if (shAdd) shAdd.onclick = () => {
+      if (!card) return;
+      const rows = shList("people", this._shiftPeople(card));
+      rows.push({ id: uid("pers"), name: "Io",
+        color: SERIES_COLORS[rows.length % SERIES_COLORS.length] });
+      card.people = rows;
+      this._touch();
+    };
+    all("[data-sh-tk],[data-sh-tl],[data-sh-tfrom],[data-sh-tto],[data-sh-tcolor]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const map = { "data-sh-tk": "k", "data-sh-tl": "l", "data-sh-tfrom": "from",
+          "data-sh-tto": "to", "data-sh-tcolor": "color" };
+        const attr = Object.keys(map).find((a2) => el.hasAttribute(a2));
+        const i = Number(el.getAttribute(attr));
+        const rows = shList("types", this._shiftTypes(card));
+        if (!rows[i]) return;
+        const field = map[attr];
+        const old = rows[i].k;
+        rows[i][field] = field === "k" ? el.value.trim().slice(0, 3).toUpperCase() : el.value;
+        // Rinominare una sigla non deve orfanare i giorni gia' dipinti: si
+        // riscrivono, altrimenti il calendario si svuota a sorpresa.
+        if (field === "k" && rows[i].k && rows[i].k !== old && card.data) {
+          const next = {};
+          for (const [pid, days] of Object.entries(card.data)) {
+            next[pid] = {};
+            for (const [day, kk] of Object.entries(days || {})) {
+              next[pid][day] = kk === old ? rows[i].k : kk;
+            }
+          }
+          card.data = next;
+        }
+        card.types = rows;
+        this._touch();
+      };
+    });
+    all("[data-sh-toff]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = shList("types", this._shiftTypes(card));
+        const i = Number(el.getAttribute("data-sh-toff"));
+        if (!rows[i]) return;
+        rows[i].off = !rows[i].off;
+        card.types = rows;
+        this._touch();
+      };
+    });
+    all("[data-sh-tdel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = shList("types", this._shiftTypes(card));
+        rows.splice(Number(el.getAttribute("data-sh-tdel")), 1);
+        card.types = rows.length ? rows : undefined;
+        this._touch();
+      };
+    });
+    const shTAdd = q("[data-sh-tadd]");
+    if (shTAdd) shTAdd.onclick = () => {
+      if (!card) return;
+      const rows = shList("types", this._shiftTypes(card));
+      rows.push({ k: "X" + rows.length, l: "Nuovo turno",
+        color: SERIES_COLORS[rows.length % SERIES_COLORS.length], from: "", to: "", off: false });
+      card.types = rows;
+      this._touch();
+    };
+    all("[data-sh-rperson],[data-sh-rseq],[data-sh-rstart],[data-sh-rweeks]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const rot = Object.assign({}, card.rotation || {});
+        if (el.hasAttribute("data-sh-rperson")) rot.person = el.value;
+        if (el.hasAttribute("data-sh-rseq")) {
+          rot.seq = el.value.toUpperCase().split(/[\s,]+/).filter(Boolean).slice(0, 30);
+        }
+        if (el.hasAttribute("data-sh-rstart")) rot.start = el.value;
+        if (el.hasAttribute("data-sh-rweeks")) rot.weeks = Math.max(1, Math.min(52, Number(el.value) || 8));
+        card.rotation = rot;
+        this._touch();
+      };
+    });
+    all("[data-sh-step]").forEach((el) => {
+      el.onclick = () => {
+        const [id, step] = el.getAttribute("data-sh-step").split("|");
+        this._shiftOffset = this._shiftOffset || {};
+        this._shiftOffset[id] = Number(step) === 0 ? 0 : (this._shiftOffset[id] || 0) + Number(step);
+        this._signature = ""; this.render();
+      };
+    });
+    all("[data-sh-view]").forEach((el) => {
+      el.onclick = () => {
+        const [id, view] = el.getAttribute("data-sh-view").split("|");
+        const target = this._cardById(id);
+        if (!target) return;
+        target.view = view;
+        this._shiftOffset = this._shiftOffset || {};
+        this._shiftOffset[id] = 0;
+        this._touch();
+      };
+    });
+    all("[data-sh-brush]").forEach((el) => {
+      el.onclick = () => {
+        // Il pennello e' scelta del momento, non configurazione: non si salva.
+        const raw = el.getAttribute("data-sh-brush");
+        const i = raw.indexOf("|");
+        this._shiftBrush = this._shiftBrush || {};
+        this._shiftBrush[raw.slice(0, i)] = raw.slice(i + 1);
+        this._signature = ""; this.render();
+      };
+    });
+    const shWho = q("[data-sh-person]");
+    if (shWho) shWho.onchange = () => {
+      this._shiftPerson = this._shiftPerson || {};
+      this._shiftPerson[shWho.getAttribute("data-sh-person")] = shWho.value;
+      this._signature = ""; this.render();
+    };
+    all("[data-sh-day]").forEach((el) => {
+      el.onclick = () => {
+        const [id, key] = el.getAttribute("data-sh-day").split("|");
+        const target = this._cardById(id);
+        if (!target) return;
+        const people = this._shiftPeople(target);
+        const pid = (this._shiftPerson || {})[id] || people[0].id;
+        const types = this._shiftTypes(target);
+        const brush = (this._shiftBrush || {})[id] ?? (types[0] ? types[0].k : "");
+        // Toccare due volte lo stesso turno lo toglie: non serve prendere la
+        // gomma per correggere un tocco sbagliato.
+        const cur = this._shiftGet(target, pid, key);
+        this._shiftSet(target, pid, key, cur === brush ? "" : brush);
+      };
+    });
+    all("[data-sh-rot]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const n = this._shiftsApplyRotation(card);
+        this._error = n ? "" : "Rotazione incompleta: servono la sequenza e la data di partenza.";
+        this._signature = ""; this.render();
+      };
+    });
     all("[data-cal-pick]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -14397,6 +14858,55 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
 .icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+/* --- Turni --------------------------------------------------------------- */
+.sh{display:flex;flex-direction:column;gap:10px}
+.sh-top{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px}
+.sh-today{display:flex;flex-wrap:wrap;gap:14px}
+.sh-now{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.sh-now i{width:8px;height:8px;border-radius:50%;background:var(--pc)}
+.sh-now strong{opacity:.6;font-weight:600}
+.sh-now b{font-weight:650}
+.sh-together{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+  padding:4px 10px;border-radius:999px;
+  background:color-mix(in srgb,#ff8fab 12%,transparent);
+  border:1px solid color-mix(in srgb,#ff8fab 30%,transparent)}
+.sh-together ha-icon{--mdc-icon-size:14px;color:#ff8fab}
+.sh-brush{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.sh-who{width:auto;min-width:110px;padding:5px 8px;font-size:11.5px}
+.sh-key{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:9px;
+  background:color-mix(in srgb,var(--cc) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--cc) 30%,transparent);color:#dfeefb}
+.sh-key b{font:600 12px ui-monospace,monospace;color:var(--cc)}
+.sh-key span{font-size:10.5px;opacity:.65}
+.sh-key.on{background:color-mix(in srgb,var(--cc) 30%,transparent);
+  border-color:var(--cc);box-shadow:0 0 0 1px var(--cc)}
+.sh-key.erase{--cc:#8d99ae}
+.sh-key.erase ha-icon{--mdc-icon-size:15px}
+.sh-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.sh-cell{display:flex;flex-direction:column;align-items:stretch;gap:3px;min-height:56px;
+  padding:5px 4px;border-radius:9px;
+  background:color-mix(in srgb,var(--accent) 4%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 12%,transparent)}
+.sh-cell:hover{border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.sh-cell.other{opacity:.35}
+.sh-cell.today{border-color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
+.sh-dnum{font-size:11px;font-weight:650;opacity:.75;text-align:left;line-height:1}
+.sh-cell.today .sh-dnum{color:var(--accent)}
+.sh-slot{display:block;padding:2px 0;border-radius:5px;font:650 11px ui-monospace,monospace;
+  color:#0a1017;background:var(--cc);text-align:center;letter-spacing:.04em;
+  border-left:4px solid var(--pc)}
+.sh-slot.empty{background:color-mix(in srgb,var(--accent) 7%,transparent);min-height:15px;
+  border-left-color:color-mix(in srgb,var(--pc) 45%,transparent)}
+.sh-type{flex-wrap:wrap}
+.sh-sig{width:54px;text-align:center;font:650 12px ui-monospace,monospace;text-transform:uppercase}
+.sh-name{flex:1;min-width:90px}
+.sh-type input[type=time]{width:90px}
+@media(max-width:700px){
+  .sh-grid.settimana{grid-template-columns:repeat(7,1fr)}
+  .sh-cell{min-height:48px;padding:4px 2px}
+  .sh-key span{display:none}
+}
 /* --- Calendari ---------------------------------------------------------- */
 .cal{display:flex;flex-direction:column;gap:10px}
 .cal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
@@ -15960,7 +16470,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.55.0";
+const CYBORG_BUILD = "0.56.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
