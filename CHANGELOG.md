@@ -4,6 +4,62 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.55.0] - 2026-09-21
+
+Card **Calendari**: giorno, settimana, mese. E i turni si riconoscono da soli.
+
+### La card
+Nuovo tipo di card e nuovo modello di sezione (**Calendari**, famiglia «una
+card sola, già piena»). Legge **qualunque** calendario di Home Assistant —
+nessuno scelto vuol dire tutti — e lo mostra in tre viste che restano sulla
+card, con avanti/indietro e un **OGGI** che compare solo quando serve.
+
+- **Giorno**: l'elenco delle voci con l'orario a parole.
+- **Settimana**: sette colonne, lunedì per primo (in Italia la settimana parte
+  di lunedì; `getDay()` dice domenica, e va corretto).
+- **Mese**: sei settimane intere, fino a tre voci per casella e `+N` per il
+  resto.
+
+### I turni
+Un turnario non è un calendario qualunque: le voci si ripetono e si
+riconoscono dal nome. **Mattino, pomeriggio, sera, notte, riposo, ferie,
+malattia** vengono riconosciuti e colorati sempre allo stesso modo — anche
+scritti con **una lettera sola** (M, P, N, R), che è come li scrive mezzo
+mondo. Il colore del turno vince su quello del calendario: è l'informazione
+che si guarda da lontano.
+
+La lettera sola si confronta sulla **stringa intera**, mai cercata dentro le
+parole: una «N» dentro «Nonno compleanno» non è un turno di notte, e questo è
+un test.
+
+### Dettagli che si vedono solo quando sbagliano
+- **La fine di un evento di giornata intera è esclusiva**: un giorno solo
+  arriva come `21 → 22`. Senza togliere un minuto, «Ferie» colorava anche il
+  giorno dopo.
+- **La legenda descrive quello che è disegnato, non la cache**: nella vista
+  giorno gli eventi caricati sono quelli della finestra, ma disegnati solo
+  quelli del giorno — una legenda costruita sulla cache annunciava un turno
+  che non si vedeva.
+- **La navigazione non si salva.** È stato della camera, come il fuoco sulla
+  mappa: scriverla nel dashboard vorrebbe dire ritrovare marzo aperto due
+  settimane dopo. La **vista**, invece, è una scelta e si salva.
+
+### Verificato sul sorgente, non a memoria
+`homeassistant/components/calendar/__init__.py` della **2026.9.2**:
+`CalendarEventView` serve `GET /api/calendars/<entity_id>?start=&end=`, con
+start ed end **obbligatori**, e restituisce ogni evento con `start`/`end` nella
+forma `{dateTime}` oppure `{date}` per le giornate intere.
+
+### Se Home Assistant non ha calendari
+La card non resta muta: dice **dove** si aggiungono e **quale scegliere** —
+Calendario locale, Google Calendar, CalDAV, Remote Calendar — con la differenza
+che conta fra loro. La card legge qualunque sorgente: cambiare idea dopo non
+costa niente qui.
+
+### Prove
+31 asserzioni nuove (1351) e 474 misurate in Chromium. Schema v21:
+`calendars[]`, `view`, `colors{}`.
+
 ## [0.54.0] - 2026-09-20
 
 L'ultima ora — e le tre cose che si rompevano solo su una finestra così stretta.

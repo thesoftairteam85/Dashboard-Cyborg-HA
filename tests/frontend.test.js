@@ -4611,6 +4611,9 @@ console.log("\n== 50. I MODELLI DI SEZIONE DICONO COSA SONO ==");
      /UNA CARD PER OGNI luce/.test(h50), "");
   ok("c'è un modello per l'irrigazione e il giardino",
      /data-add-preset="irrigazione"/.test(h50) && /Irrigazione · Giardino/.test(h50), "");
+  ok("e uno per i calendari, nella famiglia delle card singole",
+     /data-add-preset="calendari"/.test(h50)
+     && h50.indexOf('data-add-preset="calendari"') < h50.indexOf("UNA CARD PER OGNI ENTIT"), "");
 
   // Il modello Sistema deve creare la CARD Sistema, non trenta card sensore.
   el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
@@ -4720,6 +4723,163 @@ console.log("\n== 51. IRRIGAZIONE E PADRI A MONTE ==");
   delete states["sensor.fri51"]; delete states["sensor.quadro_altro"];
   el._dashboard = savedDash51; el._selected = savedSel51; el._pageIndex = savedIdx51;
   ok("stato ripristinato dopo la sezione 51", !states["sensor.lav51"]);
+}
+
+console.log("\n== 52. CALENDARI: GIORNO, SETTIMANA, MESE ==");
+{
+  const savedDash52 = el._dashboard, savedSel52 = el._selected, savedIdx52 = el._pageIndex;
+  const savedEd52 = el._editing;
+
+  // --- il riconoscimento dei turni, che e' la parte che rende la card utile
+  const kind = (t) => { const k = el._shiftKind(t); return k ? k.k : null; };
+  ok("una lettera sola e' un turno", kind("M") === "mattino" && kind("P") === "pomeriggio"
+     && kind("N") === "notte" && kind("R") === "riposo",
+     JSON.stringify(["M", "P", "N", "R"].map(kind)));
+  ok("e il nome per esteso pure", kind("Mattino") === "mattino"
+     && kind("turno di notte") === "notte" && kind("Riposo") === "riposo");
+  ok("ferie e malattia si distinguono dal riposo",
+     kind("Ferie") === "ferie" && kind("Malattia") === "malattia");
+  // il difetto facile: cercare "n" dentro una parola qualunque
+  ok("una N dentro un'altra parola non e' un turno di notte",
+     kind("Nonno compleanno") === null && kind("Milano") === null && kind("Pizza") === null,
+     JSON.stringify(["Nonno compleanno", "Milano", "Pizza"].map(kind)));
+  ok("e un evento qualunque non viene colorato da turno", kind("Dentista") === null);
+
+  // --- la settimana italiana comincia di lunedi'
+  ok("la settimana parte dal lunedi'",
+     el._weekStart(new Date(2026, 8, 20)).getDate() === 14
+     && el._weekStart(new Date(2026, 8, 20)).getDay() === 1,
+     el._weekStart(new Date(2026, 8, 20)).toDateString());
+  ok("e un lunedi' resta se stesso",
+     el._weekStart(new Date(2026, 8, 14)).getDate() === 14);
+
+  states["calendar.turni"] = S("on", { friendly_name: "Turni Giulia" });
+  states["calendar.casa"] = S("off", { friendly_name: "Casa" });
+  const cal = { id: "cal1", type: "calendar", entity_id: "", name: "", size: "xl",
+    appearance: {}, states: {}, actions: {}, calendars: [], view: "settimana", colors: {} };
+  const sec52 = { id: "s52", title: "Calendari", icon: "mdi:calendar", accent: "#c77dff", items: [cal] };
+
+  ok("nessun calendario scelto vuol dire tutti",
+     el._calendarIds(cal).join() === "calendar.casa,calendar.turni",
+     el._calendarIds(cal).join());
+  ok("sceglierne uno restringe l'elenco",
+     el._calendarIds(Object.assign({}, cal, { calendars: ["calendar.turni"] })).join()
+       === "calendar.turni");
+
+  // --- le tre finestre
+  el._calOffset = {};
+  ok("la vista settimana copre sette giorni",
+     (el._calendarWindow(cal).end - el._calendarWindow(cal).start) / 86400000 === 7);
+  ok("la vista mese copre sei settimane intere",
+     (el._calendarWindow(Object.assign({}, cal, { view: "mese" })).end
+      - el._calendarWindow(Object.assign({}, cal, { view: "mese" })).start) / 86400000 === 42);
+  ok("la vista giorno copre un giorno",
+     (el._calendarWindow(Object.assign({}, cal, { view: "giorno" })).end
+      - el._calendarWindow(Object.assign({}, cal, { view: "giorno" })).start) / 86400000 === 1);
+  el._calOffset = { cal1: -1 };
+  ok("indietro di un passo sposta la settimana di sette giorni",
+     (el._calendarWindow(cal).start.getTime()
+      - (el._calOffset = {}, el._calendarWindow(cal).start.getTime())) === -7 * 86400000,
+     "");
+
+  // --- la richiesta all'API, verificata sul sorgente di HA 2026.9.2
+  {
+    const urls = [];
+    const savedApi = el._hass.callApi;
+    el._hass.callApi = (method, path) => { urls.push(method + " " + path); return Promise.resolve([]); };
+    el._cal = {};
+    el._loadCalendar(cal);
+    ok("chiede gli eventi a ogni calendario, con inizio e fine obbligatori",
+       urls.length === 2 && urls.every((u) => /^GET calendars\/calendar\.[a-z]+\?start=[^&]+&end=/.test(u)),
+       JSON.stringify(urls));
+    el._hass.callApi = savedApi;
+  }
+
+  // --- il disegno, con gli eventi messi in cache a mano
+  const put = (item, evs) => {
+    const w = el._calendarWindow(item);
+    const key = item.id + "|" + w.start.getTime() + "|" + w.end.getTime() + "|"
+      + el._calendarIds(item).join(",");
+    el._cal = {}; el._cal[key] = { ts: Date.now(), events: evs, failed: 0 };
+    return w;
+  };
+  const w = el._calendarWindow(cal);
+  const d1 = new Date(w.start); d1.setHours(14, 0, 0, 0);
+  const d1e = new Date(w.start); d1e.setHours(22, 0, 0, 0);
+  const evs = [
+    { cal: "calendar.turni", summary: "P", desc: "", loc: "", allDay: false, start: d1, end: d1e },
+    { cal: "calendar.casa", summary: "Dentista", desc: "", loc: "Via Roma",
+      allDay: false, start: new Date(d1.getTime() + 86400000), end: new Date(d1e.getTime() + 86400000) },
+  ];
+  put(cal, evs);
+  const hw = el._calendarBody(cal);
+  ok("la settimana disegna sette caselle",
+     (hw.match(/class="cal-cell/g) || []).length === 7,
+     String((hw.match(/class="cal-cell/g) || []).length));
+  ok("e le tre viste restano a portata di dito",
+     /data-cal-view="cal1\|giorno"/.test(hw) && /data-cal-view="cal1\|mese"/.test(hw));
+  ok("c'e' la navigazione avanti e indietro", /data-cal-step="cal1\|-1"/.test(hw)
+     && /data-cal-step="cal1\|1"/.test(hw));
+  ok("il turno prende il colore del turno, non quello del calendario",
+     /k-pomeriggio/.test(hw), "");
+  ok("mentre un evento qualunque prende quello del suo calendario",
+     hw.includes("Dentista") && !/k-\w+[^>]*>[^<]*Dentista/.test(hw), "");
+  ok("calendari: nessun undefined", !/undefined/.test(hw),
+     (hw.match(/.{30}undefined.{20}/) || [""])[0]);
+  ok("calendari: div bilanciati",
+     (hw.match(/<div/g) || []).length === (hw.match(/<\/div>/g) || []).length);
+
+  const mese = Object.assign({}, cal, { view: "mese" });
+  put(mese, evs);
+  ok("il mese disegna quarantadue caselle",
+     (el._calendarBody(mese).match(/class="cal-cell/g) || []).length === 42,
+     String((el._calendarBody(mese).match(/class="cal-cell/g) || []).length));
+
+  // --- un evento di giornata intera non deve colorare due giorni
+  const giorno = Object.assign({}, cal, { view: "giorno" });
+  const wd = el._calendarWindow(giorno);
+  const allDayEnd = new Date(wd.start.getTime() + 86400000 - 60000);
+  put(giorno, [{ cal: "calendar.turni", summary: "Ferie", desc: "", loc: "",
+    allDay: true, start: new Date(wd.start), end: allDayEnd }]);
+  const hd = el._calendarBody(giorno);
+  ok("la vista giorno elenca l'evento con l'orario a parole",
+     /tutto il giorno/.test(hd) && /Ferie/.test(hd), "");
+  const dopo = Object.assign({}, cal, { view: "giorno" });
+  el._calOffset = { cal1: 1 };
+  put(dopo, [{ cal: "calendar.turni", summary: "Ferie", desc: "", loc: "",
+    allDay: true, start: new Date(wd.start), end: allDayEnd }]);
+  ok("e il giorno dopo NON eredita le ferie di ieri",
+     !/Ferie/.test(el._calendarBody(dopo)),
+     el._calendarBody(dopo).replace(/\\s+/g, " ").slice(-420));
+  el._calOffset = {};
+
+  // --- senza calendari in Home Assistant la card dice cosa fare
+  delete states["calendar.turni"]; delete states["calendar.casa"];
+  const vuoto = el._calendarBody(cal);
+  ok("senza calendari la card spiega dove si aggiungono",
+     /Nessun calendario in Home Assistant/.test(vuoto)
+     && /Google Calendar/.test(vuoto) && /CalDAV/.test(vuoto), "");
+  states["calendar.turni"] = S("on", { friendly_name: "Turni Giulia" });
+  states["calendar.casa"] = S("off", { friendly_name: "Casa" });
+
+  // --- editor
+  el._dashboard = { theme: {}, hierarchy: {}, kiosk: {}, pages: [
+    { id: "p52", title: "P", icon: "mdi:home", type: "sections", sections: [sec52] }] };
+  el._pageIndex = 0;
+  el._selected = { kind: "card", sectionId: "s52", itemId: "cal1" };
+  el._editing = true; el._signature = ""; el.render();
+  const e52 = el.innerHTML;
+  ok("l'editor fa scegliere i calendari uno per uno",
+     /data-cal-pick="calendar\.turni"/.test(e52) && /data-cal-pick="calendar\.casa"/.test(e52));
+  ok("e il colore di ciascuno", /data-cal-color="calendar\.turni"/.test(e52));
+  ok("e la vista di partenza", /data-prop="view"/.test(e52) && /value="mese"/.test(e52));
+  ok("editor calendari: nessun undefined", !/>undefined</.test(e52));
+  el._editing = savedEd52;
+
+  delete states["calendar.turni"]; delete states["calendar.casa"];
+  el._cal = {}; el._calOffset = {};
+  el._dashboard = savedDash52; el._selected = savedSel52; el._pageIndex = savedIdx52;
+  ok("stato ripristinato dopo la sezione 52", !states["calendar.turni"]);
 }
 
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");

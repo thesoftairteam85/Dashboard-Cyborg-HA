@@ -66,7 +66,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -816,6 +816,23 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["refresh"] = max(5, min(120, int(result.get("refresh", 10))))
         except (TypeError, ValueError):
             result["refresh"] = 10
+    # La card Calendari: quali calendari, con che vista e con che colori.
+    # Lista vuota = "trovali tu", come ovunque.
+    if result.get("type") == "calendar":
+        cals = result.get("calendars")
+        result["calendars"] = (
+            [c for c in cals if isinstance(c, str) and c.startswith("calendar.")][:20]
+            if isinstance(cals, list) else []
+        )
+        if result.get("view") not in ("giorno", "settimana", "mese"):
+            result["view"] = "settimana"
+        colors = result.get("colors")
+        clean_colors = {}
+        if isinstance(colors, dict):
+            for key, value in colors.items():
+                if isinstance(key, str) and key.startswith("calendar.") and isinstance(value, str):
+                    clean_colors[key] = value[:32]
+        result["colors"] = clean_colors
     if result.get("type") == "monitor":
         groups = result.get("groups")
         result["groups"] = [g for g in groups if isinstance(g, str)] if isinstance(groups, list) else []

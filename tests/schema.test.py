@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 20, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 21, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -971,3 +971,26 @@ n = schema.normalize_item(old_sys, 0)
 assert n["mem_used"] == "sensor.u" and n["mem_free"] == "sensor.f"
 assert n["mem_total"] == "sensor.t" and n["mem_pct"] is None
 print("schema: memoria in percentuale (v20) ok")
+
+
+# ---------------------------------------------------------------------------
+# v21: la card Calendari.
+def _cal(**kw):
+    item = {"id": "ca", "type": "calendar"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+assert _cal()["calendars"] == []          # vuoto = "trovali tu"
+assert _cal()["view"] == "settimana"
+assert _cal()["colors"] == {}
+# solo entity_id di calendari, con un tetto
+assert _cal(calendars=["calendar.turni", "light.x", 7])["calendars"] == ["calendar.turni"]
+assert len(_cal(calendars=["calendar.c%d" % i for i in range(40)])["calendars"]) == 20
+# una vista inventata ricade sul default
+for junk in ("anno", "", None, 3, []):
+    assert _cal(view=junk)["view"] == "settimana", junk
+# i colori restano solo per i calendari
+assert _cal(colors={"calendar.turni": "#ff0000", "light.x": "#00ff00",
+                    "calendar.b": 5})["colors"] == {"calendar.turni": "#ff0000"}
+print("schema: card Calendari (v21) ok")

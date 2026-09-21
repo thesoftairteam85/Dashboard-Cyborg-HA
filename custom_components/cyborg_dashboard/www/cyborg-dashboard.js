@@ -165,6 +165,14 @@ const SECTION_PRESETS = [
     score: () => 0, cardType: () => "economy", seed: "economy",
   },
   {
+    // Non punteggia nessuna entita': i calendari non si "trovano" fra i
+    // sensori, o ci sono o non ci sono. Il modello serve a mettere giu' la
+    // sezione gia' fatta, con dentro la card che li legge tutti.
+    id: "calendari", title: "Calendari", icon: "mdi:calendar-month", accent: "#c77dff",
+    limit: 0, d: "Una card Calendari: turni, impegni e scadenze per giorno, settimana e mese.",
+    score: () => 0, cardType: () => "calendar", seed: "calendar",
+  },
+  {
     // Questo modello e' nato PRIMA della card Sistema (0.47.0) e costruiva una
     // sezione di trenta card `sensor` pescate per nome. Adesso esiste una card
     // che parte dall'apparecchio e trova tutto da sola: il modello deve usare
@@ -931,6 +939,7 @@ const CARD_TYPES = [
   { k: "monitor", l: "Monitoraggio", solo: true, d: "Tensioni, correnti, temperature e prelievo contro il limite del contatore." },
   { k: "system", l: "Sistema", solo: true, d: "Un computer sorvegliato: CPU, memoria, temperature, dischi, rete. Scegli l'apparecchio, il resto lo trova da sé." },
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
+  { k: "calendar", l: "Calendari", solo: true, d: "Giorno, settimana e mese di uno o più calendari: turni, impegni, scadenze." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
   { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
   { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
@@ -1284,7 +1293,7 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "system", "camera", "economy", "lights", "irrigation", "trend", "room", "ev",
+  "monitor", "system", "camera", "calendar", "economy", "lights", "irrigation", "trend", "room", "ev",
   "comfort", "thermostat"]);
 
 const COMPOSITE_META = {
@@ -1301,6 +1310,7 @@ const COMPOSITE_META = {
   monitor:       ["Monitoraggio", "Diagnostica impianto", "mdi:gauge-full", "lg"],
   system:        ["Sistema", "Salute di un computer", "mdi:server", "lg"],
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
+  calendar:      ["Calendari", "Giorno, settimana, mese", "mdi:calendar-month", "lg"],
   thermostat:    ["Controllo temperatura", "Termostati e clima", "mdi:thermostat-box", "lg"],
   economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
 };
@@ -2571,6 +2581,7 @@ class CyborgDashboard extends HTMLElement {
       if (base.seed === "economy") Object.assign(card, { grid_import: null, grid_export: null, solar: null,
         battery_in: null, battery_out: null,
         price_import: 0.25, price_export: 0.10, period: "month" });
+      if (base.seed === "calendar") Object.assign(card, { calendars: [], view: "settimana", colors: {} });
       if (base.seed === "system") {
         Object.assign(card, { device: this._busiestDevice(), temps: [], disks: [],
           cpu: null, gpu: null, mem_used: null, mem_free: null, mem_total: null,
@@ -7954,6 +7965,281 @@ class CyborgDashboard extends HTMLElement {
     return Object.keys(this._hass.states).filter((id) => id.startsWith("camera."));
   }
 
+  // ------------------------------------------------------------ calendari --
+
+  /**
+   * I calendari che la card guarda.
+   *
+   * Lista vuota = "trovali tu": tutti i `calendar.` di Home Assistant. E'
+   * la stessa regola di tutte le altre card - una lista vuota non puo'
+   * voler dire "non mostrarne nessuno", altrimenti dall'editor non si torna
+   * piu' indietro.
+   */
+  _calendarIds(item) {
+    const all = Object.keys(this._hass.states).filter((id) => domainOf(id) === "calendar");
+    const picked = Array.isArray(item.calendars) && item.calendars.length ? item.calendars : null;
+    return (picked ? picked.filter((id) => this._hass.states[id]) : all).sort();
+  }
+
+  /** Il colore di un calendario: scelto a mano, o assegnato in ordine. */
+  _calendarColor(item, id) {
+    const map = (item && item.colors) || {};
+    if (map[id]) return map[id];
+    const all = this._calendarIds(item);
+    const i = Math.max(0, all.indexOf(id));
+    return SERIES_COLORS[i % SERIES_COLORS.length];
+  }
+
+  /**
+   * Che turno e' questo, a leggerne il nome.
+   *
+   * Un turnario non e' un calendario qualunque: le voci si ripetono e si
+   * riconoscono dal nome ("Mattino", "N", "Riposo"). Riconoscerle vuol dire
+   * poterle colorare sempre allo stesso modo e, un domani, rispondere alla
+   * domanda vera - "quando siamo liberi tutti e due".
+   *
+   * Le lettere sole (M, P, N, R) sono il modo piu' comune di scrivere un
+   * turno, e vanno confrontate sulla stringa intera: una "N" dentro
+   * "Nonno compleanno" non e' un turno di notte.
+   */
+  _shiftKind(summary) {
+    const t = String(summary || "").trim().toLowerCase();
+    if (!t) return null;
+    const whole = (re) => re.test(t);
+    if (whole(/^(r|rip|riposo|off|libero|franco)$/) || /\briposo\b|\bfranco\b/.test(t)) return { k: "riposo", l: "Riposo", c: "#06d6a0" };
+    if (/\bferie\b|\bvacanz|\bpermess/.test(t)) return { k: "ferie", l: "Ferie", c: "#8ecae6" };
+    if (/\bmalatt|\bmutua\b/.test(t)) return { k: "malattia", l: "Malattia", c: "#ff8fab" };
+    if (whole(/^(n|not|notte)$/) || /\bnotte\b|\bnotturn/.test(t)) return { k: "notte", l: "Notte", c: "#c77dff" };
+    if (whole(/^(m|mat|mattino|mattina)$/) || /\bmattin/.test(t)) return { k: "mattino", l: "Mattino", c: "#ffd166" };
+    if (whole(/^(p|pom|pomeriggio)$/) || /\bpomerigg/.test(t)) return { k: "pomeriggio", l: "Pomeriggio", c: "#ff924c" };
+    if (whole(/^(s|sera|serale)$/) || /\bserale\b/.test(t)) return { k: "sera", l: "Sera", c: "#ff924c" };
+    return null;
+  }
+
+  /** Mezzanotte del giorno di una data, senza sorprese di fuso. */
+  _dayStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+
+  /** Il lunedi' della settimana di una data: in Italia la settimana parte di lunedi'. */
+  _weekStart(d) {
+    const x = this._dayStart(d);
+    const dow = (x.getDay() + 6) % 7;
+    x.setDate(x.getDate() - dow);
+    return x;
+  }
+
+  /**
+   * La finestra che la vista chiede, spostata di `offset` passi.
+   *
+   * La navigazione NON si salva nel dashboard: e' uno stato della camera,
+   * come il fuoco sulla mappa. Scriverla nella configurazione vorrebbe dire
+   * ritrovare il mese di marzo aperto due settimane dopo.
+   */
+  _calendarWindow(item) {
+    const view = item.view || "settimana";
+    const off = (this._calOffset || {})[item.id] || 0;
+    const today = this._dayStart(new Date());
+    if (view === "giorno") {
+      const a = this._dayStart(today);
+      a.setDate(a.getDate() + off);
+      const b = new Date(a); b.setDate(b.getDate() + 1);
+      return { view, start: a, end: b, label: cap1(WEEKDAYS_IT[a.getDay()]) + " " + a.getDate() + " " + MONTHS_IT[a.getMonth()] };
+    }
+    if (view === "mese") {
+      const first = new Date(today.getFullYear(), today.getMonth() + off, 1);
+      const a = this._weekStart(first);
+      const b = new Date(a); b.setDate(b.getDate() + 42);
+      return { view, start: a, end: b, month: first,
+        label: cap1(MONTHS_IT[first.getMonth()]) + " " + first.getFullYear() };
+    }
+    const a = this._weekStart(today);
+    a.setDate(a.getDate() + off * 7);
+    const b = new Date(a); b.setDate(b.getDate() + 7);
+    const last = new Date(b); last.setDate(last.getDate() - 1);
+    const lab = a.getMonth() === last.getMonth()
+      ? a.getDate() + "-" + last.getDate() + " " + MONTHS_IT[a.getMonth()]
+      : a.getDate() + " " + MONTHS_IT_SHORT[a.getMonth()].toLowerCase() + " - " + last.getDate() + " " + MONTHS_IT_SHORT[last.getMonth()].toLowerCase();
+    return { view: "settimana", start: a, end: b, label: cap1(lab) };
+  }
+
+  /**
+   * Gli eventi di una finestra.
+   *
+   * Verificato sul sorgente di Home Assistant 2026.9.2
+   * (`homeassistant/components/calendar/__init__.py`, `CalendarEventView`):
+   * `GET /api/calendars/<entity_id>?start=<iso>&end=<iso>`, con start ed end
+   * OBBLIGATORI, e ogni evento che torna ha `start`/`end` nella forma
+   * `{dateTime: "..."}` oppure `{date: "AAAA-MM-GG"}` per gli eventi di
+   * giornata intera. Le due forme non si possono confondere: un turno dalle
+   * 14 alle 22 e un "Ferie" che dura tutto il giorno si disegnano diversi.
+   */
+  _loadCalendar(item) {
+    const ids = this._calendarIds(item);
+    const win = this._calendarWindow(item);
+    const key = item.id + "|" + win.start.getTime() + "|" + win.end.getTime() + "|" + ids.join(",");
+    this._cal = this._cal || {};
+    const cached = this._cal[key];
+    if (cached && Date.now() - cached.ts < 300000) return cached;
+    if (this._calPending === key) return cached || null;
+    if (!ids.length) return { ts: Date.now(), events: [] };
+
+    this._calPending = key;
+    const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+      .toISOString().slice(0, 19);
+    Promise.all(ids.map((id) => this._hass
+      .callApi("GET", "calendars/" + encodeURIComponent(id)
+        + "?start=" + encodeURIComponent(iso(win.start))
+        + "&end=" + encodeURIComponent(iso(win.end)))
+      .then((rows) => ({ id, rows: Array.isArray(rows) ? rows : [] }))
+      .catch(() => ({ id, rows: [], error: true }))))
+      .then((res) => {
+        const events = [];
+        let failed = 0;
+        for (const r of res) {
+          if (r.error) { failed++; continue; }
+          for (const ev of r.rows) {
+            const allDay = !!(ev.start && ev.start.date);
+            const sRaw = ev.start && (ev.start.dateTime || ev.start.date);
+            const eRaw = ev.end && (ev.end.dateTime || ev.end.date);
+            const sd = sRaw ? new Date(allDay ? sRaw + "T00:00:00" : sRaw) : null;
+            let ed = eRaw ? new Date(allDay ? eRaw + "T00:00:00" : eRaw) : null;
+            if (!sd || isNaN(sd.getTime())) continue;
+            // Su un evento di giornata intera la fine e' ESCLUSIVA: un giorno
+            // solo arriva come 21 -> 22. Tolto un minuto, ricade nel giorno
+            // giusto e non ne colora due.
+            if (allDay && ed) ed = new Date(ed.getTime() - 60000);
+            events.push({ cal: r.id, summary: String(ev.summary || "(senza titolo)"),
+              desc: String(ev.description || ""), loc: String(ev.location || ""),
+              allDay, start: sd, end: ed && !isNaN(ed.getTime()) ? ed : sd });
+          }
+        }
+        events.sort((a, b) => a.start - b.start || a.summary.localeCompare(b.summary));
+        this._cal[key] = { ts: Date.now(), events, failed };
+        this._calPending = null;
+        this._touch(true);
+      });
+    return cached || null;
+  }
+
+  /** Gli eventi che toccano un dato giorno. */
+  _calendarDay(events, day) {
+    const a = this._dayStart(day).getTime();
+    const b = a + 86400000;
+    return events.filter((e) => e.start.getTime() < b && e.end.getTime() >= a);
+  }
+
+  /** L'ora di un evento, o "tutto il giorno". */
+  _calendarTime(e) {
+    if (e.allDay) return "tutto il giorno";
+    const t = (d) => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    return t(e.start) + (e.end && e.end.getTime() !== e.start.getTime() ? "-" + t(e.end) : "");
+  }
+
+  _calendarChip(item, e, compact) {
+    const kind = this._shiftKind(e.summary);
+    const color = kind ? kind.c : this._calendarColor(item, e.cal);
+    const title = e.summary + " · " + this._calendarTime(e)
+      + " · " + ((this._hass.states[e.cal] || { attributes: {} }).attributes.friendly_name || e.cal);
+    return `<button class="cal-chip${kind ? " k-" + kind.k : ""}" style="--cc:${esc(color)}"
+      title="${esc(title)}" data-cal-ev="${esc(e.cal)}">
+      <i></i><span>${esc(compact ? e.summary : this._calendarTime(e) + " " + e.summary)}</span></button>`;
+  }
+
+  _calendarBody(item) {
+    const ids = this._calendarIds(item);
+    const win = this._calendarWindow(item);
+    const head = `<div class="cal-head">
+      <div class="cal-nav">
+        <button class="cal-arrow" data-cal-step="${esc(item.id)}|-1" title="Indietro"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+        <strong>${esc(win.label)}</strong>
+        <button class="cal-arrow" data-cal-step="${esc(item.id)}|1" title="Avanti"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+        ${((this._calOffset || {})[item.id] || 0) !== 0
+          ? `<button class="cal-today" data-cal-step="${esc(item.id)}|0">OGGI</button>` : ""}
+      </div>
+      <div class="cal-views">${[["giorno", "Giorno"], ["settimana", "Settimana"], ["mese", "Mese"]]
+        .map(([k, l]) => `<button class="eco-tab ${(item.view || "settimana") === k ? "on" : ""}"
+          data-cal-view="${esc(item.id)}|${k}">${esc(l)}</button>`).join("")}</div>
+    </div>`;
+
+    if (!ids.length) {
+      return `<div class="cal">${head}<div class="ov-empty"><ha-icon icon="mdi:calendar-remove-outline"></ha-icon>
+        <span><strong>Nessun calendario in Home Assistant.</strong> Aggiungine uno da Impostazioni → Dispositivi e servizi: <em>Calendario locale</em> se i turni li scrivi tu, <em>Google Calendar</em> o <em>CalDAV</em> se li scrive qualcun altro dal suo telefono. Questa card legge qualunque calendario, non le importa da dove arriva.</span></div></div>`;
+    }
+
+    const data = this._loadCalendar(item);
+    if (!data) {
+      return `<div class="cal">${head}<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon>
+        <span>Lettura dei calendari…</span></div></div>`;
+    }
+    const events = data.events;
+    const today = this._dayStart(new Date()).getTime();
+
+    // Quello che finisce DAVVERO sullo schermo: la legenda deve descrivere il
+    // disegno, non la cache. Nella vista giorno gli eventi caricati sono quelli
+    // della finestra, ma disegnati sono solo quelli del giorno: una legenda
+    // costruita sulla cache annuncerebbe un turno che non si vede.
+    const drawn = [];
+    const dayCell = (day, compact) => {
+      const rows = this._calendarDay(events, day);
+      for (const e of rows) if (!drawn.includes(e)) drawn.push(e);
+      const isToday = this._dayStart(day).getTime() === today;
+      const other = win.month && day.getMonth() !== win.month.getMonth();
+      const shown = compact ? rows.slice(0, 3) : rows;
+      return `<div class="cal-cell${isToday ? " today" : ""}${other ? " other" : ""}">
+        <div class="cal-dnum"><b>${day.getDate()}</b>${compact ? "" : `<span>${esc(WEEKDAYS_IT[day.getDay()].slice(0, 3))}</span>`}</div>
+        ${shown.map((e) => this._calendarChip(item, e, true)).join("")}
+        ${compact && rows.length > shown.length
+          ? `<span class="cal-more">+${rows.length - shown.length}</span>` : ""}
+      </div>`;
+    };
+
+    let grid = "";
+    if (win.view === "giorno") {
+      const rows = this._calendarDay(events, win.start);
+      for (const e of rows) drawn.push(e);
+      grid = rows.length
+        ? `<div class="cal-day">${rows.map((e) => {
+            const kind = this._shiftKind(e.summary);
+            const color = kind ? kind.c : this._calendarColor(item, e.cal);
+            const cal = (this._hass.states[e.cal] || { attributes: {} }).attributes.friendly_name || e.cal;
+            return `<div class="cal-row" style="--cc:${esc(color)}">
+              <span class="cal-when">${esc(this._calendarTime(e))}</span>
+              <span class="cal-what"><strong>${esc(e.summary)}</strong>
+                <small>${esc(cal)}${e.loc ? " · " + esc(e.loc) : ""}${kind ? " · " + esc(kind.l) : ""}</small></span>
+            </div>`;
+          }).join("")}</div>`
+        : `<div class="ov-empty"><ha-icon icon="mdi:calendar-blank-outline"></ha-icon><span>Niente in programma.</span></div>`;
+    } else {
+      const days = [];
+      const n = win.view === "mese" ? 42 : 7;
+      for (let i = 0; i < n; i++) {
+        const d = new Date(win.start); d.setDate(d.getDate() + i); days.push(d);
+      }
+      grid = `<div class="cal-grid ${esc(win.view)}">
+        ${["LUN", "MAR", "MER", "GIO", "VEN", "SAB", "DOM"].map((d) => `<span class="cal-dow">${d}</span>`).join("")}
+        ${days.map((d) => dayCell(d, win.view === "mese")).join("")}
+      </div>`;
+    }
+
+    // La legenda dei calendari serve solo quando ce n'e' piu' di uno: con uno
+    // solo, il colore non distingue niente e la riga e' rumore.
+    const legend = ids.length > 1 ? `<div class="cal-legend">${ids.map((id) => {
+      const st = this._hass.states[id];
+      return `<span class="cal-leg" style="--cc:${esc(this._calendarColor(item, id))}"><i></i>${
+        esc((st && st.attributes.friendly_name) || id)}</span>`;
+    }).join("")}</div>` : "";
+
+    const kinds = [];
+    for (const e of drawn) {
+      const k = this._shiftKind(e.summary);
+      if (k && !kinds.some((x) => x.k === k.k)) kinds.push(k);
+    }
+    const shiftLegend = kinds.length ? `<div class="cal-legend">${kinds.map((k) =>
+      `<span class="cal-leg" style="--cc:${esc(k.c)}"><i></i>${esc(k.l)}</span>`).join("")}</div>` : "";
+
+    return `<div class="cal">${head}${grid}${legend}${shiftLegend}${
+      data.failed ? `<span class="hint">${data.failed} calendario/i non ha risposto.</span>` : ""}</div>`;
+  }
+
   _cameraBody(item) {
     const ids = this._cameraIds(item);
     if (!ids.length) {
@@ -8894,6 +9180,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "monitor") return this._monitorBody(item);
     if (type === "system") return this._systemBody(item);
     if (type === "camera") return this._cameraBody(item);
+    if (type === "calendar") return this._calendarBody(item);
     if (type === "economy") return this._economyBody(item);
     if (type === "comfort") return this._comfortBody(item);
     if (type === "thermostat") return this._thermostatBody(item);
@@ -9476,6 +9763,36 @@ class CyborgDashboard extends HTMLElement {
         <label>AGGIORNAMENTO ANTEPRIME (secondi)<input type="number" min="5" max="120" data-prop="refresh" value="${card.refresh || 10}"></label>
         <label class="check"><input type="checkbox" data-prop="live" ${card.live ? "checked" : ""}> Anteprime sempre in diretta</label>
         <span class="hint">In diretta l'immagine è immediata e non c'è nessun intervallo di aggiornamento, ma ogni riquadro tiene aperto un flusso video: con una o due videocamere è la scelta giusta, con otto satura un tablet da parete.</span>
+      </div>`;
+    }
+    if (card.type === "calendar") {
+      const all = Object.keys(this._hass.states).filter((id) => domainOf(id) === "calendar").sort();
+      const chosen = Array.isArray(card.calendars) && card.calendars.length ? card.calendars : all;
+      const name = (id) => (this._hass.states[id] || { attributes: {} }).attributes.friendly_name || id;
+      return `<div class="section">
+        <strong>CALENDARI</strong>
+        ${all.length ? `<span class="hint">Nessuno scelto vuol dire <strong>tutti</strong>: se domani ne aggiungi uno a Home Assistant compare da solo. Scegliendone almeno uno, l'elenco diventa quello e non cambia più da sé.</span>
+        <div class="dom-grid">${all.map((id) =>
+          `<button type="button" class="dom-chip ${chosen.includes(id) ? "on" : ""}" data-cal-pick="${esc(id)}"
+             style="--cc:${esc(this._calendarColor(card, id))}">
+             <ha-icon icon="mdi:calendar"></ha-icon>${esc(name(id))}</button>`).join("")}
+        </div>
+        <div class="eco-dev-list">${chosen.map((id) => `<div class="eco-dev-edit">
+          <ha-icon icon="mdi:calendar-blank"></ha-icon>
+          <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
+          <input type="color" data-cal-color="${esc(id)}" value="${esc(this._calendarColor(card, id))}">
+        </div>`).join("")}</div>
+        <span class="hint">Il colore distingue i calendari fra loro. <strong>I turni riconosciuti hanno il colore del turno</strong>, non del calendario: mattino, pomeriggio, notte, riposo, ferie e malattia si riconoscono dal nome dell'evento — anche scritti con una lettera sola (M, P, N, R).</span>`
+        : `<span class="hint"><strong>Home Assistant non ha nessun calendario.</strong> Va aggiunto lì, non qui: Impostazioni → Dispositivi e servizi → Aggiungi integrazione.<br>
+           • <strong>Calendario locale</strong> — vive dentro Home Assistant, non esce di casa. Giusto se i turni li scrivi tu.<br>
+           • <strong>Google Calendar</strong> — lei scrive dal suo telefono con l'app che già usa, condivide il calendario con te e tu lo colleghi qui. È la strada che non richiede niente a nessuno.<br>
+           • <strong>CalDAV</strong> — lo stesso, ma su un server tuo (Baikal, Nextcloud, Radicale nel Docker del mini PC): tutto locale.<br>
+           • <strong>Remote Calendar</strong> — se il turnario è pubblicato come indirizzo <code>.ics</code>. Attenzione: si aggiorna <strong>una volta al giorno</strong>.<br>
+           Questa card legge qualunque calendario: la scelta si può cambiare dopo senza rifare niente qui.</span>`}
+        <label>VISTA DI PARTENZA<select data-prop="view">
+          ${[["giorno", "Giorno"], ["settimana", "Settimana"], ["mese", "Mese"]].map(([k, l]) =>
+            `<option value="${esc(k)}" ${(card.view || "settimana") === k ? "selected" : ""}>${esc(l)}</option>`).join("")}
+        </select><span class="hint">È solo il punto di partenza: le tre viste restano lì, sulla card.</span></label>
       </div>`;
     }
     if (card.type === "monitor") {
@@ -12332,6 +12649,65 @@ class CyborgDashboard extends HTMLElement {
         if (row) { row.color = el.value; this._touch(); }
       };
     });
+    all("[data-cal-pick]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-cal-pick");
+        const all = Object.keys(this._hass.states).filter((x) => domainOf(x) === "calendar").sort();
+        const cur = Array.isArray(card.calendars) && card.calendars.length
+          ? card.calendars.slice() : all.slice();
+        const i = cur.indexOf(id);
+        if (i >= 0) cur.splice(i, 1); else cur.push(id);
+        // Riscelti tutti = torna automatico, come per le zone dell'allarme:
+        // un elenco identico a quello trovato da solo non deve congelarsi.
+        card.calendars = cur.length === all.length && all.every((x) => cur.includes(x))
+          ? [] : cur;
+        this._touch();
+      };
+    });
+    all("[data-cal-color]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        card.colors = Object.assign({}, card.colors || {});
+        card.colors[el.getAttribute("data-cal-color")] = el.value;
+        this._touch();
+      };
+    });
+    all("[data-cal-step]").forEach((el) => {
+      el.onclick = () => {
+        const [id, step] = el.getAttribute("data-cal-step").split("|");
+        this._calOffset = this._calOffset || {};
+        // La navigazione e' stato della camera, non configurazione: non
+        // passa da _touch(), che segnerebbe il dashboard come da salvare e
+        // riaprirebbe marzo alla prossima visita.
+        this._calOffset[id] = Number(step) === 0
+          ? 0 : (this._calOffset[id] || 0) + Number(step);
+        this._signature = "";
+        this.render();
+      };
+    });
+    all("[data-cal-view]").forEach((el) => {
+      el.onclick = () => {
+        const [id, view] = el.getAttribute("data-cal-view").split("|");
+        const target = this._cardById(id);
+        if (!target) return;
+        // La vista invece E' una scelta: si salva. Cambiandola la finestra
+        // torna a oggi, perche' "la terza settimana avanti" non ha un
+        // corrispettivo nel mese.
+        target.view = view;
+        this._calOffset = this._calOffset || {};
+        this._calOffset[id] = 0;
+        this._touch();
+      };
+    });
+    all("[data-cal-ev]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        this.dispatchEvent(new CustomEvent("hass-more-info", {
+          detail: { entityId: el.getAttribute("data-cal-ev") },
+          bubbles: true, composed: true }));
+      };
+    });
     all("[data-trend-hours]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
@@ -14021,6 +14397,61 @@ button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4
 .icon-swatch:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
 .icon-swatch ha-icon{--mdc-icon-size:17px;display:block}
 .preset-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}
+/* --- Calendari ---------------------------------------------------------- */
+.cal{display:flex;flex-direction:column;gap:10px}
+.cal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.cal-nav{display:flex;align-items:center;gap:6px;min-width:0}
+.cal-nav strong{font-size:12.5px;letter-spacing:.03em;white-space:nowrap}
+.cal-arrow{display:grid;place-items:center;width:26px;height:26px;padding:0;border-radius:8px;
+  background:color-mix(in srgb,var(--accent) 10%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent)}
+.cal-arrow:hover{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.cal-arrow ha-icon{--mdc-icon-size:16px;display:block}
+.cal-today{padding:3px 9px;border-radius:8px;font:9px ui-monospace,monospace;letter-spacing:.1em;
+  background:transparent;border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);color:var(--accent)}
+.cal-views{display:flex;gap:4px;flex-wrap:wrap}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal-dow{font:8.5px ui-monospace,monospace;letter-spacing:.1em;opacity:.4;text-align:center;padding-bottom:2px}
+.cal-cell{display:flex;flex-direction:column;gap:3px;min-height:64px;padding:5px;border-radius:9px;
+  background:color-mix(in srgb,var(--accent) 4%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 12%,transparent);overflow:hidden}
+.cal-grid.settimana .cal-cell{min-height:104px}
+.cal-cell.other{opacity:.38}
+.cal-cell.today{border-color:var(--accent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
+.cal-dnum{display:flex;align-items:baseline;justify-content:space-between;gap:4px;line-height:1}
+.cal-dnum b{font-size:12px;font-weight:650}
+.cal-cell.today .cal-dnum b{color:var(--accent)}
+.cal-dnum span{font:8px ui-monospace,monospace;opacity:.4;text-transform:uppercase}
+.cal-chip{display:flex;align-items:center;gap:4px;width:100%;padding:2px 5px;border-radius:6px;
+  background:color-mix(in srgb,var(--cc) 16%,transparent);
+  border:1px solid color-mix(in srgb,var(--cc) 34%,transparent);
+  font-size:9.5px;line-height:1.3;text-align:left;color:#e8f4ff}
+.cal-chip:hover{background:color-mix(in srgb,var(--cc) 30%,transparent)}
+.cal-chip>i{width:5px;height:5px;border-radius:50%;background:var(--cc);flex-shrink:0}
+.cal-chip>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal-more{font:8.5px ui-monospace,monospace;opacity:.45;padding-left:3px}
+.cal-day{display:flex;flex-direction:column;gap:6px}
+.cal-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;
+  background:color-mix(in srgb,var(--cc) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--cc) 24%,transparent);border-left:3px solid var(--cc)}
+.cal-when{font:10.5px ui-monospace,monospace;color:var(--cc);white-space:nowrap;min-width:84px}
+.cal-what{min-width:0}
+.cal-what strong{display:block;font-size:12px}
+.cal-what small{display:block;font:9px ui-monospace,monospace;opacity:.45;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal-legend{display:flex;flex-wrap:wrap;gap:8px}
+.cal-leg{display:inline-flex;align-items:center;gap:5px;font-size:9.5px;opacity:.7}
+.cal-leg i{width:8px;height:8px;border-radius:2px;background:var(--cc)}
+.dom-chip[data-cal-pick].on{border-color:var(--cc)}
+@media(max-width:700px){
+  .cal-grid.settimana{grid-template-columns:1fr}
+  .cal-grid.settimana .cal-dow{display:none}
+  .cal-grid.settimana .cal-cell{min-height:0;flex-direction:row;align-items:center;flex-wrap:wrap}
+  .cal-grid.settimana .cal-dnum{min-width:52px;gap:6px}
+  .cal-cell{min-height:54px}
+  .cal-when{min-width:70px}
+}
 .chart-range{margin-top:3px;font:8.5px ui-monospace,monospace;letter-spacing:.1em;
   text-transform:uppercase;opacity:.38;text-align:right}
 .hint.sys-bad{display:block;margin-top:8px;padding:8px 10px;border-radius:9px;
@@ -15529,7 +15960,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.54.0";
+const CYBORG_BUILD = "0.55.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
