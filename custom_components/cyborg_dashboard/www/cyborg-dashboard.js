@@ -17190,7 +17190,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.59.0";
+const CYBORG_BUILD = "0.60.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

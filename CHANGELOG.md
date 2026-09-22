@@ -4,6 +4,53 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.60.0] - 2026-09-22
+
+Le versioni hanno un numero, non uno SHA. Nessuna modifica al pannello: cambia
+come il progetto si pubblica.
+
+### Il problema
+Finora questo repository non aveva **nessuna GitHub Release**. HACS, quando non
+trova release, ripiega sui primi sette caratteri dell'ultimo commit: nel
+pannello degli aggiornamenti si leggeva `1674bfc → c494284`. Funziona, ma
+nessuno — men che meno un cliente — può guardare due SHA e capire se è avanti
+o indietro.
+
+### La soluzione: GitHub le taglia da solo
+`.github/workflows/release.yml` gira a ogni spinta su `main`:
+
+1. **prima le prove** — coerenza della versione, schema, pannello, notifiche e
+   le 1502 asserzioni della logica;
+2. **poi la release**, ma solo se sono verdi. Legge il numero da
+   `manifest.json`, controlla che la `vX.Y.Z` non ci sia già (così ri-lanciarlo
+   non fa danni) e la pubblica con le note prese dalla **voce del CHANGELOG di
+   quella versione**.
+
+Le note non si scrivono due volte: una nota scritta due volte diverge sempre.
+`.github/estrai_changelog.py` ritaglia la sezione giusta, e se quella voce non
+c'è il processo **si ferma** invece di pubblicare una release vuota.
+
+Nessun token da incollare: `GITHUB_TOKEN` lo fornisce GitHub al workflow e `gh`
+è già sui runner. Nessuna azione di terze parti che un giorno può sparire —
+solo `actions/checkout`, che è di GitHub.
+
+### Una prova nuova che vale per sempre
+`tests/release.test.py` (10 asserzioni) controlla che `CYBORG_BUILD` nel
+javascript e `version` nel manifest **siano lo stesso numero**. Quando
+divergono, il pannello dichiara in testata una versione che non è quella
+installata e la diagnosi di qualunque altro problema parte da un dato falso:
+è già costato un giro intero. Ora la CI si rifiuta di pubblicare.
+
+Controlla anche che la voce del CHANGELOG esista, non sia vuota, non sbordi
+nella versione precedente e sia **la prima in cima** — un changelog in cui
+l'ultima versione non è in alto è un changelog che qualcuno leggerà al
+contrario.
+
+### Cosa cambia per chi aggiorna
+Dalla prossima pubblicazione il pannello degli aggiornamenti mostrerà
+`0.60.0` al posto di uno SHA. Se HACS dovesse restare agganciato al ramo
+`main`, basta una sola volta *Ridownload* scegliendo la versione dall'elenco.
+
 ## [0.59.0] - 2026-09-22
 
 *«Non mi piace sta cosa che dopo aver avviato il cmd devo dipendere da te.»*

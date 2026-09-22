@@ -1,0 +1,83 @@
+name: Prove e release
+
+# Ogni spinta su main: prima le prove, poi - solo se sono verdi - la GitHub
+# Release con il numero di versione del manifest.
+#
+# Perche' esiste: senza Release pubblicate HACS non ha un numero di versione da
+# mostrare e ripiega sui primi sette caratteri dell'ultimo commit. "c494284"
+# non dice a nessuno se sei avanti o indietro - men che meno a un cliente.
+#
+# Non serve nessun token: GITHUB_TOKEN e' fornito da GitHub stesso al workflow,
+# e `gh` e' gia' installato sui runner. Niente segreti da incollare, niente
+# azioni di terze parti che un giorno possono sparire.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prove:
+    name: Prove
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Coerenza della versione
+        run: python3 tests/release.test.py
+
+      - name: Schema
+        run: python3 tests/schema.test.py
+
+      - name: Pannello
+        run: python3 tests/panel.test.py
+
+      - name: Notifiche
+        run: python3 tests/notifications.test.py
+
+      - name: Logica del pannello
+        run: node tests/frontend.test.js
+
+  release:
+    name: Release
+    needs: prove
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versione dal manifest
+        id: v
+        run: |
+          set -eu
+          V=$(python3 -c "import json,sys;print(json.load(open('custom_components/cyborg_dashboard/manifest.json'))['version'])")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: La release esiste gia'?
+        id: gia
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "esiste=si" >> "$GITHUB_OUTPUT"
+            echo "La v${{ steps.v.outputs.version }} e' gia' pubblicata: non faccio niente."
+          else
+            echo "esiste=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Note dalla voce del CHANGELOG
+        if: steps.gia.outputs.esiste == 'no'
+        run: python3 .github/estrai_changelog.py "${{ steps.v.outputs.version }}" > NOTE.md
+
+      - name: Pubblica la release
+        if: steps.gia.outputs.esiste == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --title "Cyborg Dashboard ${{ steps.v.outputs.version }}" \
+            --notes-file NOTE.md \
+            --target "${{ github.sha }}"
