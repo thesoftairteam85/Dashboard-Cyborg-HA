@@ -2233,6 +2233,135 @@ class CyborgDashboard extends HTMLElement {
     return !!server && !!CYBORG_BUILD && server !== CYBORG_BUILD;
   }
 
+  /**
+   * L'entita' di aggiornamento di HACS per QUESTA integrazione.
+   *
+   * Si cerca prima per entity_id, poi per nome: l'entity_id lo decide HACS al
+   * momento dell'installazione e su una macchina diversa puo' essere
+   * `update.cyborg_dashboard_update_2`. Cercare solo il primo e' il difetto
+   * che si manifesta a casa del cliente e mai qui.
+   */
+  /**
+   * Il pannello degli aggiornamenti: cerca, installa, riavvia.
+   *
+   * Sta qui dentro e non in HACS perche' chi usa questa dashboard - lui o un
+   * suo cliente - non deve imparare dove sta HACS per finire un
+   * aggiornamento. Tre passi dichiarati, in italiano, con scritto quanto
+   * tempo ci vuole: l'attesa spaventa solo quando non e' annunciata.
+   */
+  _renderUpdate() {
+    if (!this._updOpen) return "";
+    const u = this._updateInfo();
+    const busy = this._updBusy || "";
+    const done = this._updDone || "";
+    const body = !u
+      ? `<p class="upd-none">Non trovo l'aggiornamento di Cyborg in Home Assistant.
+           Vuol dire che questa copia non è stata installata con <strong>HACS</strong>:
+           in quel caso i file si sostituiscono a mano e si riavvia Home Assistant.</p>`
+      : `<div class="upd-vers">
+           <div><small>INSTALLATA</small><strong>${esc(u.installed || "?")}</strong></div>
+           <ha-icon icon="mdi:arrow-right"></ha-icon>
+           <div class="${u.pending ? "new" : ""}"><small>SU GITHUB</small><strong>${esc(u.latest || "?")}</strong></div>
+         </div>
+         ${u.pending
+           ? `<p>C'è una versione nuova. <strong>Installa e riavvia</strong> scarica il
+                codice da GitHub e poi riavvia Home Assistant: ci vogliono un paio di
+                minuti, durante i quali la pagina resta ferma e poi torna da sola.</p>`
+           : `<p>Sei alla versione pubblicata più recente che Home Assistant conosce.
+                Se hai appena pubblicato qualcosa, <strong>cerca aggiornamenti</strong>:
+                HACS non guarda GitHub in continuazione.</p>`}
+         ${u.url ? `<a class="upd-link" href="${esc(u.url)}" target="_blank" rel="noreferrer">
+           <ha-icon icon="mdi:open-in-new"></ha-icon> Vedi le modifiche su GitHub</a>` : ""}`;
+    const msg = busy === "check" ? "Chiedo a HACS che cosa c'è su GitHub..."
+      : busy === "install" ? "Scarico la versione nuova. Non chiudere la pagina."
+      : busy === "restart" ? "Home Assistant si sta riavviando. La pagina torna da sola fra un paio di minuti."
+      : "";
+    return `<div class="upd-back" data-upd-close></div>
+      <div class="upd-box" role="dialog" aria-label="Aggiornamenti">
+        <header><ha-icon icon="mdi:package-variant"></ha-icon><strong>AGGIORNAMENTI</strong>
+          <button class="mini" data-upd-close title="Chiudi"><ha-icon icon="mdi:close"></ha-icon></button></header>
+        <div class="upd-body">
+          ${body}
+          ${msg ? `<p class="upd-busy"><ha-icon icon="mdi:progress-clock"></ha-icon> ${esc(msg)}</p>` : ""}
+          ${done ? `<p class="upd-done"><ha-icon icon="mdi:check-circle-outline"></ha-icon> ${esc(done)}</p>` : ""}
+          ${this._updErr ? `<p class="upd-err"><ha-icon icon="mdi:alert-outline"></ha-icon> ${esc(this._updErr)}</p>` : ""}
+        </div>
+        <footer>
+          <button class="secondary" data-upd-check ${busy ? "disabled" : ""}>
+            <ha-icon icon="mdi:cloud-search-outline"></ha-icon> CERCA AGGIORNAMENTI</button>
+          ${u && u.pending ? `
+            <button class="secondary" data-upd-install="solo" ${busy ? "disabled" : ""}>
+              <ha-icon icon="mdi:download"></ha-icon> SOLO SCARICA</button>
+            <button data-upd-install="riavvia" ${busy ? "disabled" : ""}>
+              <ha-icon icon="mdi:package-down"></ha-icon> INSTALLA E RIAVVIA</button>` : `
+            <button class="secondary" data-upd-restart ${busy ? "disabled" : ""}
+              title="Serve quando hai scelto «solo scarica»: il codice nuovo entra in funzione al riavvio">
+              <ha-icon icon="mdi:restart"></ha-icon> RIAVVIA HOME ASSISTANT</button>`}
+        </footer>
+      </div>`;
+  }
+
+  /** Installa e, se richiesto, riavvia. Un passo per volta, dichiarato. */
+  async _updInstall(mode) {
+    const u = this._updateInfo();
+    if (!u || this._updBusy) return;
+    this._updErr = ""; this._updDone = "";
+    this._updBusy = "install"; this._touch(true);
+    try {
+      // La chiamata torna quando HACS ha finito di scaricare: non serve
+      // sorvegliare `in_progress`, che serve solo a chi disegna una barra.
+      await this._hass.callService("update", "install", { entity_id: u.id });
+    } catch (err) {
+      this._updBusy = ""; this._updErr = (err && err.message) || "Installazione non riuscita";
+      this._touch(true); return;
+    }
+    if (mode !== "riavvia") {
+      this._updBusy = "";
+      this._updDone = "Scaricata. Entra in funzione al prossimo riavvio di Home Assistant.";
+      this._touch(true); return;
+    }
+    await this._updRestart();
+  }
+
+  async _updRestart() {
+    this._updErr = ""; this._updBusy = "restart"; this._touch(true);
+    try {
+      await this._hass.callService("homeassistant", "restart", {});
+    } catch (err) {
+      // Un riavvio che parte davvero taglia la connessione mentre la chiamata
+      // e' in volo: l'errore che arriva e' quello, non un guasto. Dirlo come
+      // guasto farebbe premere il pulsante una seconda volta.
+      this._updDone = "Riavvio avviato. La pagina torna da sola fra un paio di minuti.";
+    }
+  }
+
+  _updateEntity() {
+    const st = (this._hass && this._hass.states) || {};
+    if (st["update.cyborg_dashboard_update"]) return "update.cyborg_dashboard_update";
+    return Object.keys(st).find((id) => id.indexOf("update.") === 0
+      && /cyborg/i.test(String((st[id].attributes || {}).friendly_name || ""))) || null;
+  }
+
+  /**
+   * Cosa c'e' da sapere sull'aggiornamento, o null se HACS non c'e'.
+   *
+   * `installed`/`latest` sono quello che dice HACS: senza Release taggate su
+   * GitHub sono SHA di commit, non numeri di versione. Si mostrano lo stesso,
+   * accorciati, perche' "diverso da prima" e' l'informazione che serve.
+   */
+  _updateInfo() {
+    const id = this._updateEntity();
+    if (!id) return null;
+    const st = this._hass.states[id];
+    if (!st) return null;
+    const a = st.attributes || {};
+    const short = (v) => { const t = String(v || ""); return t.length > 12 ? t.slice(0, 7) : t; };
+    return { id, pending: st.state === "on", busy: !!a.in_progress,
+      installed: short(a.installed_version), latest: short(a.latest_version),
+      pct: typeof a.update_percentage === "number" ? a.update_percentage : null,
+      url: String(a.release_url || "") };
+  }
+
   _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
   _rooms() { const p = this._page(); return (p && p.rooms) || []; }
   _room(id) { return this._rooms().find((r) => r.id === id) || null; }
@@ -2270,6 +2399,14 @@ class CyborgDashboard extends HTMLElement {
     const parts = [this._editing ? "e" : "v", String(this._pageIndex),
       JSON.stringify(this._selected || null)];
     parts.push(JSON.stringify(this._flowOpen || {}));
+    // Lo stato dell'aggiornamento e' sempre nella firma, anche col pannello
+    // chiuso: la pastiglia della versione in testata deve accendersi da sola
+    // quando HACS si accorge che su GitHub c'e' qualcosa di nuovo.
+    {
+      const u = this._updateInfo();
+      parts.push("upd:" + (u ? (u.pending ? "1" : "0") + (u.busy ? "b" : "-") + u.latest : "no")
+        + (this._updOpen ? "|open" : "") + (this._updBusy || "") + (this._updDone || "") + (this._updErr || ""));
+    }
     if (this._isFloorplan()) {
       parts.push(this._registry ? "reg" : "noreg");
       parts.push(JSON.stringify(this._focus || null));
@@ -2281,7 +2418,7 @@ class CyborgDashboard extends HTMLElement {
         // Geometry belongs in the signature: resizing a room or moving it to
         // another storey changes nothing about entity state, and without this
         // the map would only repaint on the next unrelated state update.
-        parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length},${(room.walls || []).join("")}`);
+        parts.push(`${room.id}@${room.x},${room.y},${room.w},${room.h},${room.level || 0},${(room.points || []).length},${(room.walls || []).join("")},${(room.openings || []).map((o) => o.wall + o.kind + o.at + o.w + o.sill + o.h).join("")}`);
         for (const v of this._vehiclesFor(room.vehicles)) {
           if (!Array.isArray(room.vehicles) || !room.vehicles.length) break;
           for (const key of ["battery", "charging", "power"]) {
@@ -11888,7 +12025,18 @@ class CyborgDashboard extends HTMLElement {
       : `${sections.length} SEZIONI · ${total} CARD · ${this._editing ? "MODIFICA ATTIVA" : "SISTEMA ONLINE"}`;
     // The running build, always visible: the fastest answer to "did my update
     // actually arrive" is being able to read the number on screen.
-    const buildTag = CYBORG_BUILD ? ` · v${CYBORG_BUILD}` : "";
+    //
+    // 0.59.0: e' anche un PULSANTE. Pubblicare una versione e non poterla
+    // installare da soli vuol dire dipendere da qualcun altro per finire il
+    // lavoro, e non e' accettabile - ne' per lui ne' per un suo cliente.
+    const upd = this._updateInfo();
+    const buildTag = CYBORG_BUILD
+      ? `<button class="build-pill${upd && upd.pending ? " pending" : ""}" data-upd-open
+           title="${upd && upd.pending ? "C'e' una versione nuova: tocca per installarla"
+             : "Versione in esecuzione — tocca per cercare aggiornamenti"}">
+           <ha-icon icon="${upd && upd.pending ? "mdi:package-down" : "mdi:tag-outline"}"></ha-icon>
+           v${esc(CYBORG_BUILD)}${upd && upd.pending ? " · AGGIORNAMENTO" : ""}
+         </button>` : "";
 
     const body = floorplan ? this._renderFloorplan() : sections.length
       ? sections.map((s, i) => this._renderSection(s, i, sections.length)).join("")
@@ -11909,7 +12057,7 @@ class CyborgDashboard extends HTMLElement {
             <ha-icon class="brand-icon" icon="${esc(p.icon || "mdi:hexagon-multiple-outline")}"></ha-icon>
             <div>
               <h1>${esc(p.title || "Cyborg")}</h1>
-              <div class="sub">${subtitle}${buildTag}</div>
+              <div class="sub"><span class="sub-txt">${subtitle}</span> ${buildTag}</div>
             </div>
           </div>
           <div class="tools">
@@ -11940,6 +12088,7 @@ class CyborgDashboard extends HTMLElement {
           ${this._editing && !kiosk ? `<div class="editor-backdrop" data-editor-backdrop></div>${this._renderEditor()}` : ""}
         </div>
         ${this._renderOverlay()}
+        ${this._renderUpdate()}
         ${kiosk && ((this._dashboard.kiosk || {}).dim_after > 0)
           ? '<div class="kiosk-dim" data-kiosk-dim></div>' : ""}
       </div>`;
@@ -12265,6 +12414,39 @@ class CyborgDashboard extends HTMLElement {
     if (kioskExit) {
       kioskExit.onclick = () => { this._kioskPreview = false; this._pageIndex = 0; this._touch(); };
     }
+    const updOpen = q("[data-upd-open]");
+    if (updOpen) updOpen.onclick = () => {
+      this._updOpen = true; this._updErr = ""; this._updDone = ""; this._touch(true);
+    };
+    all("[data-upd-close]").forEach((el) => {
+      el.onclick = () => {
+        // Mentre sta scaricando o riavviando il pannello NON si chiude: lo si
+        // chiuderebbe proprio nel momento in cui dice l'unica cosa utile.
+        if (this._updBusy) return;
+        this._updOpen = false; this._touch(true);
+      };
+    });
+    const updCheck = q("[data-upd-check]");
+    if (updCheck) updCheck.onclick = async () => {
+      const u = this._updateInfo();
+      if (!u || this._updBusy) return;
+      this._updErr = ""; this._updDone = ""; this._updBusy = "check"; this._touch(true);
+      try {
+        await this._hass.callService("homeassistant", "update_entity", { entity_id: u.id });
+        const after = this._updateInfo();
+        this._updDone = after && after.pending
+          ? "C'è una versione nuova."
+          : "Nessuna versione nuova: sei già all'ultima pubblicata.";
+      } catch (err) {
+        this._updErr = (err && err.message) || "Non sono riuscito a interrogare HACS";
+      }
+      this._updBusy = ""; this._touch(true);
+    };
+    all("[data-upd-install]").forEach((el) => {
+      el.onclick = () => this._updInstall(el.getAttribute("data-upd-install"));
+    });
+    const updRestart = q("[data-upd-restart]");
+    if (updRestart) updRestart.onclick = () => this._updRestart();
     all("[data-hier-parent]").forEach((el) => {
       el.onchange = () => {
         this._setParent(el.getAttribute("data-hier-parent"), el.value || null);
@@ -15132,7 +15314,67 @@ class CyborgDashboard extends HTMLElement {
 .brand{display:flex;align-items:center;gap:14px}
 .brand-icon{--mdc-icon-size:32px;color:var(--accent);filter:drop-shadow(0 0 12px color-mix(in srgb,var(--accent) 60%,transparent))}
 h1{margin:0;font-size:clamp(22px,3vw,32px);letter-spacing:-.03em;font-weight:750}
-.sub{margin-top:4px;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:2px;opacity:.5}
+/* L'opacita' sta sul TESTO, non sul contenitore: su .sub dimezzava anche la
+   pastiglia dell'aggiornamento, e un avviso ambra al 50% non e' un avviso. */
+.sub{margin-top:4px;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:2px}
+.sub-txt{opacity:.5}
+/* La pastiglia della versione. Sta nel sottotitolo e deve sembrarne parte
+   finche' non c'e' niente da fare: un pulsante acceso che non serve e'
+   rumore. Quando c'e' una versione nuova diventa ambra e respira - e' l'unica
+   animazione della testata, per questo si nota. */
+.sub .build-pill{display:inline-flex;align-items:center;gap:5px;vertical-align:baseline;
+  margin-left:4px;padding:2px 9px;border-radius:99px;
+  background:transparent;border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);
+  color:inherit;font:inherit;font-size:10px;font-weight:600;letter-spacing:1.6px;
+  opacity:.5;cursor:pointer;transition:background .2s,border-color .2s,color .2s,opacity .2s}
+.sub .build-pill>ha-icon{--mdc-icon-size:12px}
+.sub .build-pill:hover{background:color-mix(in srgb,var(--accent) 14%,transparent);
+  border-color:color-mix(in srgb,var(--accent) 55%,transparent);opacity:1}
+.sub .build-pill.pending{color:#0d0a02;background:#ffc24d;border-color:#ffc24d;opacity:1;
+  animation:updPulse 2.4s ease-in-out infinite}
+.sub .build-pill.pending:hover{background:#ffd479;border-color:#ffd479}
+@keyframes updPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,194,77,.45)}
+  55%{box-shadow:0 0 0 7px rgba(255,194,77,0)}}
+@media (prefers-reduced-motion:reduce){.sub .build-pill.pending{animation:none}}
+/* Il pannello degli aggiornamenti */
+.upd-back{position:fixed;inset:0;background:rgba(2,6,11,.72);backdrop-filter:blur(3px);z-index:60}
+.upd-box{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:61;
+  width:min(440px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;
+  border-radius:18px;background:#0a1017;
+  border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  box-shadow:0 30px 80px rgba(0,0,0,.65)}
+.upd-box>header{display:flex;align-items:center;gap:9px;padding:14px 16px;
+  border-bottom:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.upd-box>header>ha-icon{--mdc-icon-size:18px;color:var(--accent)}
+.upd-box>header strong{flex:1;font:11px ui-monospace,monospace;letter-spacing:2px}
+.upd-body{padding:14px 16px;display:flex;flex-direction:column;gap:11px}
+.upd-body p{margin:0;font-size:12.5px;line-height:1.55;opacity:.8}
+.upd-vers{display:flex;align-items:center;gap:12px}
+.upd-vers>div{flex:1;padding:9px 11px;border-radius:11px;
+  background:color-mix(in srgb,var(--accent) 6%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.upd-vers small{display:block;font:8.5px ui-monospace,monospace;letter-spacing:1.1px;opacity:.5}
+.upd-vers strong{display:block;margin-top:2px;font:13px ui-monospace,monospace}
+.upd-vers>div.new{background:rgba(255,194,77,.12);border-color:rgba(255,194,77,.5)}
+.upd-vers>div.new strong{color:#ffc24d}
+.upd-vers>ha-icon{--mdc-icon-size:16px;opacity:.4}
+.upd-link{display:inline-flex;align-items:center;gap:6px;color:var(--accent);
+  text-decoration:none;font-size:11.5px}
+.upd-link>ha-icon{--mdc-icon-size:14px}
+.upd-busy,.upd-done,.upd-err{display:flex;align-items:center;gap:7px;padding:9px 11px;
+  border-radius:11px;font-size:12px!important;opacity:1!important}
+.upd-busy>ha-icon,.upd-done>ha-icon,.upd-err>ha-icon{--mdc-icon-size:16px;flex-shrink:0}
+.upd-busy{background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent)}
+.upd-done{background:rgba(6,214,160,.12);color:#06d6a0}
+.upd-err{background:rgba(255,107,107,.12);color:#ff6b6b}
+.upd-none{opacity:.75!important}
+/* L'azione principale sta sopra e occupa tutta la riga, le altre sotto: con
+   tre pulsanti in fila su una scatola stretta, quello che conta finiva a capo
+   da solo e spiazzato a destra. Qui e' una scelta, non un incidente. */
+.upd-box>footer{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 14px;
+  border-top:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.upd-box>footer button{font-size:11px;padding:9px 13px;flex:1 1 auto;justify-content:center}
+.upd-box>footer button:not(.secondary){order:-1;flex:1 1 100%;padding:11px 13px}
 .tools{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
 button{display:inline-flex;align-items:center;gap:7px;border:0;border-radius:11px;padding:10px 15px;background:var(--accent);color:#03131a;cursor:pointer;font:inherit;font-size:12px;font-weight:700;letter-spacing:.08em;transition:filter .18s,transform .18s}
 button:hover{filter:brightness(1.12)}
@@ -16948,7 +17190,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.58.0";
+const CYBORG_BUILD = "0.59.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

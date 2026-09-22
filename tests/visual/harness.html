@@ -549,6 +549,14 @@ window.__mount=(dash,opts)=>{
             return {id:"xs"+i,title:t,icon:"mdi:shape-outline",accent:null,collapsed:true,items:[]};
           });
         }
+        if(opts&&opts.update){
+          el._hass.states["update.cyborg_dashboard_update"]={
+            entity_id:"update.cyborg_dashboard_update",state:"on",
+            attributes:{friendly_name:"Cyborg Dashboard Update",
+              installed_version:"1674bfc",latest_version:"c494284",in_progress:false,
+              release_url:"https://github.com/thesoftairteam85/Dashboard-Cyborg-HA"}};
+          if(opts.update==="open") el._updOpen=true;
+        }
         el._signature="";el.render();
         setTimeout(function(){
           // materialised LAST, after the registry has certainly arrived:

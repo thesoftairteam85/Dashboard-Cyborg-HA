@@ -54,6 +54,8 @@ const DEFAULT_DASH = {
     ["12-map-walls",  { pageIndex: 1, autoRooms: true, balcony: true }],
     ["14-map-openings", { pageIndex: 1, autoRooms: true, openings: true }],
     ["16-map-openings-ed", { pageIndex: 1, autoRooms: true, openings: true, editing: true, selectRoom: true }],
+    ["17-update",     { pageIndex: 0, autoCompose: true, update: "open" }],
+    ["18-update-pill", { pageIndex: 0, autoCompose: true, update: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
     ["26-ev",         { pageIndex: 0, autoCompose: true, ev: true }],

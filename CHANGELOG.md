@@ -4,6 +4,56 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.59.0] - 2026-09-22
+
+*«Non mi piace sta cosa che dopo aver avviato il cmd devo dipendere da te.»*
+Giusto. Pubblicare una versione e non poterla installare da soli vuol dire non
+aver finito il lavoro — e vale a maggior ragione per un cliente, che di HACS
+non sa nemmeno dove stia.
+
+### La versione in testata è diventata un pulsante
+Il numero accanto al sottotitolo (`v0.59.0`) adesso si tocca. Quando su GitHub
+c'è qualcosa di nuovo diventa **ambra e respira**: è l'unica animazione della
+testata, per questo si nota, e dice *AGGIORNAMENTO* a parole — non solo col
+colore, perché un avviso affidato a una sfumatura non è un avviso.
+
+### Tre passi, in italiano, con scritto quanto durano
+Il pannello che si apre mostra la versione **installata** e quella **su
+GitHub**, affiancate, e tre comandi:
+
+- **CERCA AGGIORNAMENTI** — chiede a HACS di riguardare GitHub adesso. Serve
+  perché HACS non ci guarda in continuazione: senza questo, dopo una
+  pubblicazione si resta ad aspettare senza sapere quanto.
+- **INSTALLA E RIAVVIA** — scarica e poi riavvia Home Assistant. È l'azione
+  principale e occupa da sola tutta la riga.
+- **SOLO SCARICA** — per chi vuole scegliere quando riavviare. Il pannello lo
+  dice chiaro: entra in funzione al prossimo riavvio.
+
+Con niente da installare resta comunque **RIAVVIA HOME ASSISTANT**, che è il
+passo che serve dopo un «solo scarica».
+
+### I dettagli che si vedono solo quando sbagliano
+- L'entità di HACS si cerca **prima per entity_id e poi per nome**: su una
+  macchina diversa può chiamarsi `..._update_2`, e cercare solo il primo è il
+  difetto che si manifesta a casa del cliente e mai qui.
+- **Se lo scaricamento fallisce non si riavvia lo stesso**, e il motivo si
+  legge.
+- **Un riavvio che taglia la connessione non è un guasto**: l'errore che arriva
+  è il riavvio stesso. Chiamarlo fallimento farebbe premere il pulsante due
+  volte.
+- Mentre sta lavorando il pannello **non si lascia chiudere**: lo si chiuderebbe
+  proprio nel momento in cui dice l'unica cosa utile.
+- Senza HACS non resta muto: spiega che quella copia va sostituita a mano.
+- Lo stato dell'aggiornamento è nella firma di ridisegno, quindi la pastiglia
+  **si accende da sola** senza ricaricare la pagina.
+- L'opacità del sottotitolo è passata dal contenitore al testo: su `.sub`
+  dimezzava anche la pastiglia, e un avviso ambra al 50% non è un avviso.
+
+### Verifiche
+33 asserzioni nuove (1502), sezione 57, più 474 misurate in Chromium con due
+scatti nuovi. Rimettendo il difetto «riavvia comunque dopo un errore» la suite
+fallisce 3 asserzioni.
+
 ## [0.58.0] - 2026-09-21
 
 *«La mappa 3D è terribile.»* Il difetto più grosso non era il 3D: era che una

@@ -5447,6 +5447,151 @@ console.log("\n== 56. PORTE E FINESTRE SONO BUCHI NEL MURO ==");
   ok("stato ripristinato dopo la sezione 56", el._dashboard === savedDash56);
 }
 
+console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
+{
+  // "Non mi piace sta cosa che dopo aver avviato il cmd devo dipendere da te".
+  // Pubblicare una versione e non poterla installare senza chiedere a
+  // qualcuno vuol dire non aver finito il lavoro - vale per lui e a maggior
+  // ragione per un suo cliente, che HACS non sa nemmeno dove sia.
+  const savedDash57 = el._dashboard, savedIdx57 = el._pageIndex;
+  const savedSel57 = el._selected, savedEd57 = el._editing, savedSig57 = el._signature;
+  const savedCS57 = el._hass.callService;
+
+  const UPD = "update.cyborg_dashboard_update";
+  const setUpd = (state, attrs) => {
+    states[UPD] = S(state, Object.assign({ friendly_name: "Cyborg Dashboard Update",
+      installed_version: "1674bfc", latest_version: "1674bfc", in_progress: false,
+      release_url: "https://github.com/thesoftairteam85/Dashboard-Cyborg-HA" }, attrs || {}));
+  };
+
+  delete states[UPD];
+  ok("senza HACS non si inventa nessuna entità", el._updateEntity() === null
+     && el._updateInfo() === null);
+
+  setUpd("off");
+  ok("l'entità di HACS viene trovata", el._updateEntity() === UPD, String(el._updateEntity()));
+
+  // A casa del cliente l'entity_id puo' essere un altro: si cerca per nome.
+  delete states[UPD];
+  states["update.cyborg_dashboard_update_2"] = S("on", {
+    friendly_name: "Cyborg Dashboard Update", installed_version: "1674bfc",
+    latest_version: "c494284aaaaaaaaaaaaaaaaa", in_progress: false, release_url: "" });
+  ok("con un entity_id diverso la si trova comunque, dal nome",
+     el._updateEntity() === "update.cyborg_dashboard_update_2", String(el._updateEntity()));
+  const infoAlt = el._updateInfo();
+  ok("uno sha lungo viene accorciato a sette caratteri",
+     infoAlt.latest === "c494284", infoAlt.latest);
+  ok("e la versione nuova risulta in attesa", infoAlt.pending === true);
+  delete states["update.cyborg_dashboard_update_2"];
+
+  setUpd("off");
+  const info = el._updateInfo();
+  ok("senza niente di nuovo non c'è niente in attesa", info.pending === false);
+  ok("installata e pubblicata si leggono tutte e due",
+     info.installed === "1674bfc" && info.latest === "1674bfc", JSON.stringify(info));
+
+  // --- la pastiglia in testata ---------------------------------------------
+  el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
+    pages: [{ id: "p57", type: "sections", title: "Cyborg", icon: "mdi:home",
+      layout: { type: "grid", columns: 12, gap: 16 }, sections: [] }] };
+  el._pageIndex = 0; el._selected = null; el._editing = false; el._updOpen = false;
+  el._updBusy = ""; el._updDone = ""; el._updErr = "";
+  el._signature = ""; el.render();
+  const calmo = el.innerHTML;
+  ok("la versione in testata è un pulsante", /data-upd-open/.test(calmo));
+  ok("ma finché non c'è niente da fare non si accende",
+     !/build-pill pending/.test(calmo));
+  ok("e il pannello degli aggiornamenti resta chiuso", !/class="upd-box"/.test(calmo));
+
+  setUpd("on", { latest_version: "c494284" });
+  el._signature = ""; el.render();
+  const acceso = el.innerHTML;
+  ok("con una versione nuova la pastiglia si accende", /build-pill pending/.test(acceso));
+  ok("e lo dice a parole, non solo col colore", /AGGIORNAMENTO/.test(acceso));
+  ok("lo stato dell'aggiornamento è nella firma: la pastiglia si accende da sola",
+     /upd:1/.test(el._buildSignature()), el._buildSignature().slice(0, 80));
+
+  // --- il pannello ----------------------------------------------------------
+  el._updOpen = true; el._signature = ""; el.render();
+  const box = el.innerHTML;
+  ok("il pannello si apre", /class="upd-box"/.test(box));
+  ok("mostra le due versioni a confronto",
+     /INSTALLATA/.test(box) && /SU GITHUB/.test(box) && /c494284/.test(box));
+  ok("si può cercare, scaricare e basta, oppure installare e riavviare",
+     /data-upd-check/.test(box) && /data-upd-install="solo"/.test(box)
+     && /data-upd-install="riavvia"/.test(box));
+  ok("dice quanto tempo ci vuole prima di farlo partire",
+     /un paio di\s+minuti/.test(box.replace(/\s+/g, " ")) || /paio di minuti/.test(box.replace(/\s+/g, " ")));
+  ok("e c'è il link alle modifiche", /Vedi le modifiche su GitHub/.test(box));
+  ok("niente undefined nel pannello", !/>undefined</.test(box));
+  ok("i div del pannello sono bilanciati",
+     (box.match(/<div/g) || []).length === (box.match(/<\/div>/g) || []).length);
+
+  setUpd("off");
+  el._signature = ""; el.render();
+  ok("senza niente da installare resta comunque il riavvio a mano",
+     /data-upd-restart/.test(el.innerHTML) && !/data-upd-install/.test(el.innerHTML));
+  ok("e spiega che HACS non guarda GitHub in continuazione",
+     /non guarda GitHub in continuazione/.test(el.innerHTML));
+
+  delete states[UPD];
+  el._signature = ""; el.render();
+  ok("senza HACS il pannello lo dice invece di restare muto",
+     /non è stata installata con/.test(el.innerHTML) && /HACS/.test(el.innerHTML));
+
+  // --- installa e riavvia ---------------------------------------------------
+  setUpd("on", { latest_version: "c494284" });
+  let chiamate = [];
+  el._hass.callService = (d, sv, data) => { chiamate.push(d + "." + sv + ":" + (data && data.entity_id || "")); return Promise.resolve(); };
+
+  el._updBusy = ""; el._updDone = ""; el._updErr = "";
+  const p1 = el._updInstall("riavvia");
+  ok("mentre lavora il pannello non si lascia chiudere", el._updBusy === "install");
+  p1.then(() => {
+    ok("installa e POI riavvia, in quest'ordine",
+       chiamate.join("|") === "update.install:" + UPD + "|homeassistant.restart:", chiamate.join("|"));
+    ok("e alla fine non resta occupato", el._updBusy === "restart" || el._updBusy === "");
+
+    // solo scarica: nessun riavvio, e si dice che serve
+    chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+    el._updInstall("solo").then(() => {
+      ok("«solo scarica» non riavvia niente",
+         chiamate.join("|") === "update.install:" + UPD, chiamate.join("|"));
+      ok("ma avverte che entra in funzione al riavvio",
+         /al prossimo riavvio/.test(el._updDone), el._updDone);
+
+      // installazione fallita: nessun riavvio alla cieca
+      chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+      el._hass.callService = (d, sv) => {
+        chiamate.push(d + "." + sv);
+        return d === "update" ? Promise.reject(new Error("GitHub non risponde")) : Promise.resolve();
+      };
+      el._updInstall("riavvia").then(() => {
+        ok("se lo scaricamento fallisce NON si riavvia lo stesso",
+           chiamate.join("|") === "update.install", chiamate.join("|"));
+        ok("e il motivo si legge", el._updErr === "GitHub non risponde", el._updErr);
+        ok("il pannello torna utilizzabile", el._updBusy === "");
+
+        // il riavvio taglia la connessione: quello NON e' un guasto
+        el._updBusy = ""; el._updDone = ""; el._updErr = "";
+        el._hass.callService = () => Promise.reject(new Error("Connection lost"));
+        el._updRestart().then(() => {
+          ok("un riavvio che taglia la connessione non viene dato per fallito",
+             !el._updErr && /torna da sola/.test(el._updDone), el._updErr + " / " + el._updDone);
+
+          el._hass.callService = savedCS57;
+          delete states[UPD];
+          el._updOpen = false; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+          el._dashboard = savedDash57; el._pageIndex = savedIdx57;
+          el._selected = savedSel57; el._editing = savedEd57; el._signature = savedSig57;
+          el.render();
+          ok("stato ripristinato dopo la sezione 57", el._hass.callService === savedCS57);
+        });
+      });
+    });
+  });
+}
+
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
 {
   const savedReg49 = el._registry, savedSel49 = el._selected, savedDash49 = el._dashboard;
