@@ -2512,8 +2512,56 @@ console.log("\n== 28. GRAFICO CHE SEGUE LE STANZE ==");
   tc.max_series = 3;
   ok("il tetto delle linee è rispettato", el._trendSeries(tc).length === 3);
   tc.max_series = 99;
-  ok("il tetto assoluto è dodici, non di più", el._trendSeries(tc).length === 5);
+  ok("oltre il tetto assoluto non si va", el._trendSeries(tc).length === 5);
   tc.max_series = 8;
+
+  // 0.62.0: quello che NON viene disegnato si dichiara.
+  //
+  // Il difetto, visto sul suo mini PC: dodici grandezze scelte, otto
+  // disegnate, e la card che non diceva niente. Un grafico che mostra due
+  // terzi di quello che gli hai chiesto e tace non e' incompleto: e' falso,
+  // perche' chi lo guarda crede di vedere tutto.
+  tc.max_series = 3;
+  const cut3 = el._trendCut(tc);
+  ok("sa quante ne sta disegnando", cut3.disegnate === 3, JSON.stringify(cut3));
+  ok("e quante ne restano fuori", cut3.fuori === 2, JSON.stringify(cut3));
+  // La nota deve stare nel CORPO della card. Verificata sul sorgente perche'
+  // _trendBody esce prima se lo storico non e' ancora arrivato, e un test che
+  // passa solo quando i dati ci sono non sorveglia niente.
+  ok("la nota è agganciata al corpo della card, non lasciata nell'editor",
+     /\$\{this\._trendCutNote\(item\)\}/.test(src));
+  const nota3 = el._trendCutNote(tc);
+  ok("e lo scrive sulla card, non solo nell'editor",
+     /2<\/strong> grandezze scelte non sono disegnate/.test(nota3), nota3);
+  ok("dicendo anche dove si alza il limite",
+     /MASSIMO DI LINEE/.test(nota3) && /massimo è 3 linee/.test(nota3), nota3);
+  ok("al singolare non scrive «grandezze»",
+     (() => { tc.max_series = 4; const n = el._trendCutNote(tc);
+       tc.max_series = 3; return /1<\/strong> grandezza scelta non è disegnata/.test(n); })());
+  tc.max_series = 8;
+  ok("quando ci stanno tutte non dice niente", el._trendCutNote(tc) === "",
+     el._trendCutNote(tc));
+  ok("e il conto lo conferma",
+     el._trendCut(tc).fuori === 0 && el._trendCut(tc).sparite === 0);
+
+  // "non ci sta" e "non esiste piu'" sono due guasti diversi e due rimedi
+  // diversi: si contano separati, o l'utente alza il limite per sempre
+  // aspettando una linea che non tornera' mai.
+  {
+    const savedSrc = tc.source, savedSer = tc.series;
+    tc.source = "manual";
+    tc.series = [{ entity: "sensor.soggiorno_temp" }, { entity: "sensor.mai_esistita" },
+                 { entity: "sensor.nemmeno_questa" }];
+    const cutM = el._trendCut(tc);
+    ok("un'entità che Home Assistant non conosce più viene contata a parte",
+       cutM.sparite === 2 && cutM.fuori === 0, JSON.stringify(cutM));
+    ok("e la card dice che non esistono più, non che non ci stanno",
+       /non esistono più/.test(el._trendCutNote(tc))
+       && !/non sono disegnate/.test(el._trendCutNote(tc)), el._trendCutNote(tc));
+    tc.series = [{ entity: "sensor.soggiorno_temp" }];
+    ok("con l'elenco pulito la nota sparisce", el._trendCutNote(tc) === "");
+    tc.source = savedSrc; tc.series = savedSer;
+  }
 
   // -- follow a whole device_class --
   tc.source = "class"; tc.device_class = "humidity";

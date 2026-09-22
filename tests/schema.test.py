@@ -321,9 +321,9 @@ assert tr["hours"] == 168
 assert schema.normalize_item({"type": "trend", "hours": 9999}, 0)["hours"] == 720
 assert schema.normalize_item({"type": "trend", "hours": "sempre"}, 0)["hours"] == 24
 assert schema.normalize_item({"type": "trend"}, 0)["series"] == []
-# twelve lines is the hard ceiling on one cartesian plane
+# il tetto assoluto delle linee su un piano cartesiano
 assert len(schema.normalize_item({"type": "trend", "series": [
-    {"entity": f"sensor.s{i}"} for i in range(30)]}, 0)["series"]) == 12
+    {"entity": f"sensor.s{i}"} for i in range(30)]}, 0)["series"]) == schema.MAX_TREND_SERIES
 # where the lines come from: a snapshot, the discovered rooms, or a whole class
 assert schema.normalize_item({"type": "trend"}, 0)["source"] == "manual"
 assert schema.normalize_item({"type": "trend", "source": "comfort"}, 0)["source"] == "comfort"
@@ -333,7 +333,10 @@ assert schema.normalize_item({"type": "trend", "source": "boh"}, 0)["source"] ==
 assert schema.normalize_item({"type": "trend"}, 0)["device_class"] == "temperature"
 assert schema.normalize_item({"type": "trend", "device_class": "humidity"}, 0)["device_class"] == "humidity"
 assert schema.normalize_item({"type": "trend"}, 0)["max_series"] == 8
-assert schema.normalize_item({"type": "trend", "max_series": 99}, 0)["max_series"] == 12
+# Il tetto e' 20 e non 12: un mini PC con dodici core piu' i sensori dei
+# dischi supera la dozzina, e restare fuori per un solo posto e' assurdo.
+assert schema.MAX_TREND_SERIES == 20, schema.MAX_TREND_SERIES
+assert schema.normalize_item({"type": "trend", "max_series": 99}, 0)["max_series"] == schema.MAX_TREND_SERIES
 assert schema.normalize_item({"type": "trend", "max_series": 0}, 0)["max_series"] == 1
 assert schema.normalize_item({"type": "trend", "max_series": "sei"}, 0)["max_series"] == 8
 assert schema.normalize_item({"type": "trend", "y_min": "auto"}, 0)["y_min"] is None

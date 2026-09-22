@@ -4,6 +4,42 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.62.0] - 2026-09-22
+
+Il grafico «Storico a confronto» disegnava **otto** delle dodici grandezze
+scelte e non lo diceva. Un grafico che mostra due terzi di quello che gli hai
+chiesto e tace non è incompleto: è **falso**, perché chi lo guarda crede di
+vedere tutto.
+
+### Quello che non è disegnato adesso si dichiara
+Sotto il grafico compare una riga ambra con il conto esatto, e **due cause
+contate separatamente** — perché hanno due rimedi diversi:
+
+- *«3 grandezze scelte non sono disegnate: il massimo è 8 linee. Si alza in
+  MODIFICA → la card → MASSIMO DI LINEE.»*
+- *«2 non esistono più in Home Assistant.»*
+
+Tenerle insieme vorrebbe dire far alzare il limite per sempre a qualcuno che
+sta aspettando una linea che non tornerà mai.
+
+Prima l'avviso stava **solo nell'editor**, cioè nel posto in cui non guardi
+quando stai leggendo il grafico.
+
+### Il tetto passa da 12 a 20 linee
+Dodici era un numero tondo scelto per leggibilità, ed è sbagliato per il caso
+vero: un mini PC con **dodici core** più i sensori dei dischi supera la
+dozzina, e restare fuori per un posto è assurdo. La tavolozza passa a **venti
+tinte distinte**: quando i colori finiscono le linee si ripetono, e due
+grandezze diverse dello stesso colore sono peggio di una linea in meno.
+
+Il valore **predefinito resta 8**: oltre le otto un piano cartesiano smette di
+confrontare e comincia a nascondere. Ma è una scelta dell'utente, non un muro.
+
+### Verifiche
+11 asserzioni nuove (1532). Rimettendo i due difetti — la nota tolta dal corpo
+della card, e il conteggio di quelle tagliate azzerato — la suite fallisce
+rispettivamente 1 e 4 asserzioni.
+
 ## [0.61.0] - 2026-09-22
 
 Il pannello degli aggiornamenti diceva *«sei già all'ultima pubblicata»* mentre

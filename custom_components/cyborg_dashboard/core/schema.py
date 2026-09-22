@@ -78,7 +78,7 @@ SCHEMA_VERSION = 23
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
 #: quietly turn a chart into a hairball.
-MAX_TREND_SERIES = 12
+MAX_TREND_SERIES = 20
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,

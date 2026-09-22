@@ -1126,11 +1126,16 @@ function kelvinToHex(kelvin) {
 /** Line colours for a multi-series chart: distinct in hue, equal in weight. */
 const MAX_VEHICLES_JS = 8;
 
+// Venti tinte distinte, tutte abbastanza chiare da leggersi su fondo scuro.
+// Servono perche' un mini PC con dodici core piu' i sensori dei dischi supera
+// il dozzina tondo, e quando i colori finiscono le linee si ripetono: due
+// grandezze diverse dello stesso colore sono peggio di una linea in meno.
 const SERIES_COLORS = ["#00e5ff", "#ffd166", "#06d6a0", "#c77dff", "#ff8fab",
                        "#8ecae6", "#ff924c", "#a0e7a0", "#f4978e", "#b5e48c",
-                       "#7bdff2", "#e0aaff"];
+                       "#7bdff2", "#e0aaff", "#ffb703", "#90e0ef", "#cdb4db",
+                       "#fec89a", "#80ed99", "#ff99c8", "#9bf6ff", "#fdffb6"];
 /** Mirrors MAX_TREND_SERIES in core/schema.py — keep the two in step. */
-const MAX_TREND_SERIES = 12;
+const MAX_TREND_SERIES = 20;
 
 const TREND_RANGES = [
   // L'ultima ora c'e' perche' e' la finestra con cui si guarda una cosa che
@@ -7198,8 +7203,15 @@ class CyborgDashboard extends HTMLElement {
     return shown.length ? shown : all;
   }
 
-  _trendSeriesRaw(item) {
-    const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
+  /**
+   * Le linee della card, gia' tagliate al massimo scelto.
+   *
+   * Con `nocap` si ottiene l'elenco INTERO: serve a dire quante ne restano
+   * fuori. Un grafico che disegna otto delle dodici grandezze scelte e non lo
+   * dice non e' incompleto, e' falso - chi lo guarda crede di vedere tutto.
+   */
+  _trendSeriesRaw(item, nocap) {
+    const cap = nocap ? 9999 : Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
     const source = item.source || "manual";
     const live = (id) => this._hass.states[id];
 
@@ -7250,6 +7262,25 @@ class CyborgDashboard extends HTMLElement {
 
     const rows = Array.isArray(item.series) ? item.series : [];
     return rows.filter((r) => r && r.entity && live(r.entity)).slice(0, cap);
+  }
+
+  /**
+   * Quante grandezze restano fuori dal disegno, e perche'.
+   *
+   * Due cause diverse e due rimedi diversi, quindi due conti separati:
+   * `fuori` non ci stanno per il massimo di linee (si alza), `sparite` non
+   * esistono piu' in Home Assistant (si tolgono dall'elenco).
+   */
+  _trendCut(item) {
+    const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
+    const tutte = this._trendSeriesRaw(item, true);
+    const manuale = (item.source || "manual") === "manual";
+    const scelte = manuale && Array.isArray(item.series)
+      ? item.series.filter((r) => r && r.entity).length : tutte.length;
+    return { cap, scelte,
+      disegnate: Math.min(tutte.length, cap),
+      fuori: Math.max(0, tutte.length - cap),
+      sparite: Math.max(0, scelte - tutte.length) };
   }
 
   _loadTrend(item) {
@@ -7440,8 +7471,26 @@ class CyborgDashboard extends HTMLElement {
         <div class="tr-read" data-trend-read hidden></div>
       </div>
       ${this._seriesPicker === item.id ? this._trendPicker(item) : ""}
+      ${this._trendCutNote(item)}
       <div class="tr-legend">${legend}</div>
     </div>`;
+  }
+
+  /** Quello che non e' disegnato si dichiara sulla card, non solo nell'editor. */
+  _trendCutNote(item) {
+    const c = this._trendCut(item);
+    if (!c.fuori && !c.sparite) return "";
+    const pezzi = [];
+    if (c.fuori) {
+      pezzi.push(`<span><strong>${c.fuori}</strong> ${c.fuori === 1
+        ? "grandezza scelta non è disegnata" : "grandezze scelte non sono disegnate"}:
+        il massimo è ${c.cap} linee. Si alza in MODIFICA → la card → MASSIMO DI LINEE.</span>`);
+    }
+    if (c.sparite) {
+      pezzi.push(`<span><strong>${c.sparite}</strong> ${c.sparite === 1
+        ? "non esiste più" : "non esistono più"} in Home Assistant.</span>`);
+    }
+    return `<p class="tr-cut"><ha-icon icon="mdi:alert-outline"></ha-icon>${pezzi.join(" ")}</p>`;
   }
 
   // ------------------------------------------------------------- luci ---
@@ -17159,6 +17208,12 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .ef-dev.bridged strong{opacity:.75;font-style:italic}
 .ef-dev.bridged{border-left:2px dotted color-mix(in srgb,var(--accent) 60%,transparent)}
 .ef-n.bridged .ef-n-disc{border-style:dotted}
+/* Quello che il grafico NON disegna. Ambra e non rosso: non e' un guasto,
+   e' una scelta di configurazione che sta nascondendo dei dati. */
+.tr-cut{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:8px 0 0;
+  padding:8px 11px;border-radius:11px;font-size:11.5px;line-height:1.5;
+  background:rgba(255,194,77,.11);color:#ffc24d}
+.tr-cut>ha-icon{--mdc-icon-size:16px;flex-shrink:0}
 .tr-legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px}
 .tr-leg{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;text-align:left;
   background:rgba(255,255,255,.03);border:1px solid transparent;color:var(--primary-text-color)}
@@ -17313,7 +17368,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.61.0";
+const CYBORG_BUILD = "0.62.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
