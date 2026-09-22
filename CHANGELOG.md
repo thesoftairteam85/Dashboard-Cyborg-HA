@@ -4,55 +4,6 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
-## [0.58.0] - 2026-09-21
-
-*«La mappa 3D è terribile.»* Il difetto più grosso non era il 3D: era che una
-porta era un **lato intero** di tipo "porta". Una stanza con una porta aveva
-una parete di quattro metri fatta di porta, e una finestra era una parete di
-vetro. Ecco perché la pianta sembrava un diagramma e non una casa.
-
-### Le aperture sono buchi nel muro
-Porte, porte finestre, finestre, basculanti e passaggi ora sono **rettangoli
-ritagliati dentro un lato**. Il lato si spezza da solo nei pezzi di muro che
-restano: le due spalle ai fianchi, il **parapetto** sotto la finestra — il cui
-coronamento è il davanzale — e l'**architrave** sopra. Senza architrave una
-finestra sembra un taglio fino al tetto; senza parapetto sembra una porta.
-
-Dentro il vano sta il serramento: vetro con il montante centrale per le
-finestre, un'anta con la maniglia per le porte, le doghe per il basculante.
-Il **passaggio** non ne ha nessuno: è un vano, e si deve vedere attraverso.
-
-Con la luce accesa il vetro si illumina e **si vede da fuori**: guardando la
-casa dall'alto si capisce che c'è qualcuno in quella stanza prima di leggere
-qualunque etichetta.
-
-### Solo gli spigoli del vano sono accesi
-Prima ogni muro aveva il suo bordo luminoso su tutti i lati. Con sette pezzi
-per muro invece di uno, la stessa regola avrebbe trasformato la casa in una
-griglia di fil di ferro. Ora si accende solo la **spalletta**, cioè il taglio
-di muro che si affaccia sul vano: un pilastro fra due finestre ne ha due,
-quello all'angolo una sola. Tutto il resto è muro.
-
-### Si configurano dall'editor, non dal file
-Sotto ogni lato c'è un **+**. La prima apertura di un lato è una porta, dalla
-seconda in poi una finestra — è l'ordine in cui si costruisce davvero una
-stanza — e viene messa di fianco alle precedenti, non sopra. Quattro cursori:
-posizione lungo il lato, larghezza, davanzale, altezza. Trascinandoli si
-ridisegnano **solo i muri di quella stanza**: un ridisegno completo a ogni
-pixel sostituirebbe il cursore che si sta tenendo premuto e il trascinamento
-si interromperebbe da solo.
-
-Tutto in **percentuale del lato**, mai in centimetri: così le finestre restano
-al loro posto quando la stanza viene ridimensionata trascinando una maniglia.
-Dodici aperture per stanza, e al dodicesimo il **+** si spegne invece di non
-fare niente. Due aperture accavallate non si fondono: la seconda viene
-ignorata finché non la sposti — fonderle produrrebbe buchi che nessuno ha
-chiesto.
-
-### Verifiche
-Schema v23. 46 asserzioni nuove (1469) più 474 misurate in Chromium, con due
-scatti nuovi: la casa con le aperture e il suo editor.
-
 ## [0.57.0] - 2026-09-21
 
 Dal telefono la dashboard aveva i tic: la card si muoveva sotto il dito e
