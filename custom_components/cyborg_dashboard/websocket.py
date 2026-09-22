@@ -1,12 +1,17 @@
 """WebSocket API for Cyborg Dashboard."""
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.loader import async_get_integration
 
 from .core.storage import DashboardConflictError, DashboardStorage
 
@@ -23,6 +28,47 @@ TYPE_SCHEDULE = "cyborg_dashboard/schedule"
 TYPE_SCHEDULE_SET = "cyborg_dashboard/schedule/set"
 TYPE_RUN_FOR = "cyborg_dashboard/run_for"
 TYPE_RUN_CANCEL = "cyborg_dashboard/run_for/cancel"
+TYPE_RELEASE = "cyborg_dashboard/release"
+
+# Quanto vale una risposta di GitHub prima di richiederla. Dieci minuti: le
+# API pubbliche di GitHub danno 60 richieste l'ora per indirizzo IP, e questa
+# non e' l'unica cosa in casa che le usa. Il pulsante "CONTROLLA ORA" passa
+# `force` e salta la cache, perche' quando uno preme un pulsante si aspetta
+# che vada a guardare davvero.
+RELEASE_TTL = 600
+# Un errore si ricorda per un minuto: abbastanza da non martellare GitHub
+# mentre la linea e' giu', poco da non restare bloccati su un guasto passato.
+RELEASE_TTL_ERRORE = 60
+RELEASE_CACHE = "release_cache"
+
+
+def _repo_from_url(url: str) -> str:
+    """`owner/repo` da un URL di GitHub, stringa vuota se non lo e'.
+
+    Si legge dal manifest invece di scriverlo qui: chi fa un fork non deve
+    ritrovarsi il pannello che interroga il repository di qualcun altro.
+    """
+    match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", str(url or ""))
+    if not match:
+        return ""
+    nome = match.group(2)
+    if nome.endswith(".git"):
+        nome = nome[:-4]
+    return match.group(1) + "/" + nome
+
+
+def _clean_tag(tag: Any) -> str:
+    """`v0.60.0` e `0.60.0` sono la stessa versione: il confronto e' sul numero."""
+    testo = str(tag or "").strip()
+    return testo[1:] if testo[:1] in ("v", "V") else testo
+
+
+def _cache_fresh(entry: Any, now: float) -> bool:
+    """La risposta in cache vale ancora? Gli errori scadono molto prima."""
+    if not isinstance(entry, dict):
+        return False
+    ttl = RELEASE_TTL_ERRORE if entry.get("error") else RELEASE_TTL
+    return (now - float(entry.get("checked") or 0)) < ttl
 
 
 def async_register_websocket(hass: HomeAssistant) -> None:
@@ -54,6 +100,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_schedule_set)
     websocket_api.async_register_command(hass, _ws_run_for)
     websocket_api.async_register_command(hass, _ws_run_cancel)
+    websocket_api.async_register_command(hass, _ws_release)
 
 
 @websocket_api.websocket_command({"type": TYPE_GET})
@@ -253,3 +300,81 @@ def _ws_run_cancel(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     if msg["turn_off"]:
         sched.async_turn_off(msg["entity_id"])
     connection.send_result(msg["id"], {"cancelled": True})
+
+
+@websocket_api.websocket_command({
+    "type": TYPE_RELEASE,
+    vol.Optional("force"): bool,
+})
+@websocket_api.async_response
+async def _ws_release(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                      msg: dict[str, Any]) -> None:
+    """L'ultima release pubblicata su GitHub, chiesta a GitHub.
+
+    Perche' non basta l'entita' di HACS. HACS guarda GitHub sul proprio
+    orologio - dell'ordine della mezz'ora - e l'entita' `update.` riporta
+    quello che HACS ha in memoria, non quello che c'e' adesso. Risultato: il
+    pannello diceva "sei gia' all'ultima" mentre su GitHub c'era la versione
+    dopo. Un numero che non sta in piedi non si mostra: o si va a guardare, o
+    si dichiara che non si sa.
+
+    Qui si va a guardare. HACS resta quello che installa; la verita' su cosa
+    esiste la dice il posto dove il codice sta davvero.
+    """
+    now = time.time()
+    store = hass.data.setdefault(DOMAIN, {})
+    cached = store.get(RELEASE_CACHE)
+    if not msg.get("force") and _cache_fresh(cached, now):
+        connection.send_result(msg["id"], dict(cached, cached=True))
+        return
+
+    try:
+        integration = await async_get_integration(hass, DOMAIN)
+        manifest = dict(integration.manifest or {})
+    except Exception:  # noqa: BLE001 - senza manifest si risponde, non si esplode
+        manifest = {}
+    repo = _repo_from_url(manifest.get("documentation") or manifest.get("issue_tracker"))
+    result: dict[str, Any] = {
+        "tag": None,
+        "repo": repo,
+        # La versione che Home Assistant ha DAVVERO caricato: e' il termine di
+        # paragone giusto, perche' i file nuovi sul disco non sono ancora il
+        # codice in esecuzione finche' non si riavvia.
+        "loaded": str(manifest.get("version") or ""),
+        "checked": now,
+    }
+    if not repo:
+        result["error"] = "Nel manifest non c'e' un indirizzo GitHub da interrogare."
+        store[RELEASE_CACHE] = result
+        connection.send_result(msg["id"], result)
+        return
+
+    url = "https://api.github.com/repos/%s/releases/latest" % repo
+    try:
+        session = async_get_clientsession(hass)
+        async with asyncio.timeout(12):
+            async with session.get(url, headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }) as resp:
+                if resp.status == 404:
+                    # Repository senza nessuna release: non e' un guasto.
+                    result["note"] = "Su GitHub non c'e' ancora nessuna release."
+                elif resp.status == 403 or resp.status == 429:
+                    result["error"] = ("GitHub ha risposto «troppe richieste». "
+                                       "Riprova fra qualche minuto.")
+                elif resp.status != 200:
+                    result["error"] = "GitHub ha risposto %d." % resp.status
+                else:
+                    data = await resp.json()
+                    result["tag"] = _clean_tag(data.get("tag_name"))
+                    result["name"] = str(data.get("name") or "")
+                    result["url"] = str(data.get("html_url") or "")
+                    result["published"] = str(data.get("published_at") or "")
+    except asyncio.TimeoutError:
+        result["error"] = "GitHub non ha risposto in tempo."
+    except Exception as err:  # noqa: BLE001 - qualunque guasto di rete si racconta
+        result["error"] = "Non riesco a raggiungere GitHub: %s" % err
+
+    store[RELEASE_CACHE] = result
+    connection.send_result(msg["id"], result)

@@ -5158,7 +5158,9 @@ console.log("\n== 54. IL TELEFONO NON DEVE AVERE I TIC ==");
 // --- C. due schermi sulla stessa dashboard ----------------------------------
 // Gira in un microtask: cosi' non lascia i suoi stub addosso alle sezioni
 // sincrone che vengono dopo, e finisce comunque prima della catena a 30 ms.
-Promise.resolve().then(async () => {
+// La 57 si accoda a questa: tutte e due stubbano `el._hass`, e intrecciate
+// si rubano gli stub a vicenda durante gli `await`. Una dopo l'altra.
+const sez55 = Promise.resolve().then(async () => {
   console.log("\n== 55. DUE SCHERMI, UNA REVISIONE SOLA ==");
   const savedDash55 = el._dashboard, savedWS55 = el._hass.callWS;
   const savedRender55 = el.render, savedSig55 = el._signature, savedErr55 = el._error;
@@ -5449,46 +5451,85 @@ console.log("\n== 56. PORTE E FINESTRE SONO BUCHI NEL MURO ==");
 
 console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
 {
-  // "Non mi piace sta cosa che dopo aver avviato il cmd devo dipendere da te".
-  // Pubblicare una versione e non poterla installare senza chiedere a
-  // qualcuno vuol dire non aver finito il lavoro - vale per lui e a maggior
-  // ragione per un suo cliente, che HACS non sa nemmeno dove sia.
+  // Due difetti, uno dietro l'altro.
+  //
+  // Il primo: pubblicare una versione e non poterla installare senza chiedere
+  // a qualcuno. Risolto in 0.59.0 col pannello.
+  //
+  // Il secondo, scoperto usandolo: il pannello diceva "sei gia' all'ultima"
+  // mentre su GitHub c'era la versione dopo. Leggeva l'entita' di HACS, e
+  // HACS guarda GitHub sul proprio orologio - dell'ordine della mezz'ora.
+  // Adesso la domanda "cosa c'e' su GitHub" si fa A GITHUB.
   const savedDash57 = el._dashboard, savedIdx57 = el._pageIndex;
   const savedSel57 = el._selected, savedEd57 = el._editing, savedSig57 = el._signature;
-  const savedCS57 = el._hass.callService;
+  const savedCS57 = el._hass.callService, savedWS57 = el._hass.callWS;
+  const savedRel57 = el._release, savedPanels57 = el._hass.panels;
+  const BUILD = (/const CYBORG_BUILD = "([^"]+)"/.exec(src) || [, ""])[1];
 
   const UPD = "update.cyborg_dashboard_update";
   const setUpd = (state, attrs) => {
     states[UPD] = S(state, Object.assign({ friendly_name: "Cyborg Dashboard Update",
-      installed_version: "1674bfc", latest_version: "1674bfc", in_progress: false,
+      installed_version: BUILD, latest_version: BUILD, in_progress: false,
       release_url: "https://github.com/thesoftairteam85/Dashboard-Cyborg-HA" }, attrs || {}));
   };
+  // Quello che Home Assistant ha caricato: e' la versione "in esecuzione".
+  el._hass.panels = { "cyborg-dashboard": { config: { version: BUILD } } };
+
+  ok("v0.60.0 e 0.60.0 sono la stessa versione", el._verNum("v0.60.0") === "0.60.0");
+  ok("uno sha lungo si accorcia a sette caratteri",
+     el._verNum("c494284aaaaaaaaaaaaaaa") === "c494284", el._verNum("c494284aaaaaaaaaaaaaaa"));
+  ok("e un numero resta com'è", el._verNum("0.60.0") === "0.60.0");
 
   delete states[UPD];
-  ok("senza HACS non si inventa nessuna entità", el._updateEntity() === null
-     && el._updateInfo() === null);
+  el._release = null;
+  ok("senza HACS non si inventa nessuna entità", el._updateEntity() === null);
+  ok("ma l'informazione non sparisce: si sa che HACS non c'è",
+     el._updateInfo().hacs === false);
 
   setUpd("off");
   ok("l'entità di HACS viene trovata", el._updateEntity() === UPD, String(el._updateEntity()));
-
-  // A casa del cliente l'entity_id puo' essere un altro: si cerca per nome.
   delete states[UPD];
-  states["update.cyborg_dashboard_update_2"] = S("on", {
-    friendly_name: "Cyborg Dashboard Update", installed_version: "1674bfc",
-    latest_version: "c494284aaaaaaaaaaaaaaaaa", in_progress: false, release_url: "" });
+  states["update.cyborg_dashboard_update_2"] = S("off", {
+    friendly_name: "Cyborg Dashboard Update", installed_version: BUILD,
+    latest_version: BUILD, in_progress: false, release_url: "" });
   ok("con un entity_id diverso la si trova comunque, dal nome",
      el._updateEntity() === "update.cyborg_dashboard_update_2", String(el._updateEntity()));
-  const infoAlt = el._updateInfo();
-  ok("uno sha lungo viene accorciato a sette caratteri",
-     infoAlt.latest === "c494284", infoAlt.latest);
-  ok("e la versione nuova risulta in attesa", infoAlt.pending === true);
   delete states["update.cyborg_dashboard_update_2"];
+  setUpd("off");
+
+  // --- i quattro stati, e nessuno dei quattro e' una bugia -----------------
+  el._release = { tag: "v" + BUILD, checked: Date.now() / 1000, url: "https://x/rel" };
+  let u = el._updateInfo();
+  ok("alla pari con GitHub: nessun aggiornamento in attesa",
+     u.aggiornato === true && u.nuova === false && u.pending === false, JSON.stringify(u));
+
+  el._release = { tag: "9.9.9", checked: Date.now() / 1000, url: "https://x/rel" };
+  u = el._updateInfo();
+  ok("una versione più nuova su GitHub è un aggiornamento in attesa",
+     u.nuova === true && u.published === "9.9.9" && u.pending === true);
+
+  // scaricata ma non attiva: HACS ha i file, HA sta ancora eseguendo i vecchi
+  setUpd("off", { installed_version: "9.9.9", latest_version: "9.9.9" });
+  u = el._updateInfo();
+  ok("i file sul disco ma non in esecuzione: manca il riavvio",
+     u.daRiavviare === true, JSON.stringify({ d: u.onDisk, l: u.loaded }));
+  ok("e in quel caso non si propone di reinstallare", u.nuova === false);
+
+  // HACS a SHA di commit contro HA a numero di versione: due cose non
+  // confrontabili. Confrontarle vorrebbe dire "manca il riavvio" per sempre.
+  setUpd("off", { installed_version: "1674bfc", latest_version: "1674bfc" });
+  el._release = { tag: BUILD, checked: Date.now() / 1000 };
+  u = el._updateInfo();
+  ok("uno sha di commit non si confronta con un numero di versione",
+     u.daRiavviare === false, JSON.stringify({ d: u.onDisk, l: u.loaded }));
+  ok("e allora la risposta la da' GitHub, che sa parlare di versioni",
+     u.aggiornato === true);
 
   setUpd("off");
-  const info = el._updateInfo();
-  ok("senza niente di nuovo non c'è niente in attesa", info.pending === false);
-  ok("installata e pubblicata si leggono tutte e due",
-     info.installed === "1674bfc" && info.latest === "1674bfc", JSON.stringify(info));
+  el._release = { tag: null, checked: Date.now() / 1000, error: "GitHub non ha risposto in tempo." };
+  u = el._updateInfo();
+  ok("senza risposta da GitHub non si dichiara di essere aggiornati",
+     u.aggiornato === false && u.incerto === true, JSON.stringify(u));
 
   // --- la pastiglia in testata ---------------------------------------------
   el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
@@ -5496,99 +5537,187 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
       layout: { type: "grid", columns: 12, gap: 16 }, sections: [] }] };
   el._pageIndex = 0; el._selected = null; el._editing = false; el._updOpen = false;
   el._updBusy = ""; el._updDone = ""; el._updErr = "";
+  el._release = { tag: BUILD, checked: Date.now() / 1000 };
   el._signature = ""; el.render();
-  const calmo = el.innerHTML;
-  ok("la versione in testata è un pulsante", /data-upd-open/.test(calmo));
-  ok("ma finché non c'è niente da fare non si accende",
-     !/build-pill pending/.test(calmo));
-  ok("e il pannello degli aggiornamenti resta chiuso", !/class="upd-box"/.test(calmo));
+  ok("la versione in testata è un pulsante", /data-upd-open/.test(el.innerHTML));
+  ok("e con GitHub allineato non si accende", !/build-pill pending/.test(el.innerHTML));
 
-  setUpd("on", { latest_version: "c494284" });
+  el._release = { tag: "9.9.9", checked: Date.now() / 1000 };
   el._signature = ""; el.render();
-  const acceso = el.innerHTML;
-  ok("con una versione nuova la pastiglia si accende", /build-pill pending/.test(acceso));
-  ok("e lo dice a parole, non solo col colore", /AGGIORNAMENTO/.test(acceso));
-  ok("lo stato dell'aggiornamento è nella firma: la pastiglia si accende da sola",
-     /upd:1/.test(el._buildSignature()), el._buildSignature().slice(0, 80));
+  ok("con una versione nuova su GitHub la pastiglia si accende",
+     /build-pill pending/.test(el.innerHTML));
+  ok("e lo dice a parole, non solo col colore", /AGGIORNAMENTO/.test(el.innerHTML));
+  ok("lo stato è nella firma: la pastiglia si accende da sola",
+     /upd:1/.test(el._buildSignature()), el._buildSignature().slice(0, 70));
 
   // --- il pannello ----------------------------------------------------------
   el._updOpen = true; el._signature = ""; el.render();
-  const box = el.innerHTML;
+  let box = el.innerHTML;
   ok("il pannello si apre", /class="upd-box"/.test(box));
-  ok("mostra le due versioni a confronto",
-     /INSTALLATA/.test(box) && /SU GITHUB/.test(box) && /c494284/.test(box));
-  ok("si può cercare, scaricare e basta, oppure installare e riavviare",
-     /data-upd-check/.test(box) && /data-upd-install="solo"/.test(box)
-     && /data-upd-install="riavvia"/.test(box));
+  ok("confronta quello che è IN ESECUZIONE con quello che c'è SU GITHUB",
+     /IN ESECUZIONE/.test(box) && /SU GITHUB/.test(box) && /9\.9\.9/.test(box));
+  ok("l'azione principale è installare e riavviare", /data-upd-install="riavvia"/.test(box));
+  ok("e si può anche solo scaricare", /data-upd-install="solo"/.test(box));
+  ok("si può sempre andare a controllare adesso", /data-upd-check/.test(box));
   ok("dice quanto tempo ci vuole prima di farlo partire",
-     /un paio di\s+minuti/.test(box.replace(/\s+/g, " ")) || /paio di minuti/.test(box.replace(/\s+/g, " ")));
-  ok("e c'è il link alle modifiche", /Vedi le modifiche su GitHub/.test(box));
+     /paio di minuti/.test(box.replace(/\s+/g, " ")));
   ok("niente undefined nel pannello", !/>undefined</.test(box));
   ok("i div del pannello sono bilanciati",
      (box.match(/<div/g) || []).length === (box.match(/<\/div>/g) || []).length);
 
-  setUpd("off");
+  // aggiornato: si dichiara il FATTO, con l'ora in cui è stato verificato
+  el._release = { tag: BUILD, checked: Date.now() / 1000 };
   el._signature = ""; el.render();
-  ok("senza niente da installare resta comunque il riavvio a mano",
-     /data-upd-restart/.test(el.innerHTML) && !/data-upd-install/.test(el.innerHTML));
-  ok("e spiega che HACS non guarda GitHub in continuazione",
-     /non guarda GitHub in continuazione/.test(el.innerHTML));
+  box = el.innerHTML;
+  ok("quando è davvero all'ultima lo dice, e dice quando l'ha chiesto a GitHub",
+     /l'ultima pubblicata su/.test(box) && /chiesto a GitHub alle/.test(box));
+  ok("e allora nessun pulsante principale acceso: non c'è niente da fare",
+     !/data-upd-install/.test(box));
+  ok("ma il riavvio a mano resta disponibile", /data-upd-restart/.test(box));
+
+  // GitHub muto: NON si dichiara di essere aggiornati
+  el._release = { tag: null, checked: Date.now() / 1000, error: "GitHub non ha risposto in tempo." };
+  el._signature = ""; el.render();
+  box = el.innerHTML;
+  ok("se GitHub non risponde il pannello NON dice «sei all'ultima»",
+     !/l'ultima pubblicata su/.test(box), box.slice(box.indexOf("upd-body"), box.indexOf("upd-body") + 300));
+  ok("lo dichiara, e dice che quello che mostra viene da HACS",
+     /Non sono riuscito a chiedere a GitHub/.test(box) && /HACS/.test(box));
+  ok("spiegando che HACS può essere indietro", /ogni mezz'ora/.test(box));
+
+  // manca il riavvio: quello diventa l'azione principale
+  setUpd("off", { installed_version: "9.9.9", latest_version: "9.9.9" });
+  el._release = { tag: "9.9.9", checked: Date.now() / 1000 };
+  el._signature = ""; el.render();
+  box = el.innerHTML;
+  ok("coi file già sul disco l'azione principale è il riavvio",
+     /data-upd-restart/.test(box) && !/data-upd-install/.test(box));
+  ok("e spiega perché non basta ricaricare",
+     /già sul disco/.test(box) && /riavvio/.test(box));
 
   delete states[UPD];
+  el._release = { tag: "9.9.9", checked: Date.now() / 1000 };
   el._signature = ""; el.render();
   ok("senza HACS il pannello lo dice invece di restare muto",
-     /non è stata installata con/.test(el.innerHTML) && /HACS/.test(el.innerHTML));
+     /non è stata installata con/.test(el.innerHTML));
+  ok("e non offre di installare qualcosa che non saprebbe installare",
+     !/data-upd-install/.test(el.innerHTML));
 
-  // --- installa e riavvia ---------------------------------------------------
-  setUpd("on", { latest_version: "c494284" });
-  let chiamate = [];
-  el._hass.callService = (d, sv, data) => { chiamate.push(d + "." + sv + ":" + (data && data.entity_id || "")); return Promise.resolve(); };
+  // Lo stato SINCRONO si rimette subito: quello che segue e' differito.
+  el._updOpen = false;
+  el._dashboard = savedDash57; el._pageIndex = savedIdx57;
+  el._selected = savedSel57; el._editing = savedEd57; el._signature = savedSig57;
 
-  el._updBusy = ""; el._updDone = ""; el._updErr = "";
-  const p1 = el._updInstall("riavvia");
-  ok("mentre lavora il pannello non si lascia chiudere", el._updBusy === "install");
-  p1.then(() => {
-    ok("installa e POI riavvia, in quest'ordine",
-       chiamate.join("|") === "update.install:" + UPD + "|homeassistant.restart:", chiamate.join("|"));
-    ok("e alla fine non resta occupato", el._updBusy === "restart" || el._updBusy === "");
+  // --- chiedere a GitHub ----------------------------------------------------
+  sez55.then(() => {
+  console.log("\n== 57 (seguito). CHIEDERE A GITHUB, E INSTALLARE ==");
+  // Si ricattura QUI quello che va rimesso a posto: le sezioni sincrone che
+  // seguono la 57 hanno gia' messo il loro dashboard, e rimettere quello
+  // catturato prima glielo porterebbe via sotto i piedi. E' esattamente il
+  // difetto "un test che sistema lo stato di un altro".
+  const dash57b = el._dashboard, idx57b = el._pageIndex;
+  const sel57b = el._selected, ed57b = el._editing, sig57b = el._signature;
+  setUpd("off");
+  let chiesto = null;
+  el._hass.callWS = (m) => {
+    if (m && m.type === "cyborg_dashboard/release") {
+      chiesto = m;
+      return Promise.resolve({ tag: "v9.9.9", checked: Date.now() / 1000, url: "https://x" });
+    }
+    return savedWS57.call(el._hass, m);
+  };
+  el._release = null; el._releasePending = false;
+  const pRel = el._loadRelease(true);
+  ok("il controllo chiede all'integrazione, non all'entità di HACS",
+     chiesto && chiesto.type === "cyborg_dashboard/release");
+  ok("e con `force` salta la cache del backend", chiesto && chiesto.force === true);
 
-    // solo scarica: nessun riavvio, e si dice che serve
-    chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
-    el._updInstall("solo").then(() => {
-      ok("«solo scarica» non riavvia niente",
-         chiamate.join("|") === "update.install:" + UPD, chiamate.join("|"));
-      ok("ma avverte che entra in funzione al riavvio",
-         /al prossimo riavvio/.test(el._updDone), el._updDone);
+  pRel.then(() => {
+    ok("la risposta di GitHub diventa la versione pubblicata",
+       el._updateInfo().published === "9.9.9", JSON.stringify(el._release));
 
-      // installazione fallita: nessun riavvio alla cieca
-      chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
-      el._hass.callService = (d, sv) => {
-        chiamate.push(d + "." + sv);
-        return d === "update" ? Promise.reject(new Error("GitHub non risponde")) : Promise.resolve();
+    // l'integrazione non risponde: non si inventa un esito
+    el._hass.callWS = () => Promise.reject(new Error("integrazione non registrata"));
+    el._release = null; el._releasePending = false;
+    el._loadRelease(true).then(() => {
+      ok("se l'integrazione non risponde lo si registra come incertezza, non come «tutto ok»",
+         el._updateInfo().incerto === true && /integrazione/.test(el._release.error || ""),
+         JSON.stringify(el._release));
+
+      // --- installa e riavvia -------------------------------------------------
+      el._hass.callWS = savedWS57;
+      el._release = { tag: "9.9.9", checked: Date.now() / 1000 };
+      setUpd("on", { latest_version: "9.9.9" });
+      let chiamate = [];
+      el._hass.callService = (d, sv, data) => {
+        chiamate.push(d + "." + sv + ":" + ((data && data.entity_id) || ""));
+        return Promise.resolve();
       };
-      el._updInstall("riavvia").then(() => {
-        ok("se lo scaricamento fallisce NON si riavvia lo stesso",
-           chiamate.join("|") === "update.install", chiamate.join("|"));
-        ok("e il motivo si legge", el._updErr === "GitHub non risponde", el._updErr);
-        ok("il pannello torna utilizzabile", el._updBusy === "");
+      el._updBusy = ""; el._updDone = ""; el._updErr = "";
+      const p1 = el._updInstall("riavvia");
+      ok("mentre lavora il pannello non si lascia chiudere", el._updBusy === "install");
+      p1.then(() => {
+        ok("installa e POI riavvia, in quest'ordine",
+           chiamate.join("|") === "update.install:" + UPD + "|homeassistant.restart:",
+           chiamate.join("|"));
 
-        // il riavvio taglia la connessione: quello NON e' un guasto
-        el._updBusy = ""; el._updDone = ""; el._updErr = "";
-        el._hass.callService = () => Promise.reject(new Error("Connection lost"));
-        el._updRestart().then(() => {
-          ok("un riavvio che taglia la connessione non viene dato per fallito",
-             !el._updErr && /torna da sola/.test(el._updDone), el._updErr + " / " + el._updDone);
+        chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+        el._updInstall("solo").then(() => {
+          ok("«solo scarica» non riavvia niente",
+             chiamate.join("|") === "update.install:" + UPD, chiamate.join("|"));
+          ok("ma avverte che entra in funzione al riavvio",
+             /al prossimo riavvio/.test(el._updDone), el._updDone);
 
-          el._hass.callService = savedCS57;
-          delete states[UPD];
-          el._updOpen = false; el._updBusy = ""; el._updDone = ""; el._updErr = "";
-          el._dashboard = savedDash57; el._pageIndex = savedIdx57;
-          el._selected = savedSel57; el._editing = savedEd57; el._signature = savedSig57;
-          el.render();
-          ok("stato ripristinato dopo la sezione 57", el._hass.callService === savedCS57);
+          // "No update available" NON e' un guasto: e' la risposta
+          chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+          el._hass.callService = (d, sv) => {
+            chiamate.push(d + "." + sv);
+            return d === "update"
+              ? Promise.reject(new Error("No update available for Cyborg Dashboard"))
+              : Promise.resolve();
+          };
+          el._updInstall("riavvia").then(() => {
+            ok("«niente da aggiornare» viene riportato come risposta, non come errore",
+               !el._updErr && /niente di nuovo/.test(el._updDone),
+               el._updErr + " / " + el._updDone);
+            ok("e in quel caso non si riavvia",
+               chiamate.join("|") === "update.install", chiamate.join("|"));
+
+            // un guasto vero resta un guasto
+            chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+            el._hass.callService = (d, sv) => {
+              chiamate.push(d + "." + sv);
+              return d === "update" ? Promise.reject(new Error("GitHub non risponde")) : Promise.resolve();
+            };
+            el._updInstall("riavvia").then(() => {
+              ok("se lo scaricamento fallisce NON si riavvia lo stesso",
+                 chiamate.join("|") === "update.install", chiamate.join("|"));
+              ok("e il motivo si legge", el._updErr === "GitHub non risponde", el._updErr);
+              ok("il pannello torna utilizzabile", el._updBusy === "");
+
+              // il riavvio taglia la connessione: quello NON e' un guasto
+              el._updBusy = ""; el._updDone = ""; el._updErr = "";
+              el._hass.callService = () => Promise.reject(new Error("Connection lost"));
+              el._updRestart().then(() => {
+                ok("un riavvio che taglia la connessione non viene dato per fallito",
+                   !el._updErr && /torna da sola/.test(el._updDone),
+                   el._updErr + " / " + el._updDone);
+
+                el._hass.callService = savedCS57; el._hass.callWS = savedWS57;
+                el._hass.panels = savedPanels57;
+                delete states[UPD];
+                el._release = savedRel57; el._releasePending = false;
+                el._updOpen = false; el._updBusy = ""; el._updDone = ""; el._updErr = "";
+                el._dashboard = dash57b; el._pageIndex = idx57b;
+                el._selected = sel57b; el._editing = ed57b; el._signature = sig57b;
+                ok("stato ripristinato dopo la sezione 57", el._hass.callService === savedCS57);
+              });
+            });
+          });
         });
       });
     });
+  });
   });
 }
 

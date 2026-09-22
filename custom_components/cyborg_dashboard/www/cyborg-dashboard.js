@@ -2254,48 +2254,84 @@ class CyborgDashboard extends HTMLElement {
     const u = this._updateInfo();
     const busy = this._updBusy || "";
     const done = this._updDone || "";
-    const body = !u
-      ? `<p class="upd-none">Non trovo l'aggiornamento di Cyborg in Home Assistant.
-           Vuol dire che questa copia non è stata installata con <strong>HACS</strong>:
-           in quel caso i file si sostituiscono a mano e si riavvia Home Assistant.</p>`
-      : `<div class="upd-vers">
-           <div><small>INSTALLATA</small><strong>${esc(u.installed || "?")}</strong></div>
-           <ha-icon icon="mdi:arrow-right"></ha-icon>
-           <div class="${u.pending ? "new" : ""}"><small>SU GITHUB</small><strong>${esc(u.latest || "?")}</strong></div>
-         </div>
-         ${u.pending
-           ? `<p>C'è una versione nuova. <strong>Installa e riavvia</strong> scarica il
-                codice da GitHub e poi riavvia Home Assistant: ci vogliono un paio di
-                minuti, durante i quali la pagina resta ferma e poi torna da sola.</p>`
-           : `<p>Sei alla versione pubblicata più recente che Home Assistant conosce.
-                Se hai appena pubblicato qualcosa, <strong>cerca aggiornamenti</strong>:
-                HACS non guarda GitHub in continuazione.</p>`}
-         ${u.url ? `<a class="upd-link" href="${esc(u.url)}" target="_blank" rel="noreferrer">
-           <ha-icon icon="mdi:open-in-new"></ha-icon> Vedi le modifiche su GitHub</a>` : ""}`;
-    const msg = busy === "check" ? "Chiedo a HACS che cosa c'è su GitHub..."
+    const ora = u.checked
+      ? new Date(u.checked).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+      : "";
+    const box = (etichetta, valore, cls) => `<div class="${cls || ""}">
+        <small>${esc(etichetta)}</small><strong>${esc(valore || "—")}</strong></div>`;
+    // Tre numeri diversi, e vanno detti come tre cose diverse. Il confronto
+    // che conta e' fra quello che Home Assistant esegue e quello che c'e' su
+    // GitHub: il disco e' solo la stazione intermedia.
+    const versioni = `<div class="upd-vers">
+        ${box("IN ESECUZIONE", u.loaded)}
+        <ha-icon icon="mdi:arrow-right"></ha-icon>
+        ${box("SU GITHUB", u.published, u.nuova ? "new" : "")}
+      </div>`;
+    const testo = u.daRiavviare
+      ? `<p>I file della <strong>${esc(u.onDisk)}</strong> sono già sul disco, ma Home
+           Assistant sta ancora eseguendo la <strong>${esc(u.loaded)}</strong>.
+           Manca solo il riavvio: Python non rilegge un modulo già caricato in memoria.</p>`
+      : u.nuova
+        ? `<p>C'è la <strong>${esc(u.published)}</strong>. <strong>Installa e riavvia</strong>
+             scarica il codice da GitHub e poi riavvia Home Assistant: ci vogliono un paio
+             di minuti, durante i quali la pagina resta ferma e poi torna da sola.</p>`
+        : u.aggiornato
+          ? `<p>Sei alla <strong>${esc(u.loaded)}</strong>, ed è l'ultima pubblicata su
+               GitHub${ora ? ` — chiesto a GitHub alle <strong>${esc(ora)}</strong>` : ""}.</p>`
+          : u.nota
+            ? `<p>${esc(u.nota)} Finché non ce n'è una, Home Assistant non ha un numero di
+                 versione da confrontare.</p>`
+            : `<p class="upd-none">Non sono riuscito a chiedere a GitHub qual è l'ultima
+                 versione${u.errore ? `: ${esc(u.errore)}` : "."} Quello che segue è quanto
+                 risulta a <strong>HACS</strong>, che guarda GitHub per conto suo — più o meno
+                 ogni mezz'ora — quindi può essere indietro:
+                 <strong>${esc(u.onDisk || "non lo so")}</strong>.</p>`;
+    const senzaHacs = !u.hacs
+      ? `<p class="upd-none">In Home Assistant non trovo l'aggiornamento di Cyborg: questa
+           copia non è stata installata con <strong>HACS</strong>, quindi i file vanno
+           sostituiti a mano e poi si riavvia.</p>`
+      : "";
+    const cache = u.loaded && u.running && u.loaded !== u.running
+      ? `<p class="upd-err"><ha-icon icon="mdi:reload-alert"></ha-icon>
+           Questa pagina sta eseguendo la ${esc(u.running)} mentre Home Assistant ha caricato
+           la ${esc(u.loaded)}: svuota la cache del browser.</p>`
+      : "";
+    const msg = busy === "check" ? "Chiedo a GitHub qual è l'ultima versione..."
       : busy === "install" ? "Scarico la versione nuova. Non chiudere la pagina."
       : busy === "restart" ? "Home Assistant si sta riavviando. La pagina torna da sola fra un paio di minuti."
       : "";
+    // Un pulsante principale per volta, e solo quando c'e' davvero qualcosa
+    // da fare: un'azione principale sempre accesa smette di voler dire niente.
+    const principale = u.daRiavviare
+      ? `<button data-upd-restart ${busy ? "disabled" : ""}>
+           <ha-icon icon="mdi:restart"></ha-icon> RIAVVIA HOME ASSISTANT</button>`
+      : u.nuova && u.hacs
+        ? `<button data-upd-install="riavvia" ${busy ? "disabled" : ""}>
+             <ha-icon icon="mdi:package-down"></ha-icon> INSTALLA E RIAVVIA</button>` : "";
     return `<div class="upd-back" data-upd-close></div>
       <div class="upd-box" role="dialog" aria-label="Aggiornamenti">
         <header><ha-icon icon="mdi:package-variant"></ha-icon><strong>AGGIORNAMENTI</strong>
           <button class="mini" data-upd-close title="Chiudi"><ha-icon icon="mdi:close"></ha-icon></button></header>
         <div class="upd-body">
-          ${body}
+          ${versioni}
+          ${testo}
+          ${cache}
+          ${senzaHacs}
+          ${u.url ? `<a class="upd-link" href="${esc(u.url)}" target="_blank" rel="noreferrer">
+            <ha-icon icon="mdi:open-in-new"></ha-icon> Vedi le modifiche su GitHub</a>` : ""}
           ${msg ? `<p class="upd-busy"><ha-icon icon="mdi:progress-clock"></ha-icon> ${esc(msg)}</p>` : ""}
           ${done ? `<p class="upd-done"><ha-icon icon="mdi:check-circle-outline"></ha-icon> ${esc(done)}</p>` : ""}
           ${this._updErr ? `<p class="upd-err"><ha-icon icon="mdi:alert-outline"></ha-icon> ${esc(this._updErr)}</p>` : ""}
         </div>
         <footer>
+          ${principale}
           <button class="secondary" data-upd-check ${busy ? "disabled" : ""}>
-            <ha-icon icon="mdi:cloud-search-outline"></ha-icon> CERCA AGGIORNAMENTI</button>
-          ${u && u.pending ? `
+            <ha-icon icon="mdi:cloud-search-outline"></ha-icon> CONTROLLA ORA</button>
+          ${u.nuova && u.hacs ? `
             <button class="secondary" data-upd-install="solo" ${busy ? "disabled" : ""}>
-              <ha-icon icon="mdi:download"></ha-icon> SOLO SCARICA</button>
-            <button data-upd-install="riavvia" ${busy ? "disabled" : ""}>
-              <ha-icon icon="mdi:package-down"></ha-icon> INSTALLA E RIAVVIA</button>` : `
-            <button class="secondary" data-upd-restart ${busy ? "disabled" : ""}
-              title="Serve quando hai scelto «solo scarica»: il codice nuovo entra in funzione al riavvio">
+              <ha-icon icon="mdi:download"></ha-icon> SOLO SCARICA</button>` : ""}
+          ${u.daRiavviare ? "" : `
+            <button class="secondary" data-upd-restart ${busy ? "disabled" : ""}>
               <ha-icon icon="mdi:restart"></ha-icon> RIAVVIA HOME ASSISTANT</button>`}
         </footer>
       </div>`;
@@ -2312,7 +2348,17 @@ class CyborgDashboard extends HTMLElement {
       // sorvegliare `in_progress`, che serve solo a chi disegna una barra.
       await this._hass.callService("update", "install", { entity_id: u.id });
     } catch (err) {
-      this._updBusy = ""; this._updErr = (err && err.message) || "Installazione non riuscita";
+      const testo = (err && err.message) || "Installazione non riuscita";
+      this._updBusy = "";
+      // Home Assistant risponde "No update available" quando, andando a
+      // guardare, scopre che non c'era niente da scaricare. Non e' un guasto:
+      // e' la risposta alla domanda, e va detta come tale.
+      if (/no update available/i.test(testo)) {
+        this._updDone = "Ho guardato: non c'era niente di nuovo da scaricare.";
+        this._loadRelease(true);
+      } else {
+        this._updErr = testo;
+      }
       this._touch(true); return;
     }
     if (mode !== "riavvia") {
@@ -2320,6 +2366,7 @@ class CyborgDashboard extends HTMLElement {
       this._updDone = "Scaricata. Entra in funzione al prossimo riavvio di Home Assistant.";
       this._touch(true); return;
     }
+    this._updDone = "";
     await this._updRestart();
   }
 
@@ -2342,24 +2389,87 @@ class CyborgDashboard extends HTMLElement {
       && /cyborg/i.test(String((st[id].attributes || {}).friendly_name || ""))) || null;
   }
 
+  /** `v0.60.0` e `0.60.0` sono la stessa versione: si confronta il numero. */
+  _verNum(v) {
+    const t = String(v || "").trim();
+    const senzaV = /^v\d/i.test(t) ? t.slice(1) : t;
+    // Uno SHA di commit non e' un numero di versione: si accorcia e basta.
+    return senzaV.length > 12 ? senzaV.slice(0, 7) : senzaV;
+  }
+
   /**
-   * Cosa c'e' da sapere sull'aggiornamento, o null se HACS non c'e'.
+   * Cosa c'e' da sapere sull'aggiornamento.
    *
-   * `installed`/`latest` sono quello che dice HACS: senza Release taggate su
-   * GitHub sono SHA di commit, non numeri di versione. Si mostrano lo stesso,
-   * accorciati, perche' "diverso da prima" e' l'informazione che serve.
+   * Tre numeri, e sono tre cose diverse. Confonderli e' stato il difetto:
+   *
+   *   running    la versione che sta girando in questo browser (CYBORG_BUILD)
+   *   loaded     quella che Home Assistant ha caricato (dal manifest)
+   *   published  quella che c'e' su GitHub ADESSO, chiesta a GitHub
+   *
+   * `installed` di HACS non compare piu' come fonte di verita': HACS guarda
+   * GitHub sul proprio orologio, e l'entita' `update.` riporta quello che
+   * HACS ha in memoria. Il pannello diceva "sei gia' all'ultima" mentre su
+   * GitHub c'era la versione dopo. Resta come ripiego quando GitHub non
+   * risponde, e allora lo si dichiara invece di spacciarlo per un fatto.
    */
   _updateInfo() {
     const id = this._updateEntity();
-    if (!id) return null;
-    const st = this._hass.states[id];
-    if (!st) return null;
-    const a = st.attributes || {};
-    const short = (v) => { const t = String(v || ""); return t.length > 12 ? t.slice(0, 7) : t; };
-    return { id, pending: st.state === "on", busy: !!a.in_progress,
-      installed: short(a.installed_version), latest: short(a.latest_version),
+    const st = id ? this._hass.states[id] : null;
+    const a = (st && st.attributes) || {};
+    const rel = this._release || null;
+    const running = this._verNum(CYBORG_BUILD);
+    const loaded = this._verNum(this._serverVersion()) || running;
+    const onDisk = this._verNum(a.installed_version);
+    const published = rel && rel.tag ? this._verNum(rel.tag) : "";
+    const info = {
+      id, hacs: !!id, rel, running, loaded, onDisk, published,
+      busy: !!a.in_progress,
       pct: typeof a.update_percentage === "number" ? a.update_percentage : null,
-      url: String(a.release_url || "") };
+      url: (rel && rel.url) || String(a.release_url || ""),
+      checked: rel && rel.checked ? rel.checked * 1000 : 0,
+      errore: (rel && rel.error) || "",
+      nota: (rel && rel.note) || "",
+    };
+    // I file nuovi sono gia' sul disco ma Home Assistant sta ancora eseguendo
+    // i vecchi: e' lo stato in cui si finisce dopo "solo scarica", ed e'
+    // l'unico in cui la cosa giusta da fare e' riavviare e basta.
+    //
+    // Si pretende che SIANO DUE NUMERI DI VERSIONE. Finche' un repository non
+    // ha release, HACS lavora a SHA di commit: confrontare `1674bfc` con
+    // `0.60.0` da' "diverso" per sempre, e il pannello resterebbe a dire
+    // "manca il riavvio" a vita. Due cose non confrontabili non si
+    // confrontano: si ignorano.
+    const numero = (v) => /^\d+\.\d+\.\d+/.test(v);
+    info.daRiavviare = !!(numero(onDisk) && numero(loaded) && onDisk !== loaded);
+    // C'e' una versione nuova su GitHub che non e' ne' in esecuzione ne' sul
+    // disco in attesa di riavvio.
+    info.nuova = !!(published && published !== loaded && !info.daRiavviare);
+    info.aggiornato = !!(published && published === loaded && !info.daRiavviare);
+    // Senza risposta da GitHub non si dichiara niente: si dice che non si sa.
+    info.incerto = !published && !info.daRiavviare;
+    info.pending = info.nuova || info.daRiavviare;
+    return info;
+  }
+
+  /**
+   * Chiede all'integrazione qual e' l'ultima release su GitHub.
+   *
+   * `force` salta la cache di dieci minuti del backend: quando uno preme un
+   * pulsante si aspetta che vada a guardare davvero.
+   */
+  async _loadRelease(force) {
+    if (this._releasePending) return;
+    this._releasePending = true;
+    try {
+      const res = await this._hass.callWS({ type: "cyborg_dashboard/release", force: !!force });
+      this._release = res || null;
+    } catch (err) {
+      this._release = { tag: null, checked: Date.now() / 1000,
+        error: (err && err.message) || "L'integrazione non risponde" };
+    }
+    this._releasePending = false;
+    this._signature = "";
+    this.render();
   }
 
   _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
@@ -2552,6 +2662,11 @@ class CyborgDashboard extends HTMLElement {
       const res = await this._hass.callWS({ type: "cyborg_dashboard/get" });
       this._dashboard = res.dashboard;
       this._error = "";
+      // Una volta per caricamento di pagina si chiede a GitHub qual e'
+      // l'ultima versione: e' quello che fa accendere la pastiglia in testata
+      // senza che nessuno apra niente. Il backend tiene la risposta dieci
+      // minuti, quindi due schede aperte non fanno due richieste.
+      if (!this._release && !this._releasePending) this._loadRelease(false);
     } catch (err) {
       this._error = "Impossibile caricare la dashboard";
       this._dashboard = { version: 3, revision: 0, theme: { accent: "#00e5ff" },
@@ -12417,6 +12532,7 @@ class CyborgDashboard extends HTMLElement {
     const updOpen = q("[data-upd-open]");
     if (updOpen) updOpen.onclick = () => {
       this._updOpen = true; this._updErr = ""; this._updDone = ""; this._touch(true);
+      if (!this._release) this._loadRelease(false);
     };
     all("[data-upd-close]").forEach((el) => {
       el.onclick = () => {
@@ -12428,18 +12544,25 @@ class CyborgDashboard extends HTMLElement {
     });
     const updCheck = q("[data-upd-check]");
     if (updCheck) updCheck.onclick = async () => {
-      const u = this._updateInfo();
-      if (!u || this._updBusy) return;
+      if (this._updBusy) return;
       this._updErr = ""; this._updDone = ""; this._updBusy = "check"; this._touch(true);
-      try {
-        await this._hass.callService("homeassistant", "update_entity", { entity_id: u.id });
-        const after = this._updateInfo();
-        this._updDone = after && after.pending
-          ? "C'è una versione nuova."
-          : "Nessuna versione nuova: sei già all'ultima pubblicata.";
-      } catch (err) {
-        this._updErr = (err && err.message) || "Non sono riuscito a interrogare HACS";
+      // Si chiede a GITHUB, non a HACS: HACS riporta quello che ha in memoria
+      // dall'ultimo giro suo, e rispondere "sei all'ultima" sulla scorta di
+      // un dato vecchio di mezz'ora e' esattamente il difetto da cui si parte.
+      await this._loadRelease(true);
+      // ...e gli si fa anche rileggere l'entita', cosi' se HACS nel frattempo
+      // si e' accorto di qualcosa il pulsante di installazione compare subito.
+      const u0 = this._updateInfo();
+      if (u0.hacs) {
+        try {
+          await this._hass.callService("homeassistant", "update_entity", { entity_id: u0.id });
+        } catch (err) { /* e' un di piu': se fallisce, GitHub ha gia' risposto */ }
       }
+      const u = this._updateInfo();
+      this._updDone = u.daRiavviare ? "I file nuovi ci sono già: manca il riavvio."
+        : u.nuova ? "C'è la " + u.published + "."
+        : u.aggiornato ? "Chiesto a GitHub: sei all'ultima pubblicata."
+        : "";
       this._updBusy = ""; this._touch(true);
     };
     all("[data-upd-install]").forEach((el) => {
@@ -17190,7 +17313,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.60.0";
+const CYBORG_BUILD = "0.61.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

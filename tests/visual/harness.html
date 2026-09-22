@@ -553,8 +553,13 @@ window.__mount=(dash,opts)=>{
           el._hass.states["update.cyborg_dashboard_update"]={
             entity_id:"update.cyborg_dashboard_update",state:"on",
             attributes:{friendly_name:"Cyborg Dashboard Update",
-              installed_version:"1674bfc",latest_version:"c494284",in_progress:false,
+              installed_version:(window.__CYBORG_BUILD__||"0.0.0"),
+              latest_version:"9.9.9",in_progress:false,
               release_url:"https://github.com/thesoftairteam85/Dashboard-Cyborg-HA"}};
+          // 0.61.0: la verita' su cosa c'e' su GitHub arriva dall'integrazione,
+          // non dall'entita' di HACS.
+          el._release={tag:"9.9.9",checked:Date.now()/1000,
+            url:"https://github.com/thesoftairteam85/Dashboard-Cyborg-HA/releases/v9.9.9"};
           if(opts.update==="open") el._updOpen=true;
         }
         el._signature="";el.render();

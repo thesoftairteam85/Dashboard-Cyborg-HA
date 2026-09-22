@@ -34,6 +34,9 @@ jobs:
       - name: Pannello
         run: python3 tests/panel.test.py
 
+      - name: WebSocket
+        run: python3 tests/websocket.test.py
+
       - name: Notifiche
         run: python3 tests/notifications.test.py
 

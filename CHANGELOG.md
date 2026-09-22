@@ -4,6 +4,70 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.61.0] - 2026-09-22
+
+Il pannello degli aggiornamenti diceva *«sei già all'ultima pubblicata»* mentre
+su GitHub c'era la versione dopo. Non era rotto il pulsante: era falso il
+cartello.
+
+### Perché mentiva
+Leggeva l'entità `update.` di HACS. Ma **HACS guarda GitHub sul proprio
+orologio** — dell'ordine della mezz'ora — e quell'entità riporta quello che
+HACS ha *in memoria*, non quello che c'è adesso. La risposta era vera trenta
+minuti prima. *Un numero che non sta in piedi non si mostra lo stesso.*
+
+Paradosso conseguente: `INSTALLA`, che sembrava inutile perché «non c'era
+niente da installare», era l'unico pulsante che obbligava HACS a guardare
+GitHub davvero.
+
+### Adesso si chiede a GitHub
+Comando nuovo dell'integrazione, `cyborg_dashboard/release`: interroga le
+release di GitHub e restituisce l'ultima pubblicata. L'indirizzo del
+repository si legge dal **manifest**, non è scritto nel codice — chi fa un
+fork interroga il proprio. La risposta si tiene dieci minuti (le API pubbliche
+di GitHub danno 60 richieste l'ora per IP); un errore si tiene un minuto solo,
+perché restare incollati a un guasto di rete vuol dire dire «non lo so» a
+lungo dopo che la linea è tornata. **CONTROLLA ORA** salta la cache: quando uno
+preme un pulsante si aspetta che vada a guardare.
+
+### Tre numeri, che sono tre cose diverse
+Confonderli era il difetto:
+
+| | |
+|---|---|
+| **in esecuzione** | la versione che Home Assistant ha caricato |
+| **sul disco** | quella che HACS ha scaricato ma non è ancora attiva |
+| **su GitHub** | quella che esiste, chiesta a GitHub |
+
+Da qui quattro stati, e nessuno dei quattro è una bugia:
+
+- **manca il riavvio** — i file nuovi ci sono ma HA esegue ancora i vecchi.
+  L'azione principale diventa *Riavvia*, e il pannello spiega perché non basta
+  ricaricare: Python non rilegge un modulo già in memoria.
+- **c'è la X** — *Installa e riavvia*.
+- **sei alla X, ed è l'ultima** — detto come fatto, **con l'ora** in cui è
+  stato verificato.
+- **non lo so** — GitHub non ha risposto. Il pannello lo dichiara, mostra quel
+  che risulta a HACS e avverte che può essere indietro. Non dice mai «sei
+  aggiornato» per difetto.
+
+### Dettagli che si vedono solo quando sbagliano
+- **Uno SHA di commit non si confronta con un numero di versione.** Finché un
+  repository non ha release HACS lavora a SHA: paragonare `1674bfc` a `0.60.0`
+  dà «diverso» per sempre, e il pannello resterebbe a dire «manca il riavvio»
+  a vita. Due cose non confrontabili si ignorano.
+- **«No update available» non è un guasto**: è la risposta. Viene riportata
+  come tale, e dopo si rilegge GitHub.
+- `v0.60.0` e `0.60.0` sono la stessa versione.
+- Il controllo parte **una volta per caricamento di pagina**, così la pastiglia
+  in testata si accende da sola senza che nessuno apra niente; due schede
+  aperte non fanno due richieste, grazie alla cache del backend.
+
+### Verifiche
+`tests/websocket.test.py` (23 asserzioni) estrae le funzioni pure da
+`websocket.py` con `ast` ed esegue il codice vero, e la CI la lancia. Sezione
+57 riscritta: 1521 asserzioni in tutto, più 474 misurate in Chromium.
+
 ## [0.60.0] - 2026-09-22
 
 Le versioni hanno un numero, non uno SHA. Nessuna modifica al pannello: cambia
