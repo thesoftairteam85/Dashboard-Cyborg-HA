@@ -5268,6 +5268,185 @@ Promise.resolve().then(async () => {
   ok("stato ripristinato dopo la sezione 55", el._hass.callWS === savedWS55);
 }).catch((e) => { fail++; console.log("  FAIL sezione 55 e' esplosa -> " + (e && e.stack || e)); });
 
+console.log("\n== 56. PORTE E FINESTRE SONO BUCHI NEL MURO ==");
+{
+  // Fino alla 0.57.0 una porta era un LATO INTERO di tipo "porta": una stanza
+  // con una porta aveva una parete di quattro metri fatta di porta. E' la
+  // ragione principale per cui la mappa sembrava un diagramma e non una casa.
+  const H56 = 60;
+  const L56 = 200;
+  const somma = (seg) => seg.pieces.reduce((n, p) => n + p.w * p.h, 0);
+
+  const vuoto = wallSegments(L56, [], H56);
+  ok("un lato senza aperture resta un pezzo solo",
+     vuoto.pieces.length === 1 && vuoto.holes.length === 0, String(vuoto.pieces.length));
+  ok("e copre tutto il muro",
+     vuoto.pieces[0].w === L56 && vuoto.pieces[0].h === H56 && vuoto.pieces[0].z === 0);
+
+  const porta = wallSegments(L56, [{ kind: "porta", at: 0.5, w: 0.2, sill: 0, h: 0.8 }], H56);
+  ok("una porta lascia due spalle e un architrave, non un muro intero",
+     porta.pieces.length === 3, String(porta.pieces.length));
+  ok("sotto la porta non c'e' niente: da li' si passa",
+     !porta.pieces.some((p) => p.part === "davanzale"));
+  ok("l'architrave comincia dove finisce la porta",
+     porta.pieces.some((p) => p.part === "architrave" && Math.abs(p.z - 48) < 0.01),
+     JSON.stringify(porta.pieces.map((p) => p.part + "@" + p.z.toFixed(1))));
+  ok("e arriva al soffitto",
+     porta.pieces.filter((p) => p.part === "architrave").every((p) => Math.abs(p.z + p.h - H56) < 0.01));
+  ok("il vano e' dove e' stato chiesto",
+     Math.abs((porta.holes[0].x0 + porta.holes[0].x1) / 2 - 100) < 0.01);
+  ok("ed e' largo quanto e' stato chiesto",
+     Math.abs(porta.holes[0].x1 - porta.holes[0].x0 - 40) < 0.01);
+
+  const fin = wallSegments(L56, [{ kind: "finestra", at: 0.5, w: 0.3, sill: 0.4, h: 0.4 }], H56);
+  ok("una finestra ha anche il parapetto sotto", fin.pieces.length === 4, String(fin.pieces.length));
+  ok("il parapetto arriva esattamente al davanzale",
+     fin.pieces.some((p) => p.part === "davanzale" && p.z === 0 && Math.abs(p.h - 24) < 0.01),
+     JSON.stringify(fin.pieces.map((p) => p.part + ":" + p.h.toFixed(1))));
+  ok("muro pieno + vano = il lato, niente di meno e niente di piu'",
+     Math.abs(somma(fin) + (fin.holes[0].x1 - fin.holes[0].x0) * (fin.holes[0].z1 - fin.holes[0].z0)
+              - L56 * H56) < 0.01,
+     String(somma(fin)));
+  ok("e nessun pezzo ha misura negativa",
+     fin.pieces.every((p) => p.w > 0 && p.h > 0 && p.x >= 0 && p.z >= 0));
+
+  const tutta = wallSegments(L56, [{ kind: "portafinestra", at: 0.5, w: 0.3, sill: 0, h: 1 }], H56);
+  ok("un'apertura a tutta altezza non ha architrave",
+     !tutta.pieces.some((p) => p.part === "architrave"), String(tutta.pieces.length));
+
+  const bordo = wallSegments(L56, [{ kind: "porta", at: 0, w: 0.3, sill: 0, h: 0.9 }], H56);
+  ok("un'apertura spinta sullo spigolo resta dentro il muro",
+     bordo.holes[0].x0 === 0 && Math.abs(bordo.holes[0].x1 - 60) < 0.01,
+     bordo.holes[0].x0 + ".." + bordo.holes[0].x1);
+  ok("e non genera una spalla di larghezza zero o negativa",
+     bordo.pieces.every((p) => p.w > 0.5), JSON.stringify(bordo.pieces.map((p) => p.w)));
+
+  const larga = wallSegments(L56, [{ kind: "portafinestra", at: 0.5, w: 2, sill: 0, h: 1 }], H56);
+  ok("un'apertura piu' larga del lato diventa il lato",
+     Math.abs(larga.holes[0].x1 - larga.holes[0].x0 - L56) < 0.01);
+  ok("e allora di muro pieno non ne resta", larga.pieces.length === 0, String(larga.pieces.length));
+
+  const due = wallSegments(L56, [
+    { kind: "finestra", at: 0.40, w: 0.3, sill: 0.4, h: 0.4 },
+    { kind: "finestra", at: 0.50, w: 0.3, sill: 0.4, h: 0.4 }], H56);
+  ok("due aperture accavallate: la seconda viene ignorata, non fusa",
+     due.holes.length === 1, String(due.holes.length));
+
+  const dueOk = wallSegments(L56, [
+    { kind: "finestra", at: 0.25, w: 0.2, sill: 0.4, h: 0.4 },
+    { kind: "finestra", at: 0.75, w: 0.2, sill: 0.4, h: 0.4 }], H56);
+  ok("due aperture distanti stanno tutte e due", dueOk.holes.length === 2);
+  ok("e in mezzo resta un pilastro di muro pieno",
+     dueOk.pieces.some((p) => p.part === "pieno" && p.x > 60 && p.x + p.w < 140),
+     JSON.stringify(dueOk.pieces.filter((p) => p.part === "pieno").map((p) => p.x + "+" + p.w)));
+
+  const inv = wallSegments(L56, [
+    { kind: "finestra", at: 0.75, w: 0.2, sill: 0.4, h: 0.4 },
+    { kind: "finestra", at: 0.25, w: 0.2, sill: 0.4, h: 0.4 }], H56);
+  ok("l'ordine in cui sono state aggiunte non cambia il muro",
+     JSON.stringify(inv.holes.map((h) => Math.round(h.x0)))
+     === JSON.stringify(dueOk.holes.map((h) => Math.round(h.x0))),
+     JSON.stringify(inv.holes.map((h) => Math.round(h.x0))));
+
+  // valori assenti o assurdi: il muro non deve sparire
+  const rotto = wallSegments(L56, [{ kind: "oblo" }, null, { kind: "finestra", w: "tanto" }], H56);
+  ok("un'apertura senza misure prende quelle del suo tipo, non NaN",
+     rotto.pieces.every((p) => Number.isFinite(p.x) && Number.isFinite(p.w)
+       && Number.isFinite(p.z) && Number.isFinite(p.h)));
+  ok("e un tipo sconosciuto non fa sparire il lato", rotto.pieces.length > 0);
+
+  // --- il disegno ----------------------------------------------------------
+  const savedDash56 = el._dashboard, savedIdx56 = el._pageIndex;
+  const savedSel56 = el._selected, savedEd56 = el._editing, savedSig56 = el._signature;
+  const view56 = { yaw: 32, pitch: 56, zoom: 1, wall_height: 60, wall_thickness: 9,
+    show_walls: true, show_labels: true, badges: "sintesi", level_gap: 150, active_level: null };
+  const room56 = { id: "r56", title: "Camera", icon: "mdi:bed", color: "#00e5ff",
+    x: 0, y: 0, w: 200, h: 160, level: 0, rotation: 0, points: null, walls: [],
+    material: "", vehicles: [], entities: null, hidden: [], area_id: null,
+    openings: [{ wall: 0, kind: "finestra", at: 0.5, w: 0.3, sill: 0.4, h: 0.4 }] };
+
+  const html56 = el._roomWalls(room56, view56, false);
+  ok("ogni lato e' un contenitore, uno per lato",
+     (html56.match(/class="fp-side"/g) || []).length === 4,
+     String((html56.match(/class="fp-side"/g) || []).length));
+  ok("il lato con la finestra porta quattro pezzi, gli altri tre uno ciascuno",
+     (html56.match(/class="fp-wall[ "]/g) || []).length === 7,
+     String((html56.match(/class="fp-wall[ "]/g) || []).length));
+  ok("ogni pezzo conserva la sua faccia interna e il suo coronamento",
+     (html56.match(/class="fp-wall-back"/g) || []).length === 7
+     && (html56.match(/class="fp-wall-cap"/g) || []).length === 7);
+  ok("solo gli spigoli del vano sono accesi: due spallette, non sette bordi",
+     (html56.match(/ rl[ "]/g) || []).length === 1 && (html56.match(/ rr[ "]/g) || []).length === 1,
+     (html56.match(/class="fp-wall[^"]*"/g) || []).join(" | "));
+  ok("sopra e sotto il vano nessuno spigolo in piu': lo disegna gia' il pilastro",
+     !/data-part="davanzale"[^>]*\brl\b/.test(html56));
+  ok("il serramento e' dentro il vano", /class="fp-pane finestra"/.test(html56));
+  ok("e ce n'e' uno solo", (html56.match(/class="fp-pane/g) || []).length === 1);
+  ok("il chiaroscuro non riparte da capo a ogni pezzo: e' uno solo, spostato",
+     /background-size:100% 60.00px/.test(html56) && /background-position:0 -48.00px/.test(html56),
+     (html56.match(/background-position:0 [^;]*/g) || []).join(" | "));
+  ok("niente undefined o NaN nel muro", !/undefined|NaN/.test(html56));
+  ok("i div del muro sono bilanciati",
+     (html56.match(/<div/g) || []).length === (html56.match(/<\/div>/g) || []).length);
+
+  room56.openings = [{ wall: 0, kind: "passaggio", at: 0.5, w: 0.3, sill: 0, h: 0.9 }];
+  const passa = el._roomWalls(room56, view56, false);
+  ok("un passaggio e' un vano e basta: nessun serramento da attraversare",
+     !/fp-pane/.test(passa) && (passa.match(/class="fp-wall[ "]/g) || []).length === 6,
+     String((passa.match(/class="fp-wall[ "]/g) || []).length));
+
+  ok("una stanza fantasma non disegna muri", el._roomWalls(room56, view56, true) === "");
+  ok("e coi muri spenti nemmeno",
+     el._roomWalls(room56, { show_walls: false, wall_height: 60 }, false) === "");
+
+  room56.walls = ["open", "wall", "wall", "wall"];
+  ok("un lato aperto non ha niente da disegnare, nemmeno il contenitore",
+     (el._roomWalls(room56, view56, false).match(/class="fp-side"/g) || []).length === 3);
+  room56.walls = [];
+
+  // --- l'editor: l'utente sceglie, il sistema non decide --------------------
+  room56.openings = [{ wall: 0, kind: "finestra", at: 0.5, w: 0.3, sill: 0.4, h: 0.4 }];
+  el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
+    pages: [{ id: "m56", type: "floorplan", title: "Mappa", icon: "mdi:floor-plan",
+      view: view56, rooms: [room56] }] };
+  el._pageIndex = 0; el._editing = true;
+  el._selected = { kind: "room", roomId: "r56" };
+  el._signature = ""; el.render();
+  const ed56 = el.innerHTML;
+  ok("da ogni lato si puo' aprire qualcosa",
+     (ed56.match(/data-open-add="/g) || []).length === 4,
+     String((ed56.match(/data-open-add="/g) || []).length));
+  ok("l'apertura gia' aperta si puo' cambiare di tipo", /data-open-kind="0"/.test(ed56));
+  ok("spostare lungo il lato, allargare, alzare il davanzale e l'altezza",
+     /data-open-prop="at"/.test(ed56) && /data-open-prop="w"/.test(ed56)
+     && /data-open-prop="sill"/.test(ed56) && /data-open-prop="h"/.test(ed56));
+  ok("e togliere", /data-open-remove="0"/.test(ed56));
+  ok("i cinque tipi ci sono tutti",
+     ["porta", "portafinestra", "finestra", "basculante", "passaggio"]
+       .every((k) => ed56.includes('value="' + k + '"')));
+  ok("le misure sono dichiarate in percentuale, non in pixel",
+     /POSIZIONE · 50%/.test(ed56) && /DAVANZALE · 40%/.test(ed56),
+     (ed56.match(/DAVANZALE · \d+%/) || [""])[0]);
+  ok("un lato aperto non offre di aprirci dentro qualcos'altro",
+     (() => { room56.walls = ["open", "wall", "wall", "wall"];
+       el._signature = ""; el.render();
+       const m = /data-open-add="0"[^>]*/.exec(el.innerHTML);
+       room56.walls = []; return !!m && /disabled/.test(m[0]); })());
+
+  // dodici per stanza e' il tetto, e l'editor lo dice prima di farti provare
+  room56.openings = Array.from({ length: 12 }, (_, i) => ({ wall: i % 4, kind: "finestra",
+    at: 0.1 + (i % 3) * 0.3, w: 0.12, sill: 0.4, h: 0.4 }));
+  el._signature = ""; el.render();
+  ok("al dodicesimo, aggiungere non e' piu' proposto",
+     /data-open-add="0"[^>]*disabled/.test(el.innerHTML));
+  room56.openings = [];
+
+  el._editing = savedEd56; el._selected = savedSel56;
+  el._dashboard = savedDash56; el._pageIndex = savedIdx56; el._signature = savedSig56;
+  el.render();
+  ok("stato ripristinato dopo la sezione 56", el._dashboard === savedDash56);
+}
+
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
 {
   const savedReg49 = el._registry, savedSel49 = el._selected, savedDash49 = el._dashboard;

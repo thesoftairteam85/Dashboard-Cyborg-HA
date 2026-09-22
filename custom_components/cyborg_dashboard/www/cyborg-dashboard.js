@@ -436,6 +436,88 @@ const WALL_TYPES = [
 ];
 function wallType(key) { return WALL_TYPES.find((w) => w.k === key) || WALL_TYPES[0]; }
 
+/**
+ * Le aperture: porte e finestre che sono BUCHI nel muro, non lati interi.
+ *
+ * Fino alla 0.57.0 una porta era un lato intero di tipo "porta": una stanza
+ * con una porta aveva una parete di quattro metri fatta di porta. Si vedeva
+ * subito che era falso, ed e' la ragione principale per cui la mappa sembrava
+ * un diagramma invece di una casa.
+ *
+ * Un'apertura e' un rettangolo su un lato, dato in FRAZIONI e non in pixel:
+ *   at   centro lungo il lato, 0 = spigolo iniziale, 1 = spigolo finale
+ *   w    larghezza, frazione della lunghezza del lato
+ *   sill quota del davanzale, frazione dell'altezza del muro (0 = a terra)
+ *   h    altezza dell'apertura, frazione dell'altezza del muro
+ * In frazioni perche' la stanza si ridimensiona trascinando una maniglia:
+ * in pixel, la finestra finirebbe fuori dal muro al primo trascinamento.
+ */
+const OPENING_KINDS = [
+  { k: "porta", l: "Porta", icon: "mdi:door", at: 0.5, w: 0.22, sill: 0, h: 0.84 },
+  { k: "portafinestra", l: "Porta finestra", icon: "mdi:door-sliding-glass", at: 0.5, w: 0.34, sill: 0, h: 0.92 },
+  { k: "finestra", l: "Finestra", icon: "mdi:window-closed-variant", at: 0.5, w: 0.30, sill: 0.42, h: 0.42 },
+  { k: "basculante", l: "Basculante", icon: "mdi:garage", at: 0.5, w: 0.62, sill: 0, h: 0.78 },
+  { k: "passaggio", l: "Passaggio", icon: "mdi:door-open", at: 0.5, w: 0.28, sill: 0, h: 0.86 },
+];
+function openingKind(key) { return OPENING_KINDS.find((o) => o.k === key) || OPENING_KINDS[0]; }
+
+/**
+ * Un lato con le sue aperture, ridotto a rettangoli di muro pieno.
+ *
+ * Tutto in coordinate LOCALI del lato: x lungo il muro a partire dallo
+ * spigolo iniziale, z dal pavimento in su. Chi disegna non deve sapere
+ * niente di angoli e rotazioni: quelli li fa il contenitore.
+ *
+ * Le aperture che si sovrappongono non si fondono: la seconda viene scartata.
+ * Fonderle sembra generoso ma produce buchi che l'utente non ha chiesto e non
+ * sa da dove vengono; scartare e' una regola che si spiega in una riga.
+ */
+function wallSegments(len, ops, H) {
+  const holes = [];
+  for (const o of (ops || [])) {
+    const kind = openingKind(o && o.kind);
+    const wf = Number(o && o.w);
+    const w = Math.max(4, Math.min(len, (Number.isFinite(wf) ? wf : kind.w) * len));
+    const af = Number(o && o.at);
+    let x0 = (Number.isFinite(af) ? af : kind.at) * len - w / 2;
+    x0 = Math.max(0, Math.min(Math.max(0, len - w), x0));
+    const sf = Number(o && o.sill);
+    const z0 = Math.max(0, Math.min(H, (Number.isFinite(sf) ? sf : kind.sill) * H));
+    const hf = Number(o && o.h);
+    const z1 = Math.max(z0 + 2, Math.min(H, z0 + (Number.isFinite(hf) ? hf : kind.h) * H));
+    if (z1 - z0 < 2 || w < 4) continue;
+    holes.push({ x0, x1: x0 + w, z0, z1, kind });
+  }
+  holes.sort((a, b) => a.x0 - b.x0);
+  const kept = [];
+  for (const h of holes) {
+    if (!kept.length || h.x0 >= kept[kept.length - 1].x1 - 0.5) kept.push(h);
+  }
+  const pieces = [];
+  let cur = 0;
+  // `rl` / `rr` = quel bordo e' una SPALLETTA, cioe' il taglio del muro che
+  // si affaccia sul vano. E' l'unico bordo che deve essere marcato: se si
+  // accende ogni bordo di ogni pezzo, il muro smette di essere muro e diventa
+  // una griglia di fil di ferro. Un pilastro fra due finestre ha due
+  // spallette, quello all'angolo una sola.
+  let prevWasHole = false;
+  for (const h of kept) {
+    if (h.x0 - cur > 0.5) {
+      pieces.push({ x: cur, z: 0, w: h.x0 - cur, h: H, part: "pieno", rl: prevWasHole, rr: true });
+    }
+    // il parapetto sotto la finestra: il suo coronamento E' il davanzale
+    if (h.z0 > 0.5) pieces.push({ x: h.x0, z: 0, w: h.x1 - h.x0, h: h.z0, part: "davanzale" });
+    // l'architrave sopra: senza, la finestra sembra un taglio fino al tetto
+    if (H - h.z1 > 0.5) pieces.push({ x: h.x0, z: h.z1, w: h.x1 - h.x0, h: H - h.z1, part: "architrave" });
+    cur = h.x1;
+    prevWasHole = true;
+  }
+  if (len - cur > 0.5) {
+    pieces.push({ x: cur, z: 0, w: len - cur, h: H, part: "pieno", rl: prevWasHole, rr: false });
+  }
+  return { pieces, holes: kept };
+}
+
 /** Type of edge i, defaulting to a plain wall. */
 function wallAt(room, index) {
   const list = room && room.walls;
@@ -3582,6 +3664,88 @@ class CyborgDashboard extends HTMLElement {
       </div>`;
   }
 
+  /** Le aperture dichiarate su un lato. Ordine di inserimento, non di posizione. */
+  _openingsOn(room, wallIndex) {
+    const list = room && room.openings;
+    if (!Array.isArray(list)) return [];
+    return list.filter((o) => o && Number(o.wall) === wallIndex);
+  }
+
+  /**
+   * I lati della stanza, tutti insieme.
+   *
+   * Sta in un metodo suo e non dentro _renderRoom perche' trascinando un
+   * cursore delle aperture si ridisegnano SOLO i muri: ridisegnare la pagina
+   * intera a ogni pixel del trascinamento sostituisce il cursore che si sta
+   * tenendo premuto, e il trascinamento si interrompe da solo.
+   */
+  _roomWalls(room, view, ghost) {
+    const wallH = view.show_walls ? view.wall_height : 0;
+    if (!view.show_walls || ghost || wallH <= 0) return "";
+      return roomEdges(room).map((e, i) => {
+        const wt = wallAt(room, i);
+        if (wt.none || wallH <= 0) return "";
+        const h = Math.max(2, wallH * wt.h);
+        const cls = ["fp-wall"];
+        if (wt.glass) cls.push("glass");
+        if (wt.posts) cls.push("railing");
+        if (wt.steps) cls.push("stairs");
+        if (wt.ribs) cls.push("garage");
+        if (wt.door) cls.push("door");
+        if (wt.band) cls.push("window");
+        // Un muro non e' un foglio.
+        //
+        // Fino a 0.52.0 ogni lato era UN piano ruotato di 90 gradi: visto
+        // dall'alto spariva in una riga di un pixel, e la casa sembrava fatta di
+        // cartoncino. Tre superfici lo rendono un volume: la faccia esterna
+        // (questa), la faccia interna traslata dello spessore, e il **coronamento**,
+        // cioe' la striscia orizzontale in cima che e' l'unica cosa che dice
+        // "questo muro ha uno spessore" quando lo si guarda da sopra.
+        //
+        // Le due figlie ereditano sfondo e bordo dalla classe del lato, cosi'
+        // vetrate, ringhiere e serrande restano quello che sono senza dover
+        // duplicare ogni regola.
+        // Il lato e' un CONTENITORE messo in piedi una volta sola; dentro ci
+        // stanno i pezzi di muro pieno in coordinate locali. Cosi' aprire una
+        // finestra non vuol dire calcolare un secondo angolo di rotazione.
+        //
+        // L'opacita' resta sui pezzi e NON sul contenitore: un'opacita' minore
+        // di 1 obbliga il browser a "appiattire" il sottoalbero 3D, e la faccia
+        // interna e il coronamento finirebbero schiacciati dentro il piano del
+        // muro. E' il tipo di difetto che si vede solo ruotando la mappa.
+        const seg = wallSegments(e.len, this._openingsOn(room, i), h);
+        const style = `opacity:${wt.opacity};background-size:100% ${h.toFixed(2)}px`;
+        const pieces = seg.pieces.map((pc) => `<div class="${cls.join(" ")}${pc.rl ? " rl" : ""}${pc.rr ? " rr" : ""}" data-part="${pc.part}"
+            style="left:${pc.x.toFixed(2)}px;top:${pc.z.toFixed(2)}px;width:${pc.w.toFixed(2)}px;height:${pc.h.toFixed(2)}px;
+            background-position:0 ${(-pc.z).toFixed(2)}px;${style}"><i class="fp-wall-back"></i><i class="fp-wall-cap"></i></div>`).join("");
+        // Il serramento sta DENTRO il buco: un'anta, un vetro, una serranda.
+        // Un passaggio non ne ha - e' un vano, e si deve vedere attraverso.
+        const panes = seg.holes.filter((hl) => hl.kind.k !== "passaggio").map((hl) => `<div class="fp-pane ${esc(hl.kind.k)}"
+            style="left:${hl.x0.toFixed(2)}px;top:${hl.z0.toFixed(2)}px;width:${(hl.x1 - hl.x0).toFixed(2)}px;height:${(hl.z1 - hl.z0).toFixed(2)}px"></div>`).join("");
+        return `<div class="fp-side" data-wall="${i}"
+          style="width:${e.len.toFixed(2)}px;height:${h.toFixed(2)}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
+          transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);
+          --face:${e.shade.toFixed(3)}">${pieces}${panes}</div>`;
+      }).join("");
+  }
+
+  /**
+   * Ridipinge i soli muri di una stanza, in piedi nel DOM.
+   *
+   * Torna false quando la stanza non c'e' (un'altra pagina, un altro piano):
+   * chi chiama ricade sul ridisegno completo, che e' lento ma non sbaglia.
+   */
+  _repaintRoomWalls(room) {
+    if (typeof document === "undefined") return false;
+    const host = this.querySelector(`[data-room="${room.id}"]`);
+    if (!host) return false;
+    const box = host.querySelector(".fp-walls");
+    if (!box) return false;
+    const view = (this._page() || {}).view || {};
+    box.innerHTML = this._roomWalls(room, view, false);
+    return true;
+  }
+
   _renderRoom(room, view) {
     const focusId = this._focus && this._focus.roomId;
     const focused = focusId === room.id;
@@ -3640,34 +3804,10 @@ class CyborgDashboard extends HTMLElement {
         </div>`;
     }).join("")}</div>` : "";
 
-    const walls = view.show_walls && !ghost ? roomEdges(room).map((e, i) => {
-      const wt = wallAt(room, i);
-      if (wt.none || wallH <= 0) return "";
-      const h = Math.max(2, wallH * wt.h);
-      const cls = ["fp-wall"];
-      if (wt.glass) cls.push("glass");
-      if (wt.posts) cls.push("railing");
-      if (wt.steps) cls.push("stairs");
-      if (wt.ribs) cls.push("garage");
-      if (wt.door) cls.push("door");
-      if (wt.band) cls.push("window");
-      // Un muro non e' un foglio.
-      //
-      // Fino a 0.52.0 ogni lato era UN piano ruotato di 90 gradi: visto
-      // dall'alto spariva in una riga di un pixel, e la casa sembrava fatta di
-      // cartoncino. Tre superfici lo rendono un volume: la faccia esterna
-      // (questa), la faccia interna traslata dello spessore, e il **coronamento**,
-      // cioe' la striscia orizzontale in cima che e' l'unica cosa che dice
-      // "questo muro ha uno spessore" quando lo si guarda da sopra.
-      //
-      // Le due figlie ereditano sfondo e bordo dalla classe del lato, cosi'
-      // vetrate, ringhiere e serrande restano quello che sono senza dover
-      // duplicare ogni regola.
-      return `<div class="${cls.join(" ")}" data-wall="${i}"
-        style="width:${e.len.toFixed(2)}px;height:${h.toFixed(2)}px;left:${e.x.toFixed(2)}px;top:${e.y.toFixed(2)}px;
-        transform-origin:0 0;transform:rotateZ(${e.angle.toFixed(3)}deg) rotateX(90deg);
-        opacity:${wt.opacity};--face:${e.shade.toFixed(3)}"><i class="fp-wall-back"></i><i class="fp-wall-cap"></i></div>`;
-    }).join("") : "";
+    // Il contenitore c'e' solo se c'e' qualcosa dentro: un involucro vuoto
+    // conta come muro per chiunque cerchi "fp-wall" nel DOM, test compresi.
+    const sides = this._roomWalls(room, view, ghost);
+    const walls = sides ? `<div class="fp-walls">${sides}</div>` : "";
 
     const [cx, cy] = polygonCentroid(pts);
     const label = view.show_labels && !ghost
@@ -4330,14 +4470,41 @@ class CyborgDashboard extends HTMLElement {
           const wt = wallAt(room, i);
           const bearing = ((Math.round(e.angle) % 360) + 360) % 360;
           const side = bearing < 45 || bearing >= 315 ? "nord" : bearing < 135 ? "est" : bearing < 225 ? "sud" : "ovest";
+          const ops = (room.openings || []).map((o, k) => ({ o, k }))
+            .filter((r) => Number(r.o.wall) === i);
+          const full = (room.openings || []).length >= 12;
           return `<div class="wall-row">
             <ha-icon icon="${esc(wt.icon)}"></ha-icon>
             <div class="wall-txt"><strong>Lato ${i + 1}</strong><small>${esc(side)} · ${Math.round(e.len)} unità</small></div>
             <select data-wall-type="${i}">
               ${WALL_TYPES.map((w) => `<option value="${esc(w.k)}" ${w.k === wt.k ? "selected" : ""}>${esc(w.l)}</option>`).join("")}
             </select>
-          </div>`;
+            <button class="mini" data-open-add="${i}" ${wt.none || full ? "disabled" : ""}
+              title="${wt.none ? "Un lato aperto non ha dove aprire" : full ? "Dodici aperture per stanza sono il massimo" : "Apri una porta o una finestra su questo lato"}"><ha-icon icon="mdi:plus"></ha-icon></button>
+          </div>
+          ${ops.map(({ o, k }) => {
+            const kd = openingKind(o.kind);
+            const pc = (v, d) => Math.round((Number.isFinite(Number(v)) ? Number(v) : d) * 100);
+            return `<div class="open-row">
+              <div class="open-head">
+                <ha-icon icon="${esc(kd.icon)}"></ha-icon>
+                <select data-open-kind="${k}">
+                  ${OPENING_KINDS.map((x) => `<option value="${esc(x.k)}" ${x.k === kd.k ? "selected" : ""}>${esc(x.l)}</option>`).join("")}
+                </select>
+                <button class="mini danger" data-open-remove="${k}" title="Togli l'apertura"><ha-icon icon="mdi:close"></ha-icon></button>
+              </div>
+              <label><span data-open-lab="at|${k}">POSIZIONE · ${pc(o.at, kd.at)}%</span><input type="range" min="2" max="98" step="1"
+                data-open-prop="at" data-open="${k}" value="${pc(o.at, kd.at)}"></label>
+              <label><span data-open-lab="w|${k}">LARGHEZZA · ${pc(o.w, kd.w)}%</span><input type="range" min="4" max="98" step="1"
+                data-open-prop="w" data-open="${k}" value="${pc(o.w, kd.w)}"></label>
+              <label><span data-open-lab="sill|${k}">DAVANZALE · ${pc(o.sill, kd.sill)}%</span><input type="range" min="0" max="90" step="1"
+                data-open-prop="sill" data-open="${k}" value="${pc(o.sill, kd.sill)}"></label>
+              <label><span data-open-lab="h|${k}">ALTEZZA · ${pc(o.h, kd.h)}%</span><input type="range" min="5" max="100" step="1"
+                data-open-prop="h" data-open="${k}" value="${pc(o.h, kd.h)}"></label>
+            </div>`;
+          }).join("")}`;
         }).join("")}</div>
+        <span class="hint">Le aperture sono in percentuale del lato, non in centimetri: così restano al loro posto quando la stanza si ridimensiona. Due aperture che si accavallano non si fondono — la seconda viene ignorata finché non la sposti.</span>
         <button class="secondary wide" data-walls-reset><ha-icon icon="mdi:wall"></ha-icon> TUTTI MURI</button>
       </div>
 
@@ -13693,8 +13860,102 @@ class CyborgDashboard extends HTMLElement {
       const room = this._room(this._selected && this._selected.roomId);
       if (!room) return;
       room.walls = [];
+      // Le aperture NON si cancellano qui. "Tutti muri" rimette i lati a muro
+      // pieno: e' esattamente il lato su cui una porta ha senso. Cancellarle
+      // vorrebbe dire rifare il lavoro dopo ogni ripensamento sui lati.
       this._touch();
     };
+    all("[data-open-add]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room) return;
+        const wall = parseInt(el.getAttribute("data-open-add"), 10);
+        const list = Array.isArray(room.openings) ? room.openings.slice() : [];
+        if (list.length >= 12) return;
+        // La prima apertura di un lato e' una porta, la seconda in poi una
+        // finestra: e' l'ordine in cui si costruisce davvero una stanza, e
+        // toglie un tocco nel caso piu' frequente.
+        const already = list.filter((o) => Number(o.wall) === wall).length;
+        const kd = openingKind(already ? "finestra" : "porta");
+        // Affiancata alle precedenti invece che sopra: due aperture nello
+        // stesso punto si annullerebbero a vicenda (la seconda viene scartata)
+        // e l'utente vedrebbe il pulsante non fare niente.
+        const at = Math.max(0.08, Math.min(0.92, 0.5 + (already % 2 ? 1 : -1) * Math.ceil(already / 2) * 0.24));
+        list.push({ wall, kind: kd.k, at, w: kd.w, sill: kd.sill, h: kd.h });
+        room.openings = list;
+        this._touch();
+      };
+    });
+    all("[data-open-remove]").forEach((el) => {
+      el.onclick = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room || !Array.isArray(room.openings)) return;
+        const k = parseInt(el.getAttribute("data-open-remove"), 10);
+        room.openings = room.openings.filter((_, j) => j !== k);
+        this._touch();
+      };
+    });
+    all("[data-open-kind]").forEach((el) => {
+      el.onchange = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room || !Array.isArray(room.openings)) return;
+        const o = room.openings[parseInt(el.getAttribute("data-open-kind"), 10)];
+        if (!o) return;
+        const kd = openingKind(el.value);
+        o.kind = kd.k;
+        // Cambiare tipo ridà le misure di quel tipo: una finestra che diventa
+        // porta e resta a mezz'aria e' un difetto, non una scelta. La
+        // posizione lungo il lato invece e' dell'utente e non si tocca.
+        o.w = kd.w; o.sill = kd.sill; o.h = kd.h;
+        this._touch();
+      };
+    });
+    all("[data-open-prop]").forEach((el) => {
+      const apply = () => {
+        const room = this._room(this._selected && this._selected.roomId);
+        if (!room || !Array.isArray(room.openings)) return null;
+        const o = room.openings[parseInt(el.getAttribute("data-open"), 10)];
+        if (!o) return null;
+        const key = el.getAttribute("data-open-prop");
+        const v = Math.max(0, Math.min(100, parseInt(el.value, 10) || 0)) / 100;
+        o[key] = v;
+        // Un'apertura piu' alta del muro esce dal tetto: il davanzale cede.
+        const kd = openingKind(o.kind);
+        const sill = Number.isFinite(Number(o.sill)) ? Number(o.sill) : kd.sill;
+        const hh = Number.isFinite(Number(o.h)) ? Number(o.h) : kd.h;
+        if (sill + hh > 1) {
+          if (key === "sill") o.sill = Math.max(0, 1 - hh);
+          else o.h = Math.max(0.05, 1 - sill);
+        }
+        return room;
+      };
+      // onchange sul rilascio: quello salva e ridisegna tutto.
+      el.onchange = () => { apply(); this._touch(); };
+      // oninput durante il trascinamento: aggiorna il modello, RIDIPINGE SOLO
+      // I MURI di quella stanza e riscrive l'etichetta. Un render completo
+      // qui sostituirebbe il cursore che si sta tenendo premuto e il
+      // trascinamento si interromperebbe da solo al primo pixel.
+      el.oninput = () => {
+        const room = apply();
+        if (!room) return;
+        const key = el.getAttribute("data-open-prop");
+        const k = el.getAttribute("data-open");
+        const o = (room.openings || [])[parseInt(k, 10)] || {};
+        const kd = openingKind(o.kind);
+        const lab = { at: "POSIZIONE", w: "LARGHEZZA", sill: "DAVANZALE", h: "ALTEZZA" };
+        for (const nm of ["at", "w", "sill", "h"]) {
+          const span = q(`[data-open-lab="${nm}|${k}"]`);
+          if (!span) continue;
+          const v = Number.isFinite(Number(o[nm])) ? Number(o[nm]) : kd[nm];
+          span.textContent = lab[nm] + " · " + Math.round(v * 100) + "%";
+          const other = q(`[data-open-prop="${nm}"][data-open="${k}"]`);
+          if (other && nm !== key) other.value = String(Math.round(v * 100));
+        }
+        this._dirty = true;
+        this._signature = "";
+        this._repaintRoomWalls(room);
+      };
+    });
     all("[data-room-shape]").forEach((el) => {
       el.onclick = () => {
         const room = this._room(this._selected && this._selected.roomId);
@@ -15989,6 +16250,20 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .wall-txt strong{display:block;font-size:11.5px}
 .wall-txt small{display:block;font:9px ui-monospace,monospace;opacity:.4;text-transform:uppercase;letter-spacing:.8px}
 .wall-row select{width:auto;min-width:120px;padding:4px 6px;font-size:11px}
+.wall-row>button.mini{flex-shrink:0}
+/* L'apertura e' rientrata sotto il suo lato: senza il rientro, con tre lati
+   aperti, non si capisce piu' quale finestra appartiene a quale muro. */
+.open-row{margin:-2px 0 6px 22px;padding:7px 9px 8px;border-radius:0 9px 9px 0;
+  border:1px solid color-mix(in srgb,var(--accent) 16%,transparent);border-left:2px solid var(--accent);
+  background:color-mix(in srgb,var(--accent) 7%,transparent);
+  display:flex;flex-direction:column;gap:5px}
+.open-head{display:flex;align-items:center;gap:7px}
+.open-head>ha-icon{--mdc-icon-size:15px;color:var(--accent);flex-shrink:0}
+.open-head select{flex:1;min-width:0;padding:3px 6px;font-size:11px}
+.open-row label{display:block;font:8.5px ui-monospace,monospace;letter-spacing:.9px;
+  text-transform:uppercase;opacity:.5}
+.open-row label span{display:block;margin-bottom:1px}
+.open-row input[type=range]{width:100%;margin:0}
 .fp-room{transition:opacity .3s ease}
 .fp-room.ghost{opacity:.09;pointer-events:none}
 .fp-room.dim{opacity:.1;pointer-events:none}
@@ -15998,7 +16273,7 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
    of zooming in. */
 .fp-room.focused .fp-wall{opacity:.24}
 .fp-room.focused .fp-outline polygon{stroke-width:2}
-.fp-room.resizing .fp-wall,.fp-room.resizing .fp-anchor,.fp-room.resizing .fp-spots{opacity:0}
+.fp-room.resizing .fp-side,.fp-room.resizing .fp-anchor,.fp-room.resizing .fp-spots{opacity:0}
 
 /* Grips live in the floor plane so they stay attached to the geometry they
    move; the counter-rotation trick used for labels would detach them. */
@@ -16108,12 +16383,21 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 /* Walls: dark at the base (ambient occlusion where they meet the floor),
    brighter towards the top where the light is, and tinted by the light in the
    room like the floor is. */
+/* Un lato e' un contenitore in piedi: dentro ci stanno i pezzi di muro e i
+   serramenti, in coordinate locali (x lungo il muro, y = quota dal pavimento).
+   Niente opacita' qui dentro: appiattirebbe il 3D dei pezzi. */
+/* L'involucro dei lati. Deve essere posizionato E in 3D: un div normale qui
+   in mezzo appiattisce tutto il sottoalbero e i muri, che sono ruotati di 90
+   gradi, si riducono a una riga di un pixel. Serve perche' i muri si
+   ridisegnano da soli quando si trascina un cursore delle aperture. */
+.fp-walls{position:absolute;inset:0;transform-style:preserve-3d;pointer-events:none}
+.fp-side{position:absolute;transform-style:preserve-3d;pointer-events:none}
 .fp-wall{position:absolute;
   background:linear-gradient(to top,
     color-mix(in srgb,var(--rc) 34%,#070b11) 0%,
     color-mix(in srgb,var(--rc) 12%,#0a1017) 55%,
     color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);
-  border:1px solid color-mix(in srgb,var(--rc) 42%,transparent);border-bottom:0;
+  border:1px solid color-mix(in srgb,var(--rc) 20%,transparent);border-bottom:0;
   transform-style:preserve-3d;
   filter:brightness(calc((0.7 + 0.55 * var(--lit,0)) * var(--face,1)))}
 /* Lo spessore del muro: faccia interna e coronamento.
@@ -16143,6 +16427,41 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-room.lit .fp-floor{box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent),
   inset 0 0 22px rgba(0,0,0,.45),
   0 0 30px color-mix(in srgb,var(--lc,#ffd7a3) calc(var(--lit,0) * 48%),transparent)}
+/* La spalletta: il taglio del muro che si affaccia sul vano. E' l'unico
+   spigolo verticale che va acceso - accendendoli tutti il muro diventa una
+   griglia di fil di ferro, che e' esattamente il difetto da cui si parte.
+   Sopra e sotto il vano non serve: lo spigolo lo disegna gia' il pilastro. */
+.fp-wall.rl{border-left-color:color-mix(in srgb,var(--rc) 66%,transparent)}
+.fp-wall.rr{border-right-color:color-mix(in srgb,var(--rc) 66%,transparent)}
+.fp-wall[data-part="davanzale"],.fp-wall[data-part="architrave"]{border-left:0;border-right:0}
+/* Il serramento dentro il buco. Sottile per definizione: un'anta e un vetro
+   non hanno lo spessore del muro, e darglielo fa sembrare la finestra murata. */
+.fp-pane{position:absolute;pointer-events:none;
+  border:1px solid color-mix(in srgb,var(--rc) 58%,transparent);
+  filter:brightness(calc((0.75 + 0.5 * var(--lit,0)) * var(--face,1)))}
+.fp-pane.finestra,.fp-pane.portafinestra{
+  background:linear-gradient(160deg,color-mix(in srgb,#bfe9ff 24%,transparent) 0%,
+    color-mix(in srgb,var(--rc) 14%,transparent) 55%,
+    color-mix(in srgb,#bfe9ff 11%,transparent) 100%);
+  box-shadow:inset 0 0 14px color-mix(in srgb,#bfe9ff 16%,transparent)}
+/* Il montante centrale: due ante e' quello che si vede nel 90% delle case,
+   e un vetro senza montante letto da lontano sembra un buco e basta. */
+.fp-pane.finestra::after,.fp-pane.portafinestra::after{content:"";position:absolute;
+  left:50%;top:0;bottom:0;width:1px;background:color-mix(in srgb,var(--rc) 52%,transparent)}
+.fp-pane.porta{background:linear-gradient(180deg,
+  color-mix(in srgb,var(--rc) 28%,#0b1119),color-mix(in srgb,var(--rc) 13%,#090e15))}
+/* La maniglia. Tre pixel che fanno leggere "porta" invece di "pannello". */
+.fp-pane.porta::after{content:"";position:absolute;right:13%;top:calc(50% - 2px);
+  width:4px;height:4px;border-radius:50%;background:color-mix(in srgb,#ffe9b0 76%,transparent)}
+.fp-pane.basculante{background:repeating-linear-gradient(0deg,
+  color-mix(in srgb,var(--rc) 32%,transparent) 0 5px,
+  color-mix(in srgb,#0b1119 46%,transparent) 5px 10px)}
+/* Con la luce accesa la finestra si vede da fuori. E' la cosa che, guardando
+   la casa dall'alto, dice "c'e' qualcuno in quella stanza" prima di
+   qualunque etichetta. */
+.fp-room.lit .fp-pane.finestra,.fp-room.lit .fp-pane.portafinestra{
+  box-shadow:inset 0 0 14px color-mix(in srgb,var(--lc,#ffd7a3) calc(var(--lit,0) * 40%),transparent),
+    0 0 18px color-mix(in srgb,var(--lc,#ffd7a3) calc(var(--lit,0) * 45%),transparent)}
 /* --face is the geometric shading of that wall's own orientation, set inline
    per wall; the stylesheet multiplies it by the light in the room. */
 .fp-anchor{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d;pointer-events:none}
@@ -16629,7 +16948,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.57.0";
+const CYBORG_BUILD = "0.58.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
