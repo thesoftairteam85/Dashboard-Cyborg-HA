@@ -2364,12 +2364,18 @@ class CyborgDashboard extends HTMLElement {
       if (u.tagRaw) dati.version = u.tagRaw;
       await this._hass.callService("update", "install", dati);
     } catch (err) {
+      // Home Assistant manda a volte la frase ("No update available for ...")
+      // e a volte il solo CODICE ("no_update_available"). Cercare solo la
+      // frase faceva finire il codice nel ramo degli errori veri, e
+      // sull'avviso rosso compariva "no_update_available" tale e quale: una
+      // stringa di programma davanti a un utente, che e' sempre un difetto.
       const testo = (err && err.message) || "Installazione non riuscita";
+      const codice = (err && err.code) || "";
       this._updBusy = "";
       // Home Assistant risponde "No update available" quando, andando a
       // guardare, scopre che non c'era niente da scaricare. Non e' un guasto:
       // e' la risposta alla domanda, e va detta come tale.
-      if (/no update available/i.test(testo)) {
+      if (/no[_ ]update[_ ]available/i.test(testo + " " + codice)) {
         // Due situazioni diversissime dietro la stessa frase di Home
         // Assistant. Dire "non c'era niente di nuovo" mentre il riquadro
         // sopra annuncia una versione nuova e' una contraddizione sullo
@@ -2571,6 +2577,9 @@ class CyborgDashboard extends HTMLElement {
     // Lo stato dell'aggiornamento e' sempre nella firma, anche col pannello
     // chiuso: la pastiglia della versione in testata deve accendersi da sola
     // quando HACS si accorge che su GitHub c'e' qualcosa di nuovo.
+    if (this._noteOpen) {
+      parts.push("nota:" + this._noteOpen.id + "|" + this._noteOpen.pid + "|" + this._noteOpen.key);
+    }
     {
       const u = this._updateInfo();
       parts.push("upd:" + (u ? (u.pending ? "1" : "0") + (u.busy ? "b" : "-") + u.latest : "no")
@@ -8683,6 +8692,97 @@ class CyborgDashboard extends HTMLElement {
     return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
   }
 
+  /**
+   * La nota di un giorno: con chi si lavora, un paziente critico, dove si va
+   * e a che ora si torna.
+   *
+   * Sta in una mappa PARALLELA a `data`, non dentro. In `data` un giorno vale
+   * una sigla: cambiarne la forma vorrebbe dire migrare ogni dashboard
+   * esistente e riscrivere la strada veloce che ridipinge una sola casella.
+   */
+  /**
+   * Il pannello della nota. Aperto tenendo premuto su un giorno.
+   *
+   * I campi NON sono legati al modello mentre si scrive: si leggono solo
+   * quando si preme SALVA. E' la ragione per cui la tastiera non fa saltare
+   * niente - un ridisegno a ogni carattere sostituirebbe il campo che si sta
+   * usando e sposterebbe il cursore, che e' esattamente il difetto chiuso in
+   * 0.57.0 e che qui tornerebbe dalla finestra.
+   */
+  _renderNote() {
+    const n = this._noteOpen;
+    if (!n) return "";
+    const item = this._cardById(n.id);
+    if (!item) return "";
+    const persona = this._shiftPeople(item).find((p) => p.id === n.pid);
+    const nota = this._noteGet(item, n.pid, n.key) || {};
+    const t = this._shiftType(item, this._shiftGet(item, n.pid, n.key));
+    const d = new Date(n.key + "T12:00:00");
+    const quando = Number.isFinite(d.getTime())
+      ? cap1(WEEKDAYS_IT[d.getDay()]) + " " + d.getDate() + " " + MONTHS_IT[d.getMonth()]
+      : n.key;
+    return `<div class="upd-back" data-note-close></div>
+      <div class="upd-box nota-box" role="dialog" aria-label="Nota del giorno">
+        <header><ha-icon icon="mdi:note-edit-outline"></ha-icon>
+          <strong>${esc(quando.toUpperCase())}</strong>
+          ${t ? `<span class="nota-turno" style="--cc:${esc(t.color)}">${esc(t.k)} · ${esc(t.l || "")}</span>` : ""}
+          <button class="mini" data-note-close title="Chiudi"><ha-icon icon="mdi:close"></ha-icon></button></header>
+        <div class="upd-body">
+          ${this._shiftPeople(item).length > 1
+            ? `<span class="hint">Nota di <strong>${esc((persona && persona.name) || n.pid)}</strong>.</span>` : ""}
+          <label>NOTA<textarea data-note-f="t" rows="3" maxlength="300"
+            placeholder="Con chi lavori, un paziente critico, cosa ricordarsi…">${esc(nota.t || "")}</textarea></label>
+          <label>DOVE<input type="text" data-note-f="l" maxlength="60"
+            placeholder="Sede, reparto, città…" value="${esc(nota.l || "")}"></label>
+          <div class="two">
+            <label>DALLE<input type="time" data-note-f="da" value="${esc(nota.da || "")}"></label>
+            <label>ALLE<input type="time" data-note-f="a" value="${esc(nota.a || "")}"></label>
+          </div>
+          <span class="hint">Si compila solo quello che serve: per un turno normale basta la nota, per una trasferta contano dove e gli orari.</span>
+        </div>
+        <footer>
+          <button data-note-save><ha-icon icon="mdi:check"></ha-icon> SALVA</button>
+          ${this._noteGet(item, n.pid, n.key)
+            ? `<button class="secondary" data-note-del><ha-icon icon="mdi:trash-can-outline"></ha-icon> TOGLI LA NOTA</button>` : ""}
+          <button class="secondary" data-note-close><ha-icon icon="mdi:close"></ha-icon> ANNULLA</button>
+        </footer>
+      </div>`;
+  }
+
+  _noteGet(item, personId, key) {
+    const all = (item && item.notes) || {};
+    const n = (all[personId] || {})[key];
+    return n && typeof n === "object" ? n : null;
+  }
+
+  /** Una nota senza niente dentro non e' una nota: si cancella. */
+  _noteVuota(n) {
+    return !n || !((n.t || "").trim() || (n.l || "").trim() || n.da || n.a);
+  }
+
+  _noteSet(item, personId, key, nota) {
+    item.notes = Object.assign({}, item.notes || {});
+    item.notes[personId] = Object.assign({}, item.notes[personId] || {});
+    if (this._noteVuota(nota)) delete item.notes[personId][key];
+    else item.notes[personId][key] = {
+      t: String(nota.t || "").trim().slice(0, 300),
+      l: String(nota.l || "").trim().slice(0, 60),
+      da: String(nota.da || ""), a: String(nota.a || ""),
+    };
+    this._dirty = true;
+    this._signature = "";
+    this.render();
+    if (this._shiftSaveT) clearTimeout(this._shiftSaveT);
+    this._shiftSaveT = setTimeout(() => { this._shiftSaveT = null; this._save(); }, 400);
+  }
+
+  /** La nota in una riga sola: e' quello che sta in una casella di calendario. */
+  _noteRiga(n) {
+    if (!n) return "";
+    const ore = n.da && n.a ? n.da + "–" + n.a : (n.da ? "dalle " + n.da : (n.a ? "fino alle " + n.a : ""));
+    return [n.t, n.l, ore].filter(Boolean).join(" · ");
+  }
+
   _shiftGet(item, personId, key) {
     const all = (item && item.data) || {};
     return (all[personId] || {})[key] || "";
@@ -8822,9 +8922,19 @@ class CyborgDashboard extends HTMLElement {
       Prossimo giorno libero insieme: <strong>${esc(cap1(WEEKDAYS_IT[libero.getDay()]) + " "
         + libero.getDate() + " " + MONTHS_IT[libero.getMonth()])}</strong></span>` : "";
 
+    // La nota di oggi in testa alla card: una nota che si vede solo tenendo
+    // premuto sulla casella giusta e' una nota che nessuno legge la mattina.
+    const noteOggi = people.map((p) => {
+      const n = this._noteGet(item, p.id, today);
+      return n ? { p, riga: this._noteRiga(n) } : null;
+    }).filter(Boolean);
     const head = `<div class="sh-top">
       <div class="sh-today">${oggi}</div>
       ${insieme}
+      ${noteOggi.map(({ p, riga }) => `<div class="sh-nota-oggi">
+        <i style="background:${esc(p.color || "#00e5ff")}"></i>
+        ${people.length > 1 ? `<strong>${esc(p.name)}</strong>` : ""}
+        <span>${esc(riga)}</span></div>`).join("")}
     </div>
     <div class="cal-head">
       <div class="cal-nav">
@@ -8863,8 +8973,15 @@ class CyborgDashboard extends HTMLElement {
         const other = win.month && d.getMonth() !== win.month.getMonth();
         const isToday = key === today;
         return `<button class="sh-cell${isToday ? " today" : ""}${other ? " other" : ""}"
-          data-sh-day="${esc(item.id)}|${esc(key)}" title="${esc(cap1(WEEKDAYS_IT[d.getDay()]) + " " + d.getDate())}">
+          data-sh-day="${esc(item.id)}|${esc(key)}" title="${esc([
+            cap1(WEEKDAYS_IT[d.getDay()]) + " " + d.getDate(),
+            ...people.map((p) => { const n = this._noteGet(item, p.id, key);
+              return n ? (people.length > 1 ? p.name + ": " : "") + this._noteRiga(n) : ""; })
+              .filter(Boolean),
+          ].join(" — "))}">
           <span class="sh-dnum">${d.getDate()}</span>
+          ${people.some((p) => this._noteGet(item, p.id, key))
+            ? '<i class="sh-pin" aria-hidden="true"></i>' : ""}
           ${people.map((p) => {
             const t = this._shiftType(item, this._shiftGet(item, p.id, key));
             // Il bordo a sinistra porta il colore della PERSONA, il corpo
@@ -8881,7 +8998,7 @@ class CyborgDashboard extends HTMLElement {
     </div>`;
 
     return `<div class="sh">${head}${palette}${grid}
-      <span class="hint">Scegli un turno qui sopra e tocca i giorni: si salva da solo. La gomma toglie.</span>
+      <span class="hint">Scegli un turno qui sopra e tocca i giorni: si salva da solo. La gomma toglie. <strong>Tieni premuto</strong> su un giorno per scrivere una nota — con chi lavori, dove vai, a che ora torni.</span>
     </div>`;
   }
 
@@ -12342,6 +12459,7 @@ class CyborgDashboard extends HTMLElement {
         </div>
         ${this._renderOverlay()}
         ${this._renderUpdate()}
+        ${this._renderNote()}
         ${kiosk && ((this._dashboard.kiosk || {}).dim_after > 0)
           ? '<div class="kiosk-dim" data-kiosk-dim></div>' : ""}
       </div>`;
@@ -13873,20 +13991,80 @@ class CyborgDashboard extends HTMLElement {
       this._signature = ""; this.render();
     };
     all("[data-sh-day]").forEach((el) => {
-      el.onclick = () => {
+      // Tenere premuto apre la nota; toccare dipinge. Sono due significati
+      // dello stesso gesto, e tutto il lavoro sta nel non confonderli:
+      //
+      //  - 500 ms, come le pastiglie della mappa: sotto, e' un tocco;
+      //  - piu' di 10 px di movimento ANNULLA, perche' su un telefono la
+      //    griglia si scorre e uno scorrimento non deve mai aprire niente;
+      //  - dopo che la pressione lunga e' scattata, il click che il browser
+      //    manda subito dopo va INGOIATO, o il giorno verrebbe anche
+      //    dipinto. E' il difetto che renderebbe la funzione inutilizzabile.
+      let timer = null, fired = false, sx = 0, sy = 0;
+      const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      const dove = () => {
         const [id, key] = el.getAttribute("data-sh-day").split("|");
         const target = this._cardById(id);
-        if (!target) return;
+        if (!target) return null;
         const people = this._shiftPeople(target);
         const pid = (this._shiftPerson || {})[id] || people[0].id;
-        const types = this._shiftTypes(target);
-        const brush = (this._shiftBrush || {})[id] ?? (types[0] ? types[0].k : "");
+        return { id, key, target, pid };
+      };
+      el.onpointerdown = (ev) => {
+        fired = false; sx = ev.clientX; sy = ev.clientY;
+        stop();
+        timer = setTimeout(() => {
+          timer = null; fired = true;
+          const w = dove();
+          if (!w) return;
+          this._noteOpen = { id: w.id, pid: w.pid, key: w.key };
+          this._markBusy(1200);
+          this._touch(true);
+        }, 500);
+      };
+      el.onpointermove = (ev) => {
+        if (!timer) return;
+        if (Math.abs(ev.clientX - sx) > 10 || Math.abs(ev.clientY - sy) > 10) stop();
+      };
+      el.onpointerup = stop;
+      el.onpointerleave = stop;
+      el.onpointercancel = () => { stop(); fired = false; };
+      // Tenere premuto su un telefono apre il menu del browser sopra la
+      // griglia e si mangia il gesto.
+      el.oncontextmenu = (ev) => ev.preventDefault();
+      el.onclick = () => {
+        if (fired) { fired = false; return; }
+        const w = dove();
+        if (!w) return;
+        const types = this._shiftTypes(w.target);
+        const brush = (this._shiftBrush || {})[w.id] ?? (types[0] ? types[0].k : "");
         // Toccare due volte lo stesso turno lo toglie: non serve prendere la
         // gomma per correggere un tocco sbagliato.
-        const cur = this._shiftGet(target, pid, key);
-        this._shiftSet(target, pid, key, cur === brush ? "" : brush);
+        const cur = this._shiftGet(w.target, w.pid, w.key);
+        this._shiftSet(w.target, w.pid, w.key, cur === brush ? "" : brush);
       };
     });
+    all("[data-note-close]").forEach((el) => {
+      el.onclick = () => { this._noteOpen = null; this._touch(true); };
+    });
+    const noteSave = q("[data-note-save]");
+    if (noteSave) noteSave.onclick = () => {
+      const n = this._noteOpen;
+      const item = n && this._cardById(n.id);
+      if (!item) { this._noteOpen = null; this._touch(true); return; }
+      // I campi si leggono ADESSO, non mentre si scrive: e' quello che tiene
+      // ferma la tastiera.
+      const val = (nome) => { const f = q(`[data-note-f="${nome}"]`); return f ? f.value : ""; };
+      this._noteOpen = null;
+      this._noteSet(item, n.pid, n.key, { t: val("t"), l: val("l"), da: val("da"), a: val("a") });
+    };
+    const noteDel = q("[data-note-del]");
+    if (noteDel) noteDel.onclick = () => {
+      const n = this._noteOpen;
+      const item = n && this._cardById(n.id);
+      this._noteOpen = null;
+      if (item) this._noteSet(item, n.pid, n.key, null); else this._touch(true);
+    };
     all("[data-sh-rot]").forEach((el) => {
       el.onclick = () => {
         if (!card) return;
@@ -15842,6 +16020,43 @@ button.mini.danger.armed ha-icon{color:#fff}
   box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
 .sh-dnum{font-size:11px;font-weight:650;opacity:.75;text-align:left;line-height:1}
 .sh-cell.today .sh-dnum{color:var(--accent)}
+/* Il segnalino della nota: un angolo, non un'icona. Una casella di
+   calendario e' larga venti pixel, e un'icona la' dentro copre il turno -
+   cioe' l'informazione principale - per dire una cosa secondaria. */
+/* La nota di oggi, in testa. Riga intera: e' testo libero, e spezzarlo in
+   una colonna stretta lo rende illeggibile proprio quando serve. */
+.sh-nota-oggi{flex:1 1 100%;display:flex;align-items:center;gap:8px;
+  padding:7px 10px;border-radius:10px;font-size:12px;line-height:1.45;
+  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.sh-nota-oggi>i{width:3px;align-self:stretch;border-radius:2px;flex-shrink:0}
+.sh-nota-oggi strong{flex-shrink:0;opacity:.75}
+.sh-cell{position:relative}
+.sh-pin{position:absolute;right:3px;top:3px;width:0;height:0;pointer-events:none;
+  border-top:7px solid color-mix(in srgb,var(--accent) 85%,transparent);
+  border-left:7px solid transparent}
+.sh-cell.today .sh-pin{border-top-color:#fff}
+/* Il pannello della nota riusa la scatola degli aggiornamenti: stessa forma,
+   stesso posto, niente da imparare una seconda volta. */
+.nota-box .upd-body label{display:block;font:8.5px ui-monospace,monospace;
+  letter-spacing:.9px;text-transform:uppercase;opacity:.55}
+/* I campi qui dentro NON ereditano lo stile dell'editor - questa scatola sta
+   fuori da .editor - e senza dichiararlo il browser li disegna col suo grigio
+   chiaro di fabbrica, in mezzo a un pannello scuro. Si vede solo guardando lo
+   screenshot: nessuna asserzione misura "stona". */
+.nota-box .upd-body input,.nota-box .upd-body textarea{display:block;width:100%;
+  box-sizing:border-box;margin-top:5px;padding:10px;border-radius:9px;
+  border:1px solid var(--divider-color);
+  background:color-mix(in srgb,var(--card-background-color) 60%,#000);
+  color:var(--primary-text-color);font:inherit;font-size:13px;opacity:1}
+.nota-box .upd-body input:focus,.nota-box .upd-body textarea:focus{outline:0;border-color:var(--accent)}
+.nota-box .upd-body textarea{resize:vertical;min-height:66px;line-height:1.5}
+/* L'orologino di un campo ora e' nero su nero: va schiarito a mano. */
+.nota-box input[type=time]::-webkit-calendar-picker-indicator{filter:invert(1);opacity:.55;cursor:pointer}
+.nota-box .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.nota-turno{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:99px;
+  font:650 10px ui-monospace,monospace;letter-spacing:1px;
+  background:color-mix(in srgb,var(--cc) 22%,transparent);
+  border:1px solid color-mix(in srgb,var(--cc) 60%,transparent);color:var(--cc)}
 .sh-slot{display:block;padding:2px 0;border-radius:5px;font:650 11px ui-monospace,monospace;
   color:#0a1017;background:var(--cc);text-align:center;letter-spacing:.04em;
   border-left:4px solid var(--pc)}
@@ -17483,7 +17698,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.64.0";
+const CYBORG_BUILD = "0.66.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

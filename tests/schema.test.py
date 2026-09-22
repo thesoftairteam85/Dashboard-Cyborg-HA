@@ -623,7 +623,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 23, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 24, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -1079,3 +1079,33 @@ assert len(_rm(openings=[{"wall": 0} for _ in range(40)])["openings"]) == schema
 assert _rm(openings={"wall": 0})["openings"] == []
 assert _rm(openings=[None, 5, "porta"])["openings"] == []
 print("schema: aperture nei muri (v23) ok")
+
+
+# --- v24: le note del giorno sui turni -------------------------------------
+def _shn(**kw):
+    item = {"id": "sh", "type": "shifts"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+assert _shn()["notes"] == {}
+n = _shn(notes={"p1": {"2026-09-22": {"t": "  con Anna  ", "l": "Bergamo",
+                                      "da": "08:00", "a": "18:00"}}})["notes"]
+assert n == {"p1": {"2026-09-22": {"t": "con Anna", "l": "Bergamo",
+                                   "da": "08:00", "a": "18:00"}}}, n
+# "25:00" non e' un'ora: vale come non scritta, invece di finire sulla card
+assert _shn(notes={"p1": {"2026-09-22": {"t": "x", "da": "25:00", "a": "7:5"}}}
+            )["notes"]["p1"]["2026-09-22"] == {"t": "x", "l": "", "da": "", "a": ""}
+# una nota senza niente dentro non e' una nota: la casella porterebbe il
+# segnalino senza avere niente da dire
+assert _shn(notes={"p1": {"2026-09-22": {"t": "", "l": "", "da": "", "a": ""}}})["notes"] == {"p1": {}}
+# una chiave che non e' un giorno, e un valore che non e' una nota
+assert _shn(notes={"p1": {"ieri": {"t": "x"}, "2026-09-22": "solo testo"}})["notes"] == {"p1": {}}
+# i giorni vecchi cadono come per i turni
+_vecchio = (_dt.date.today() - _dt.timedelta(days=900)).isoformat()
+assert _shn(notes={"p1": {_vecchio: {"t": "x"}}})["notes"] == {"p1": {}}
+# notes non e' un dizionario -> nessuna nota, non un errore
+assert _shn(notes=[1, 2])["notes"] == {}
+# il testo si accorcia invece di far crescere il documento senza limite
+assert len(_shn(notes={"p1": {"2026-09-22": {"t": "x" * 999}}})["notes"]["p1"]["2026-09-22"]["t"]) == 300
+print("schema: note del giorno sui turni (v24) ok")

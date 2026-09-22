@@ -72,8 +72,15 @@ from typing import Any
 # la validita' del giorno non conta, un 2026-02-31 semplicemente non verra'
 # mai disegnato da nessuna vista.
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
-SCHEMA_VERSION = 23
+
+def _clean_hhmm(value):
+    """Un orario o niente. "25:99" non e' un'ora: vale come non scritto."""
+    testo = str(value or "").strip()
+    return testo if HHMM_RE.match(testo) else ""
+
+SCHEMA_VERSION = 24
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -938,6 +945,44 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                         break
                 clean_data[pid] = kept
         result["data"] = clean_data
+
+        # Le note del giorno (v24): con chi si lavora, un paziente critico,
+        # dove si va in trasferta e a che ora si torna.
+        #
+        # Mappa PARALLELA a `data`, non dentro. In `data` un giorno vale una
+        # sigla, una stringa corta: cambiarne la forma vorrebbe dire migrare
+        # ogni dashboard esistente e riscrivere la strada veloce che ridipinge
+        # una sola casella. Una mappa a parte non rompe niente, e assente
+        # vuol dire semplicemente "nessuna nota".
+        notes = result.get("notes")
+        clean_notes = {}
+        if isinstance(notes, dict):
+            cutoff_n = (datetime.date.today() - datetime.timedelta(days=730)).isoformat()
+            for pid, days in list(notes.items())[:4]:
+                if not isinstance(pid, str) or not isinstance(days, dict):
+                    continue
+                kept_n = {}
+                for day, value in days.items():
+                    if not isinstance(day, str) or not DAY_RE.match(day):
+                        continue
+                    if day < cutoff_n or not isinstance(value, dict):
+                        continue
+                    nota = {
+                        "t": str(value.get("t") or "").strip()[:300],
+                        "l": str(value.get("l") or "").strip()[:60],
+                        "da": _clean_hhmm(value.get("da")),
+                        "a": _clean_hhmm(value.get("a")),
+                    }
+                    # Una nota vuota non e' una nota: altrimenti la casella
+                    # porterebbe il segnalino senza avere niente da dire.
+                    if not any(nota.values()):
+                        continue
+                    kept_n[day] = nota
+                    if len(kept_n) >= 400:
+                        break
+                clean_notes[pid] = kept_n
+        result["notes"] = clean_notes
+
         rot = result.get("rotation")
         if isinstance(rot, dict):
             seq = rot.get("seq")

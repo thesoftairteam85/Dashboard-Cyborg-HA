@@ -4,6 +4,86 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.66.0] - 2026-09-22
+
+**Le note del giorno sui turni.** Tieni premuto su un giorno e scrivi con chi
+lavori, un paziente critico, dove vai in trasferta e a che ora torni.
+
+### Il gesto, che è tutto il lavoro
+Tenere premuto e toccare sono due significati dello stesso gesto, e la
+difficoltà sta nel non confonderli:
+
+- **500 ms**, come le pastiglie della mappa 3D: sotto, resta un tocco che
+  dipinge il turno;
+- **più di 10 px di movimento annulla**, perché su un telefono la griglia si
+  scorre e uno scorrimento non deve mai aprire niente;
+- dopo che la pressione lunga è scattata, il click che il browser manda subito
+  dopo viene **ingoiato**. Senza, il giorno verrebbe *anche* dipinto — ed è il
+  difetto che renderebbe la funzione inutilizzabile;
+- il menu contestuale del browser viene soppresso, o su un telefono si
+  mangerebbe il gesto.
+
+### Quattro campi, e nessuno obbligatorio
+**Nota**, **dove**, **dalle**, **alle**. Per un turno normale basta la nota;
+per una trasferta contano il luogo e gli orari. Un'ora scritta male (`25:00`)
+vale come non scritta invece di finire sulla card.
+
+I campi **non sono legati al modello mentre si scrive**: si leggono solo
+quando si preme SALVA. È la ragione per cui la tastiera non fa saltare niente
+— un ridisegno a ogni carattere sostituirebbe il campo in uso e sposterebbe il
+cursore, cioè il difetto chiuso in 0.57.0 che qui sarebbe rientrato dalla
+finestra.
+
+### Dove si vede
+- Un **angolo** nella casella, non un'icona: una casella di calendario è larga
+  venti pixel, e un'icona lì dentro coprirebbe il turno — l'informazione
+  principale — per annunciarne una secondaria.
+- **La nota di oggi in testa alla card**: una nota che si vede solo tenendo
+  premuto sulla casella giusta è una nota che nessuno legge la mattina.
+- Nel suggerimento della casella, col nome della persona quando il turnario ne
+  porta più di una.
+
+### Dettagli
+Schema **v24**: `notes` è una mappa **parallela** a `data`, non dentro. In
+`data` un giorno vale una sigla; cambiarne la forma vorrebbe dire migrare ogni
+dashboard esistente e riscrivere la strada veloce che ridipinge una sola
+casella. Assente vuol dire semplicemente «nessuna nota». Una nota vuota si
+cancella da sola: se restasse, la casella porterebbe il segnalino senza avere
+niente da dire.
+
+Comprende anche la **0.65.0**: Home Assistant a volte manda il solo codice
+`no_update_available` invece della frase, e finiva tale e quale nell'avviso
+rosso — una stringa di programma davanti all'utente.
+
+### Verifiche
+23 asserzioni nuove (1576) più 9 sullo schema, e due scatti nuovi in Chromium
+(`80-turni`, `81-turni-nota`). Lo screenshot ha trovato una cosa che nessuna
+asserzione misura: i campi del pannello non ereditano lo stile dell'editor, e
+il browser li disegnava col suo grigio chiaro in mezzo a un pannello scuro.
+
+## [0.65.0] - 2026-09-22
+
+Correzione minima, nessuna fretta: si porta con il prossimo rilascio che ha
+qualcosa di sostanzioso dentro.
+
+Home Assistant, quando non c'è niente da installare, manda a volte la frase
+(*«No update available for update.cyborg_dashboard_update»*) e a volte il solo
+**codice** (`no_update_available`). Il pannello cercava solo la frase, quindi
+il codice finiva fra gli errori veri e compariva **tale e quale** nell'avviso
+rosso: una stringa di programma davanti a chi usa la dashboard, che è sempre
+un difetto — e in una dashboard destinata a un cliente è peggio.
+
+Ora si guardano sia il messaggio sia il codice, e si accettano entrambe le
+scritture.
+
+Vale per un caso raro: dalla 0.63.0 l'installazione passa il numero di
+versione, quindi quella risposta arriva solo se GitHub non ha risposto e il
+pannello ha dovuto chiedere senza numero.
+
+### Verifiche
+2 asserzioni nuove (1555). Rimettendo il difetto — la ricerca della sola
+frase — la suite fallisce.
+
 ## [0.64.0] - 2026-09-22
 
 Tre correzioni, e la prima è un errore che ha fatto perdere tempo a chi la

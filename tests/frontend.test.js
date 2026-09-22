@@ -5141,6 +5141,89 @@ console.log("\n== 53. TURNI: IL CALENDARIO SI DIPINGE ==");
   if (el._shiftSaveT) { clearTimeout(el._shiftSaveT); el._shiftSaveT = null; }
   el._dashboard = savedDash53; el._selected = savedSel53; el._pageIndex = savedIdx53;
   el._shiftOffset = {}; el._shiftBrush = {}; el._shiftPerson = {};
+  // --- 0.66.0: la nota del giorno ------------------------------------------
+  //
+  // "Tenendo premuto hai la possibilita' di aggiungere una nota per quel
+  // giorno: con chi lavori, un paziente critico. E se metto trasferta, dove
+  // e a che ora torno."
+  {
+    const noteItem = sh;
+    // _renderNote cerca la card nel dashboard: qui ce la mettiamo davvero,
+    // invece di stubbare _cardById, cosi' la prova passa dalla stessa strada
+    // che percorre il pannello vero.
+    const savedDashN = el._dashboard, savedIdxN = el._pageIndex;
+    el._dashboard = { version: 4, revision: 0, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
+      pages: [{ id: "pn", title: "P", icon: "mdi:home", type: "sections",
+        sections: [{ id: "sn", title: "S", items: [noteItem] }] }] };
+    el._pageIndex = 0;
+    const oggiKey = el._dayKey(new Date());
+    const altro = "2026-11-12";
+    noteItem.notes = {};
+
+    ok("una casella senza nota non ne inventa una",
+       el._noteGet(noteItem, "p1", altro) === null);
+
+    el._noteSet(noteItem, "p1", altro, { t: "con Anna", l: "Bergamo", da: "08:00", a: "18:00" });
+    const n1 = el._noteGet(noteItem, "p1", altro);
+    ok("la nota si scrive", n1 && n1.t === "con Anna" && n1.l === "Bergamo", JSON.stringify(n1));
+    ok("e si legge in una riga sola, con gli orari uniti",
+       el._noteRiga(n1) === "con Anna · Bergamo · 08:00–18:00", el._noteRiga(n1));
+    ok("con la sola ora di partenza lo dice a parole",
+       el._noteRiga({ da: "08:00" }) === "dalle 08:00", el._noteRiga({ da: "08:00" }));
+    ok("e con la sola ora di rientro pure",
+       el._noteRiga({ a: "18:00" }) === "fino alle 18:00");
+
+    // Una nota vuota non e' una nota: se lo fosse, la casella porterebbe il
+    // segnalino senza avere niente da dire.
+    el._noteSet(noteItem, "p1", altro, { t: "   ", l: "", da: "", a: "" });
+    ok("una nota vuota si cancella invece di restare come guscio",
+       el._noteGet(noteItem, "p1", altro) === null,
+       JSON.stringify(noteItem.notes));
+
+    el._noteSet(noteItem, "p1", altro, { t: "paziente critico" });
+    const disegno = el._shiftsBody(noteItem);
+    ok("il giorno con la nota porta un segnalino",
+       (disegno.match(/class="sh-pin"/g) || []).length >= 0);
+    el._noteSet(noteItem, "p1", oggiKey, { t: "turno con Marta", l: "Reparto B" });
+    const conOggi = el._shiftsBody(noteItem);
+    ok("la nota di OGGI si legge in testa alla card, senza tenere premuto",
+       /sh-nota-oggi/.test(conOggi) && /turno con Marta/.test(conOggi));
+    ok("e la casella di oggi ha il suo segnalino",
+       /class="sh-pin"/.test(conOggi));
+    ok("la nota finisce anche nel suggerimento della casella",
+       /Reparto B/.test(conOggi));
+
+    // Il pannello: i campi ci sono tutti e portano quello che c'era gia'.
+    el._noteOpen = { id: noteItem.id, pid: "p1", key: oggiKey };
+    const pann = el._renderNote();
+    ok("il pannello si apre sul giorno giusto", /class="upd-box nota-box"/.test(pann));
+    ok("con nota, dove, dalle e alle",
+       /data-note-f="t"/.test(pann) && /data-note-f="l"/.test(pann)
+       && /data-note-f="da"/.test(pann) && /data-note-f="a"/.test(pann));
+    ok("e ci ritrovi quello che avevi scritto",
+       /turno con Marta/.test(pann) && /Reparto B/.test(pann));
+    ok("con una nota gia' scritta si puo' togliere", /data-note-del/.test(pann));
+    ok("il pannello aperto sta nella firma, o il primo stato nuovo lo chiuderebbe",
+       /nota:/.test(el._buildSignature()), el._buildSignature().slice(0, 60));
+    ok("niente undefined nel pannello della nota", !/>undefined</.test(pann));
+    ok("div bilanciati nel pannello della nota",
+       (pann.match(/<div/g) || []).length === (pann.match(/<\/div>/g) || []).length);
+    el._noteOpen = null;
+    ok("chiuso, non si disegna piu'", el._renderNote() === "");
+
+    // Il gesto: tenere premuto NON deve anche dipingere il giorno.
+    ok("la pressione lunga e' agganciata alle caselle",
+       /el\.onpointerdown = \(ev\) => \{[\s\S]{0,700}_noteOpen = \{/.test(src));
+    ok("e il click che la segue viene ingoiato",
+       /if \(fired\) \{ fired = false; return; \}/.test(src));
+    ok("uno scorrimento di piu' di dieci pixel annulla, o la griglia non si scorre piu'",
+       /Math\.abs\(ev\.clientX - sx\) > 10/.test(src));
+
+    noteItem.notes = {};
+    if (el._shiftSaveT) { clearTimeout(el._shiftSaveT); el._shiftSaveT = null; }
+    el._dashboard = savedDashN; el._pageIndex = savedIdxN;
+  }
+
   ok("stato ripristinato dopo la sezione 53", el._hass.callWS === savedWS53);
 }
 
@@ -5837,6 +5920,22 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
               ok("e il motivo si legge", el._updErr === "GitHub non risponde", el._updErr);
               ok("il pannello torna utilizzabile", el._updBusy === "");
 
+              // 0.65.0: Home Assistant manda a volte la frase e a volte il solo
+              // CODICE. Cercando solo la frase, "no_update_available" finiva
+              // fra gli errori veri e compariva tale e quale nell'avviso
+              // rosso: una stringa di programma davanti all'utente.
+              el._updBusy = ""; el._updDone = ""; el._updErr = "";
+              el._hass.callService = (d) => d === "update"
+                ? Promise.reject(Object.assign(new Error("no_update_available"),
+                                               { code: "no_update_available" }))
+                : Promise.resolve();
+              el._updInstall("riavvia").then(() => {
+                ok("anche il solo codice «no_update_available» viene riconosciuto",
+                   !el._updErr, el._updErr);
+                ok("e non finisce tale e quale davanti all'utente",
+                   !/no_update_available/.test(el._updDone + el._updErr),
+                   el._updDone + " / " + el._updErr);
+
               // il riavvio taglia la connessione: quello NON e' un guasto
               el._updBusy = ""; el._updDone = ""; el._updErr = "";
               el._hass.callService = () => Promise.reject(new Error("Connection lost"));
@@ -5853,6 +5952,7 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
                 el._dashboard = dash57b; el._pageIndex = idx57b;
                 el._selected = sel57b; el._editing = ed57b; el._signature = sig57b;
                 ok("stato ripristinato dopo la sezione 57", el._hass.callService === savedCS57);
+              });
               });
             });
           });

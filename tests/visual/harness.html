@@ -392,6 +392,30 @@ window.__mount=(dash,opts)=>{
             appearance:{},states:{},actions:{},device:SYSDEV,temps:[],disks:[]});
           if(opts.selectSystem){el._selected={kind:"card",sectionId:sec.id,itemId:"syscard"};}
         }
+        if(opts&&opts.turni){
+          var pad=function(n){return String(n).padStart(2,"0");};
+          var kk=function(off){var d=new Date();d.setDate(d.getDate()+off);
+            return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());};
+          var secT=el._sections()[0];
+          var dati={lei:{},lui:{}};
+          var seq=["M","P","N","R","R","M","P"];
+          for(var i=-20;i<20;i++){dati.lei[kk(i)]=seq[(i+40)%7];
+            if(i%3===0) dati.lui[kk(i)]="M";}
+          secT.items.unshift({id:"turni1",type:"shifts",entity_id:"",name:"Turni",
+            size:"xl",appearance:{},states:{},actions:{},devices:[],view:"mese",
+            people:[{id:"lei",name:"Lisa",color:"#ff8fab"},
+                    {id:"lui",name:"Oscar",color:"#00e5ff"}],
+            types:[],data:dati,rotation:null,
+            notes:{lei:{}, lui:{}}});
+          var cT=secT.items[0];
+          cT.notes.lei[kk(0)]={t:"Turno con Marta, paziente critico in stanza 4",
+            l:"Reparto B",da:"",a:""};
+          cT.notes.lui[kk(2)]={t:"Trasferta",l:"Bergamo",da:"07:30",a:"19:00"};
+          cT.notes.lei[kk(5)]={t:"Corso BLSD",l:"",da:"09:00",a:"13:00"};
+          if(opts.turni==="nota"){
+            el._noteOpen={id:"turni1",pid:"lui",key:kk(2)};
+          }
+        }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
           sec.items.unshift({id:"ecocard",type:"economy",entity_id:"",name:"",size:"xl",
