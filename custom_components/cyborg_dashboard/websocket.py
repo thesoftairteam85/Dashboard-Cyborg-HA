@@ -336,6 +336,7 @@ async def _ws_release(hass: HomeAssistant, connection: websocket_api.ActiveConne
     repo = _repo_from_url(manifest.get("documentation") or manifest.get("issue_tracker"))
     result: dict[str, Any] = {
         "tag": None,
+        "tag_raw": "",
         "repo": repo,
         # La versione che Home Assistant ha DAVVERO caricato: e' il termine di
         # paragone giusto, perche' i file nuovi sul disco non sono ancora il
@@ -368,6 +369,12 @@ async def _ws_release(hass: HomeAssistant, connection: websocket_api.ActiveConne
                 else:
                     data = await resp.json()
                     result["tag"] = _clean_tag(data.get("tag_name"))
+                    # Il tag COM'E' SCRITTO su GitHub, "v" compresa. Serve per
+                    # dire a Home Assistant quale versione installare: senza,
+                    # `update.install` chiede a HACS che cosa c'e' di nuovo, e
+                    # HACS guarda GitHub sul proprio orologio - quindi
+                    # risponde "niente da installare" mentre su GitHub c'e'.
+                    result["tag_raw"] = str(data.get("tag_name") or "")
                     result["name"] = str(data.get("name") or "")
                     result["url"] = str(data.get("html_url") or "")
                     result["published"] = str(data.get("published_at") or "")

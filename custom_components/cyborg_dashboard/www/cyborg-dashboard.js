@@ -2349,9 +2349,20 @@ class CyborgDashboard extends HTMLElement {
     this._updErr = ""; this._updDone = "";
     this._updBusy = "install"; this._touch(true);
     try {
-      // La chiamata torna quando HACS ha finito di scaricare: non serve
-      // sorvegliare `in_progress`, che serve solo a chi disegna una barra.
-      await this._hass.callService("update", "install", { entity_id: u.id });
+      // Si dice a Home Assistant QUALE versione installare.
+      //
+      // Senza il numero, `update.install` confronta la versione installata con
+      // quella che conosce l'entita' di HACS - e HACS guarda GitHub sul
+      // proprio orologio. Risultato visto dal vivo: il pannello diceva
+      // giustamente "c'e' la 0.62.0", si premeva INSTALLA, e Home Assistant
+      // rispondeva "No update available" tre volte di fila. Passando il tag
+      // letto da GitHub, HACS non ha voce in capitolo.
+      //
+      // La chiamata torna quando ha finito di scaricare: non serve sorvegliare
+      // `in_progress`, che serve solo a chi disegna una barra.
+      const dati = { entity_id: u.id };
+      if (u.tagRaw) dati.version = u.tagRaw;
+      await this._hass.callService("update", "install", dati);
     } catch (err) {
       const testo = (err && err.message) || "Installazione non riuscita";
       this._updBusy = "";
@@ -2359,7 +2370,14 @@ class CyborgDashboard extends HTMLElement {
       // guardare, scopre che non c'era niente da scaricare. Non e' un guasto:
       // e' la risposta alla domanda, e va detta come tale.
       if (/no update available/i.test(testo)) {
-        this._updDone = "Ho guardato: non c'era niente di nuovo da scaricare.";
+        // Due situazioni diversissime dietro la stessa frase di Home
+        // Assistant. Dire "non c'era niente di nuovo" mentre il riquadro
+        // sopra annuncia una versione nuova e' una contraddizione sullo
+        // stesso schermo, ed e' il difetto che si vedeva.
+        this._updDone = u.nuova
+          ? "Home Assistant dice che non c'è niente da installare, ma su GitHub c'è la "
+            + u.published + ": HACS non se n'è ancora accorto. Riprova fra qualche minuto."
+          : "Ho guardato: non c'era niente di nuovo da scaricare.";
         this._loadRelease(true);
       } else {
         this._updErr = testo;
@@ -2428,6 +2446,9 @@ class CyborgDashboard extends HTMLElement {
     const published = rel && rel.tag ? this._verNum(rel.tag) : "";
     const info = {
       id, hacs: !!id, rel, running, loaded, onDisk, published,
+      // Il tag com'e' scritto su GitHub, "v" compresa: e' quello che si passa
+      // a Home Assistant per installare. Vedi _updInstall.
+      tagRaw: (rel && rel.tag_raw) || "",
       busy: !!a.in_progress,
       pct: typeof a.update_percentage === "number" ? a.update_percentage : null,
       url: (rel && rel.url) || String(a.release_url || ""),
@@ -2475,6 +2496,39 @@ class CyborgDashboard extends HTMLElement {
     this._releasePending = false;
     this._signature = "";
     this.render();
+  }
+
+  /**
+   * Due tocchi per distruggere qualcosa.
+   *
+   * "Mi e' capitato di cancellare una card per sbaglio": un cestino che
+   * esegue al primo tocco, in un pannello dove si tocca in continuazione, e'
+   * una trappola - e quello che porta via non torna indietro.
+   *
+   * Niente finestra di sistema: un `confirm()` blocca tutto il browser e su
+   * un telefono compare al centro dello schermo, lontano dal dito. Il
+   * pulsante stesso diventa la domanda, e si disarma da solo dopo cinque
+   * secondi: un pulsante che resta armato all'infinito e' di nuovo una
+   * trappola, solo spostata al tocco successivo.
+   */
+  _delKey(kind, a, b) { return kind + ":" + (a || "") + ":" + (b || ""); }
+
+  _isArmed(chiave) { return this._confirmKey === chiave; }
+
+  _confirmed(chiave) {
+    if (this._confirmKey === chiave) {
+      this._confirmKey = null;
+      if (this._confirmT) { clearTimeout(this._confirmT); this._confirmT = null; }
+      return true;
+    }
+    this._confirmKey = chiave;
+    if (this._confirmT) clearTimeout(this._confirmT);
+    this._confirmT = setTimeout(() => {
+      this._confirmT = null;
+      if (this._confirmKey === chiave) { this._confirmKey = null; this._touch(true); }
+    }, 5000);
+    this._touch(true);
+    return false;
   }
 
   _isFloorplan() { const p = this._page(); return !!p && p.type === "floorplan"; }
@@ -3019,7 +3073,9 @@ class CyborgDashboard extends HTMLElement {
             <small>${esc(pg.type === "floorplan" ? "mappa 3D" : (pg.sections || []).length + " sezioni")}</small></div>
           <button class="mini" data-page-move="${i}:-1" ${i === 0 ? "disabled" : ""} title="Sposta su"><ha-icon icon="mdi:arrow-up"></ha-icon></button>
           <button class="mini" data-page-move="${i}:1" ${i === pages.length - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
-          <button class="mini danger" data-page-remove="${i}" ${pages.length <= 1 ? "disabled" : ""} title="Elimina pagina"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+          ${(() => { const k = this._delKey("page", String(i)); const armed = this._isArmed(k);
+            return `<button class="mini danger${armed ? " armed" : ""}" data-page-remove="${i}" ${pages.length <= 1 ? "disabled" : ""}
+              title="${armed ? "Tocca ancora: la pagina e tutto quello che contiene" : "Elimina pagina"}"><ha-icon icon="${armed ? "mdi:alert-outline" : "mdi:trash-can-outline"}"></ha-icon></button>`; })()}
         </div>`).join("")}</div>
       <div class="preset-grid">
         <button type="button" class="preset" data-add-page="sections"><ha-icon icon="mdi:view-dashboard-outline"></ha-icon><span>Pagina vuota</span></button>
@@ -4829,7 +4885,10 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint">${placed} dispositivi posizionati a mano; gli altri si dispongono da soli.</span>
       </div>
 
-      <button class="delete" data-room-remove="${esc(room.id)}">ELIMINA STANZA</button>
+      ${(() => { const k = this._delKey("room", room.id);
+        return `<button class="delete${this._isArmed(k) ? " armed" : ""}" data-room-remove="${esc(room.id)}">${this._isArmed(k)
+            ? '<ha-icon icon="mdi:alert-outline"></ha-icon> TOCCA ANCORA PER ELIMINARE'
+            : "ELIMINA STANZA"}</button>`; })()}
     </aside>`;
   }
 
@@ -7260,8 +7319,17 @@ class CyborgDashboard extends HTMLElement {
       }));
     }
 
+    // Una lista SCELTA A MANO e' gia' una decisione dell'utente, entita' per
+    // entita': tagliarla a otto e' il sistema che decide al posto suo. Il solo
+    // tetto che resta e' quello assoluto, e a farlo rispettare e' il pulsante
+    // che aggiunge, che si spegne quando si e' pieni.
+    //
+    // `max_series` serve alle due modalita' automatiche, dove l'elenco puo'
+    // esplodere da solo: "tutte le temperature della casa" puo' voler dire
+    // quaranta linee che nessuno ha chiesto.
     const rows = Array.isArray(item.series) ? item.series : [];
-    return rows.filter((r) => r && r.entity && live(r.entity)).slice(0, cap);
+    const tetto = nocap ? 9999 : MAX_TREND_SERIES;
+    return rows.filter((r) => r && r.entity && live(r.entity)).slice(0, tetto);
   }
 
   /**
@@ -7272,12 +7340,15 @@ class CyborgDashboard extends HTMLElement {
    * esistono piu' in Home Assistant (si tolgono dall'elenco).
    */
   _trendCut(item) {
-    const cap = Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
-    const tutte = this._trendSeriesRaw(item, true);
     const manuale = (item.source || "manual") === "manual";
+    // Scelte a mano: il tetto e' solo quello assoluto. Modalita' automatiche:
+    // quello che l'utente ha messo in MASSIMO DI LINEE.
+    const cap = manuale ? MAX_TREND_SERIES
+      : Math.max(1, Math.min(MAX_TREND_SERIES, Number(item.max_series) || 8));
+    const tutte = this._trendSeriesRaw(item, true);
     const scelte = manuale && Array.isArray(item.series)
       ? item.series.filter((r) => r && r.entity).length : tutte.length;
-    return { cap, scelte,
+    return { cap, scelte, manuale,
       disegnate: Math.min(tutte.length, cap),
       fuori: Math.max(0, tutte.length - cap),
       sparite: Math.max(0, scelte - tutte.length) };
@@ -7482,9 +7553,14 @@ class CyborgDashboard extends HTMLElement {
     if (!c.fuori && !c.sparite) return "";
     const pezzi = [];
     if (c.fuori) {
+      // Nelle due modalita' automatiche il limite si alza; scegliendo a mano
+      // il tetto e' quello assoluto e non c'e' niente da alzare. Mandare uno
+      // a cercare un comando che nella sua modalita' non esiste e' peggio
+      // che tacere - ed e' esattamente quello che faceva la 0.62.0.
       pezzi.push(`<span><strong>${c.fuori}</strong> ${c.fuori === 1
-        ? "grandezza scelta non è disegnata" : "grandezze scelte non sono disegnate"}:
-        il massimo è ${c.cap} linee. Si alza in MODIFICA → la card → MASSIMO DI LINEE.</span>`);
+        ? "grandezza scelta non è disegnata" : "grandezze scelte non sono disegnate"}: ${c.manuale
+          ? `${c.cap} linee è il massimo assoluto su un grafico solo.`
+          : `il massimo è ${c.cap} linee. Si alza in MODIFICA → la card → MASSIMO DI LINEE.`}</span>`);
     }
     if (c.sparite) {
       pezzi.push(`<span><strong>${c.sparite}</strong> ${c.sparite === 1
@@ -10192,7 +10268,10 @@ class CyborgDashboard extends HTMLElement {
                     esc(d.title)}${d.id === cur ? " · è qui" : ""}</option>`).join("")}</optgroup>`).join("")}
               </select>`;
             })()}
-            <button class="mini danger" data-card-remove data-sec="${esc(section.id)}" data-item="${esc(item.id)}" title="Elimina"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+            ${(() => { const k = this._delKey("card", section.id, item.id); const armed = this._isArmed(k);
+              return `<button class="mini danger${armed ? " armed" : ""}" data-card-remove
+                data-sec="${esc(section.id)}" data-item="${esc(item.id)}"
+                title="${armed ? "Tocca ancora per eliminare" : "Elimina"}"><ha-icon icon="${armed ? "mdi:alert-outline" : "mdi:trash-can-outline"}"></ha-icon></button>`; })()}
           </div>
         </article>`;
     }
@@ -10212,7 +10291,9 @@ class CyborgDashboard extends HTMLElement {
         <button class="mini" data-sec-move="1" data-sec="${esc(section.id)}" ${index === total - 1 ? "disabled" : ""} title="Sposta giù"><ha-icon icon="mdi:arrow-down"></ha-icon></button>
         <button class="mini" data-sec-config data-sec="${esc(section.id)}"><ha-icon icon="mdi:cog-outline"></ha-icon> SEZIONE</button>
         <button class="mini accentbtn" data-sec-addcard data-sec="${esc(section.id)}"><ha-icon icon="mdi:plus"></ha-icon> CARD</button>
-        <button class="mini danger" data-sec-remove data-sec="${esc(section.id)}" title="Elimina sezione"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+        ${(() => { const k = this._delKey("sec", section.id); const armed = this._isArmed(k);
+          return `<button class="mini danger${armed ? " armed" : ""}" data-sec-remove data-sec="${esc(section.id)}"
+            title="${armed ? "Tocca ancora: sezione e card" : "Elimina sezione"}"><ha-icon icon="${armed ? "mdi:alert-outline" : "mdi:trash-can-outline"}"></ha-icon></button>`; })()}
       </div>` : "";
 
     const empty = this._editing
@@ -11159,6 +11240,7 @@ class CyborgDashboard extends HTMLElement {
           <label>PERIODO<select data-prop="hours">
             ${TREND_RANGES.map((r) => `<option value="${r.h}" ${(card.hours || 24) === r.h ? "selected" : ""}>${esc(r.l)}</option>`).join("")}
           </select></label>
+          <span class="hint"><strong>Minimo e massimo sono la scala verticale</strong>, non il numero di linee. Lasciali vuoti e si adatta da sola ai dati. Fissali solo per leggere <strong>due grafici diversi con lo stesso metro</strong>: senza, uno che va da 27 a 36 e uno che va da 40 a 78 riempiono tutti e due l'altezza e sembrano uguali.</span>
           <div class="two">
             <label>MINIMO<input type="number" step="0.5" data-prop="y_min" value="${card.y_min ?? ""}" placeholder="auto"></label>
             <label>MASSIMO<input type="number" step="0.5" data-prop="y_max" value="${card.y_max ?? ""}" placeholder="auto"></label>
@@ -11884,7 +11966,11 @@ class CyborgDashboard extends HTMLElement {
         </select>
       </div>`}
 
-      <button class="delete" data-card-remove data-sec="${esc(this._selected.sectionId)}" data-item="${esc(card.id)}">ELIMINA CARD</button>
+      ${(() => { const k = this._delKey("card", this._selected.sectionId, card.id);
+        return `<button class="delete${this._isArmed(k) ? " armed" : ""}" data-card-remove
+          data-sec="${esc(this._selected.sectionId)}" data-item="${esc(card.id)}">${this._isArmed(k)
+            ? '<ha-icon icon="mdi:alert-outline"></ha-icon> TOCCA ANCORA PER ELIMINARE'
+            : "ELIMINA CARD"}</button>`; })()}
     </aside>`;
   }
 
@@ -11923,7 +12009,10 @@ class CyborgDashboard extends HTMLElement {
         <label class="check"><input type="checkbox" data-sec-kiosk ${section.kiosk !== false ? "checked" : ""}> Questa sezione si vede sui tablet</label>
         <span class="hint">Togliendola resta visibile a te, non a un utente non amministratore.</span>
       </div>
-      <button class="delete" data-sec-remove data-sec="${esc(section.id)}">ELIMINA SEZIONE</button>
+      ${(() => { const k = this._delKey("sec", section.id);
+        return `<button class="delete${this._isArmed(k) ? " armed" : ""}" data-sec-remove data-sec="${esc(section.id)}">${this._isArmed(k)
+            ? '<ha-icon icon="mdi:alert-outline"></ha-icon> TOCCA ANCORA: SEZIONE E CARD'
+            : "ELIMINA SEZIONE"}</button>`; })()}
     </aside>`;
   }
 
@@ -12476,7 +12565,11 @@ class CyborgDashboard extends HTMLElement {
       };
     });
     all("[data-sec-remove]").forEach((el) => {
-      el.onclick = () => this._removeSection(el.getAttribute("data-sec"));
+      el.onclick = () => {
+        const sec = el.getAttribute("data-sec");
+        if (!this._confirmed(this._delKey("sec", sec))) return;
+        this._removeSection(sec);
+      };
     });
     all("[data-sec-config]").forEach((el) => {
       el.onclick = () => { this._selected = { kind: "section", sectionId: el.getAttribute("data-sec") }; this._touch(); };
@@ -12500,7 +12593,11 @@ class CyborgDashboard extends HTMLElement {
       };
     });
     all("[data-card-remove]").forEach((el) => {
-      el.onclick = () => this._removeCard(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+      el.onclick = () => {
+        const sec = el.getAttribute("data-sec"), item = el.getAttribute("data-item");
+        if (!this._confirmed(this._delKey("card", sec, item))) return;
+        this._removeCard(sec, item);
+      };
     });
     all("[data-card-to]").forEach((el) => {
       el.onchange = () => {
@@ -12696,7 +12793,11 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => this._addPage(el.getAttribute("data-add-page"));
     });
     all("[data-page-remove]").forEach((el) => {
-      el.onclick = () => this._removePage(parseInt(el.getAttribute("data-page-remove"), 10));
+      el.onclick = () => {
+        const i = el.getAttribute("data-page-remove");
+        if (!this._confirmed(this._delKey("page", i))) return;
+        this._removePage(parseInt(i, 10));
+      };
     });
     all("[data-page-move]").forEach((el) => {
       el.onclick = () => {
@@ -12769,7 +12870,11 @@ class CyborgDashboard extends HTMLElement {
     all("[data-auto-rooms]").forEach((el) => { el.onclick = () => this._autoRooms(); });
     all("[data-add-room]").forEach((el) => { el.onclick = () => this._addRoom(); });
     all("[data-room-remove]").forEach((el) => {
-      el.onclick = () => this._removeRoom(el.getAttribute("data-room-remove"));
+      el.onclick = () => {
+        const id = el.getAttribute("data-room-remove");
+        if (!this._confirmed(this._delKey("room", id))) return;
+        this._removeRoom(id);
+      };
     });
     all("[data-view-nudge]").forEach((el) => {
       el.onclick = () => {
@@ -15670,6 +15775,16 @@ button.mini.grow{flex:1;justify-content:center}
 button.wide{width:100%;justify-content:center;margin-top:10px}
 button.danger-outline{background:transparent;border:1px solid rgba(255,61,113,.4);color:#ff8091}
 .delete{width:100%;justify-content:center;margin-top:20px;background:rgba(255,61,113,.14);color:#ff8091;border:1px solid rgba(255,61,113,.32)}
+/* Armato: il pulsante E' la domanda. Pieno invece che tenue, perche' la
+   differenza fra "puoi eliminare" e "sto per eliminare" deve vedersi
+   dall'altra parte della stanza, e pulsa per dire che non durera' per sempre. */
+.delete.armed,button.mini.danger.armed{background:#ff3d71;color:#fff;
+  border-color:#ff3d71;animation:armPulse 1.1s ease-in-out infinite}
+.delete.armed{letter-spacing:.06em}
+button.mini.danger.armed ha-icon{color:#fff}
+@keyframes armPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,61,113,.55)}
+  60%{box-shadow:0 0 0 8px rgba(255,61,113,0)}}
+@media (prefers-reduced-motion:reduce){.delete.armed,button.mini.danger.armed{animation:none}}
 .entity-current{display:flex;align-items:center;gap:10px;margin-top:8px;padding:10px;border-radius:10px;background:color-mix(in srgb,var(--accent) 8%,transparent);border:1px solid color-mix(in srgb,var(--accent) 24%,transparent)}
 .entity-current ha-icon{--mdc-icon-size:20px;color:var(--accent);flex-shrink:0}
 .entity-current strong{display:block;font-size:12.5px}
@@ -17368,7 +17483,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.62.0";
+const CYBORG_BUILD = "0.64.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

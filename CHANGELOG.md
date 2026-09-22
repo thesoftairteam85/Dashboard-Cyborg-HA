@@ -4,6 +4,106 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.64.0] - 2026-09-22
+
+Tre correzioni, e la prima è un errore che ha fatto perdere tempo a chi la
+usava.
+
+### «MASSIMO DI LINEE» non esisteva, dove serviva
+La 0.62.0 aveva insegnato alla card a dichiarare le linee che non disegna, e
+a scrivere *«si alza in MODIFICA → la card → MASSIMO DI LINEE»*. Ma quel campo
+viene disegnato **solo per le due modalità automatiche** — *Segui le stanze* e
+*Tutte di un tipo*. Con **Scelte da me** il taglio a otto veniva applicato lo
+stesso, e il comando per alzarlo non c'era. Mandare qualcuno a cercare una
+cosa che nella sua modalità non esiste è peggio che tacere.
+
+La correzione non è aggiungere il campo mancante: è **togliere il limite**.
+Una lista scelta a mano è già una decisione dell'utente, entità per entità;
+tagliarla a otto è il sistema che decide al posto suo. Il tetto a otto serve
+alle modalità automatiche, dove l'elenco può esplodere da solo — *«tutte le
+temperature della casa»* può voler dire quaranta linee che nessuno ha chiesto.
+
+Ora in **Scelte da me** si disegna quello che hai scelto, fino al tetto
+assoluto di venti; a farlo rispettare è già il pulsante che aggiunge, che si
+spegne quando sei pieno. E se venti non bastano, la nota lo dice **senza**
+mandarti a cercare un comando che lì non c'è.
+
+### Minimo e massimo: adesso c'è scritto a cosa servono
+Sono la **scala verticale**, non il numero di linee. Lasciati vuoti si adatta
+da sola. Si fissano solo per leggere **due grafici diversi con lo stesso
+metro**: senza, uno che va da 27 a 36 e uno che va da 40 a 78 riempiono
+entrambi l'altezza e sembrano uguali. La card Grafico aveva già questa riga,
+la card Storico a confronto no.
+
+### Due tocchi per eliminare
+*«Mi è capitato di cancellare una card per sbaglio.»* Un cestino che esegue al
+primo tocco, in un pannello dove si tocca in continuazione, è una trappola — e
+quello che porta via non torna indietro.
+
+Il pulsante stesso diventa la domanda: **TOCCA ANCORA PER ELIMINARE**, pieno
+di rosso e pulsante. Niente finestra di sistema: un `confirm()` blocca tutto
+il browser e su un telefono compare al centro dello schermo, lontano dal dito.
+
+Si **disarma da solo dopo cinque secondi**, perché un pulsante che resta
+armato all'infinito è di nuovo una trappola, solo spostata al tocco
+successivo. Armarne un altro disarma il primo: due cestini accesi insieme sono
+due trappole invece di una.
+
+Vale per card, sezioni, pagine e stanze. Per sezioni e pagine il testo dice
+anche **cosa** si porta via — *«SEZIONE E CARD»*, *«la pagina e tutto quello
+che contiene»* — perché lì il danno è più grande di quello che un cestino
+lascia intendere.
+
+### Verifiche
+19 asserzioni nuove (1553). Rimettendo i difetti — il taglio a otto sulle liste
+scelte a mano, e il cestino che salta la conferma — la suite fallisce
+rispettivamente 2 e 1 asserzioni.
+
+## [0.63.0] - 2026-09-22
+
+*«C'è la 0.62.0»* diceva il pannello, giustamente. Si premeva **INSTALLA E
+RIAVVIA** e Home Assistant rispondeva **«No update available»**. Tre volte di
+fila.
+
+### Perché
+`update.install` senza numero di versione fa confrontare a Home Assistant la
+versione installata con quella che conosce **l'entità di HACS** — e HACS guarda
+GitHub sul proprio orologio, dell'ordine della mezz'ora. Quindi: il pannello
+sapeva, HACS no, e vinceva HACS.
+
+La 0.61.0 aveva risolto solo metà del problema. Aveva insegnato al pannello a
+**chiedere a GitHub** invece che a HACS — e quella parte funzionava, il
+riquadro diceva il vero — ma poi, al momento di installare, tornava a
+dipendere da HACS senza accorgersene.
+
+### La correzione
+Si dice a Home Assistant **quale** versione installare, passando il tag letto
+da GitHub (`v0.62.0`). Con il numero esplicito HACS non ha voce in capitolo: il
+download parte, e infatti l'entità si aggiorna **durante** l'installazione.
+
+Il comando `cyborg_dashboard/release` ora restituisce anche `tag_raw`, cioè il
+tag com'è scritto su GitHub, `v` compresa. `0.62.0` serve per confrontare,
+`v0.62.0` per installare: sono due usi diversi dello stesso dato e vanno tenuti
+separati.
+
+### E un messaggio che si contraddiceva da solo
+Quando Home Assistant rispondeva *«No update available»*, il pannello scriveva
+*«Ho guardato: non c'era niente di nuovo da scaricare»* — **sotto** un riquadro
+che annunciava la versione nuova. Due frasi opposte sullo stesso schermo.
+
+Ora la stessa risposta di Home Assistant viene letta in due modi, perché copre
+due situazioni diverse:
+
+- GitHub non ha niente di nuovo → *«Ho guardato: non c'era niente di nuovo.»*
+- GitHub ha qualcosa di nuovo → *«Home Assistant dice che non c'è niente da
+  installare, ma su GitHub c'è la 0.62.0: HACS non se n'è ancora accorto.»*
+
+La seconda non smentisce la card: **accusa il componente giusto**.
+
+### Verifiche
+3 asserzioni nuove (1534). Rimettendo il difetto — l'installazione senza numero
+di versione — la suite fallisce.
+
 ## [0.62.0] - 2026-09-22
 
 Il grafico «Storico a confronto» disegnava **otto** delle dodici grandezze

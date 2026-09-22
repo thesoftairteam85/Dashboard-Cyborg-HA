@@ -2563,6 +2563,87 @@ console.log("\n== 28. GRAFICO CHE SEGUE LE STANZE ==");
     tc.source = savedSrc; tc.series = savedSer;
   }
 
+  // 0.64.0: una lista SCELTA A MANO non si taglia a otto.
+  //
+  // Il difetto, trovato guardando la sua card: MASSIMO DI LINEE viene
+  // disegnato solo per le due modalita' automatiche, ma il taglio veniva
+  // applicato anche a "Scelte da me". Risultato: la card gli diceva di
+  // alzare un comando che nella sua modalita' non esiste. Peggio che tacere.
+  {
+    const savedSrc = tc.source, savedSer = tc.series, savedMax = tc.max_series;
+    const dodici = [];
+    for (let i = 0; i < 12; i++) {
+      const id = "sensor.core_" + i;
+      states[id] = S(String(30 + i), { friendly_name: "Core " + i,
+        device_class: "temperature", unit_of_measurement: "\u00b0C" });
+      dodici.push({ entity: id });
+    }
+    tc.source = "manual"; tc.series = dodici; tc.max_series = 8;
+    ok("dodici scelte a mano restano dodici, anche col vecchio limite a otto",
+       el._trendSeries(tc).length === 12, String(el._trendSeries(tc).length));
+    const cutM = el._trendCut(tc);
+    ok("e non c'è piu' niente da dichiarare come tagliato",
+       cutM.fuori === 0 && el._trendCutNote(tc) === "", JSON.stringify(cutM));
+    ok("il tetto dichiarato è quello assoluto, non l'otto",
+       cutM.cap === 20 && cutM.manuale === true, JSON.stringify(cutM));
+    // Oltre il tetto assoluto si taglia comunque, e lo si dice senza mandare
+    // l'utente a cercare un comando che nella sua modalita' non esiste.
+    for (let i = 12; i < 23; i++) {
+      const id = "sensor.core_" + i;
+      states[id] = S(String(30 + i), { friendly_name: "Core " + i,
+        device_class: "temperature", unit_of_measurement: "\u00b0C" });
+      tc.series.push({ entity: id });
+    }
+    ok("oltre venti si taglia lo stesso", el._trendSeries(tc).length === 20);
+    ok("e la nota NON manda a cercare MASSIMO DI LINEE, che li' non c'è",
+       /massimo assoluto/.test(el._trendCutNote(tc))
+       && !/MASSIMO DI LINEE/.test(el._trendCutNote(tc)), el._trendCutNote(tc));
+    for (let i = 0; i < 23; i++) delete states["sensor.core_" + i];
+    tc.source = savedSrc; tc.series = savedSer; tc.max_series = savedMax;
+    ok("e le modalità automatiche continuano a rispettare il loro limite",
+       (() => { tc.max_series = 3; const c = el._trendCut(tc);
+         const n = el._trendCutNote(tc); tc.max_series = savedMax;
+         return c.manuale === false && c.cap === 3 && /MASSIMO DI LINEE/.test(n); })());
+  }
+
+  // 0.64.0: due tocchi per distruggere qualcosa.
+  {
+    const k = el._delKey("card", "s1", "c1");
+    ok("la chiave di conferma è la stessa per lo stesso bersaglio",
+       k === el._delKey("card", "s1", "c1") && k !== el._delKey("card", "s1", "c2"));
+    el._confirmKey = null;
+    ok("all'inizio non c'è niente di armato", !el._isArmed(k));
+    ok("il primo tocco NON elimina", el._confirmed(k) === false);
+    ok("ma arma quel bersaglio, e solo quello",
+       el._isArmed(k) && !el._isArmed(el._delKey("card", "s1", "c2")));
+    ok("il secondo tocco esegue", el._confirmed(k) === true);
+    ok("e lascia disarmato: il tocco dopo ricomincia da capo",
+       !el._isArmed(k) && el._confirmed(k) === false);
+    // Armare un secondo bersaglio disarma il primo: due cestini accesi
+    // insieme sono due trappole invece di una.
+    const k2 = el._delKey("sec", "s2");
+    el._confirmed(k2);
+    ok("armare un altro bersaglio disarma il precedente",
+       el._isArmed(k2) && !el._isArmed(k));
+    if (el._confirmT) { clearTimeout(el._confirmT); el._confirmT = null; }
+    el._confirmKey = null;
+
+    // Tutti e quattro i posti da cui si puo' cancellare qualcosa devono
+    // passare dalla conferma. Verificato sul sorgente: un gestore che salta
+    // il controllo e' esattamente il difetto da cui si parte, e non lo
+    // vedresti finche' non perdi una card.
+    const passa = (attr, kind) => new RegExp(
+      "data-" + attr + "\\]\"\\)[\\s\\S]{0,320}_confirmed\\(this\\._delKey\\(\"" + kind + "\"").test(src);
+    ok("il cestino della card passa dalla conferma", passa("card-remove", "card"));
+    ok("quello della sezione pure", passa("sec-remove", "sec"));
+    ok("quello della pagina pure", passa("page-remove", "page"));
+    ok("e quello della stanza pure", passa("room-remove", "room"));
+    ok("il pulsante armato lo dice a parole, non solo col colore",
+       /TOCCA ANCORA PER ELIMINARE/.test(src) && /armed/.test(src));
+    ok("e per sezioni e pagine dice anche cosa si porta via",
+       /SEZIONE E CARD/.test(src) && /la pagina e tutto quello che contiene/.test(src));
+  }
+
   // -- follow a whole device_class --
   tc.source = "class"; tc.device_class = "humidity";
   const hums = el._trendSeries(tc);
@@ -5694,11 +5775,13 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
 
       // --- installa e riavvia -------------------------------------------------
       el._hass.callWS = savedWS57;
-      el._release = { tag: "9.9.9", checked: Date.now() / 1000 };
+      el._release = { tag: "9.9.9", tag_raw: "v9.9.9", checked: Date.now() / 1000 };
       setUpd("on", { latest_version: "9.9.9" });
       let chiamate = [];
+      let versioni = [];
       el._hass.callService = (d, sv, data) => {
         chiamate.push(d + "." + sv + ":" + ((data && data.entity_id) || ""));
+        if (d === "update") versioni.push((data && data.version) || null);
         return Promise.resolve();
       };
       el._updBusy = ""; el._updDone = ""; el._updErr = "";
@@ -5708,6 +5791,11 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
         ok("installa e POI riavvia, in quest'ordine",
            chiamate.join("|") === "update.install:" + UPD + "|homeassistant.restart:",
            chiamate.join("|"));
+        // IL difetto della 0.61.0: senza il numero, Home Assistant chiede a
+        // HACS che cosa c'e' di nuovo, HACS e' indietro di mezz'ora e
+        // risponde "No update available" mentre su GitHub la versione c'e'.
+        ok("a Home Assistant si dice QUALE versione installare, col tag di GitHub",
+           versioni[0] === "v9.9.9", JSON.stringify(versioni));
 
         chiamate = []; el._updBusy = ""; el._updDone = ""; el._updErr = "";
         el._updInstall("solo").then(() => {
@@ -5725,9 +5813,15 @@ console.log("\n== 57. L'AGGIORNAMENTO SI INSTALLA DA SOLI ==");
               : Promise.resolve();
           };
           el._updInstall("riavvia").then(() => {
-            ok("«niente da aggiornare» viene riportato come risposta, non come errore",
-               !el._updErr && /niente di nuovo/.test(el._updDone),
-               el._updErr + " / " + el._updDone);
+            // 0.63.0: la stessa frase di Home Assistant copre due situazioni
+            // diversissime. Con GitHub che annuncia una versione nuova, dire
+            // "non c'era niente di nuovo" e' una contraddizione sullo stesso
+            // schermo: il riquadro sopra dice il contrario.
+            ok("«niente da aggiornare» non e' un errore",
+               !el._updErr, el._updErr);
+            ok("ma se GitHub dice che c'e', si accusa HACS e non si smentisce la card",
+               /HACS non se n'è ancora accorto/.test(el._updDone)
+               && /9\.9\.9/.test(el._updDone), el._updDone);
             ok("e in quel caso non si riavvia",
                chiamate.join("|") === "update.install", chiamate.join("|"));
 
