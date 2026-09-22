@@ -2022,10 +2022,57 @@ class CyborgDashboard extends HTMLElement {
     // this guard every unrelated state update in a 380-entity install would
     // rebuild the whole DOM and yank focus out of the editor mid-typing.
     const sig = this._buildSignature();
-    if (sig !== this._signature) this.render();
+    if (sig === this._signature) return;
+    // ...e NON ridisegnare mentre l'utente sta toccando.
+    //
+    // Il difetto che si vede solo sul telefono: una pagina con dei sensori di
+    // potenza riceve uno stato nuovo ogni due secondi, e ogni stato nuovo
+    // ricostruisce tutto l'innerHTML. Su un desktop non si nota; su un
+    // telefono il nodo che stai toccando viene distrutto e ricreato sotto il
+    // dito, la pagina sobbalza e il tocco finisce nel vuoto. "Sembra che
+    // abbia i tic".
+    //
+    // La lettura non si perde: si rimanda. Finche' c'e' un dito sullo
+    // schermo, e per mezzo secondo dopo averlo tolto, il ridisegno aspetta;
+    // poi arriva in un colpo solo, con lo stato piu' recente.
+    if (this._busyUntil && Date.now() < this._busyUntil) {
+      if (!this._repaintT) {
+        this._repaintT = setTimeout(() => {
+          this._repaintT = null;
+          if (this._buildSignature() !== this._signature) this.render();
+        }, Math.max(60, this._busyUntil - Date.now()));
+      }
+      return;
+    }
+    this.render();
   }
 
-  connectedCallback() { if (this._hass && !this._dashboard) this._load(); }
+  /** Il dito e' sullo schermo: da qui in avanti, per mezzo secondo, non si ridisegna. */
+  _markBusy(ms) {
+    this._busyUntil = Date.now() + (ms || 500);
+  }
+
+  connectedCallback() {
+    if (!this._busyBound) {
+      this._busyBound = true;
+      // `capture` perche' devono arrivare PRIMA di qualunque gestore che
+      // possa provocare un ridisegno, e `passive` perche' non annullano
+      // niente: servono solo a dire "c'e' un dito qui".
+      const mark = () => this._markBusy(500);
+      const markLong = () => this._markBusy(900);
+      this.addEventListener("pointerdown", mark, { capture: true, passive: true });
+      this.addEventListener("pointermove", mark, { capture: true, passive: true });
+      this.addEventListener("pointerup", markLong, { capture: true, passive: true });
+      this.addEventListener("touchstart", mark, { capture: true, passive: true });
+      this.addEventListener("touchmove", mark, { capture: true, passive: true });
+      this.addEventListener("touchend", markLong, { capture: true, passive: true });
+      // Scrivere in un campo e' un'interazione lunga: un ridisegno a meta'
+      // di una parola sposta il cursore.
+      this.addEventListener("keydown", () => this._markBusy(1200), { capture: true });
+      this.addEventListener("focusin", () => this._markBusy(1200), { capture: true });
+    }
+    if (this._hass && !this._dashboard) this._load();
+  }
 
   /** Nearest scrollable ancestor: inside HA the panel itself is not what scrolls. */
   _scrollParent() {
@@ -2042,6 +2089,7 @@ class CyborgDashboard extends HTMLElement {
   disconnectedCallback() {
     this._unsubscribeAll();
     if (this._camTimer) { clearInterval(this._camTimer); this._camTimer = null; }
+    if (this._repaintT) { clearTimeout(this._repaintT); this._repaintT = null; }
   }
 
   // ---------------------------------------------------------------- data ---
@@ -2293,7 +2341,22 @@ class CyborgDashboard extends HTMLElement {
     this.render();
   }
 
-  async _save() {
+  /**
+   * Salva, e quando la revisione non torna, RIPROVA invece di arrendersi.
+   *
+   * Due schermi aperti sulla stessa dashboard - il telefono e il computer -
+   * sono la norma, non l'eccezione: uno salva, l'altro ha in mano una
+   * revisione vecchia e si becca "modificato altrove". Il banner rosso e
+   * basta era la risposta sbagliata due volte: non dice cosa fare, e sui
+   * turni - che si salvano da soli mentre uno dipinge - la modifica andava
+   * perduta senza che nessuno se ne accorgesse.
+   *
+   * Adesso: si rilegge quello che c'e' sul server, si RIPORTANO sopra i
+   * turni appena dipinti (sono l'unica cosa che puo' essere stata scritta da
+   * uno schermo che non e' questo), e si riprova una volta sola. Se anche la
+   * seconda fallisce, allora si', il banner - ma con scritto cosa fare.
+   */
+  async _save(retrying) {
     try {
       const res = await this._hass.callWS({
         type: "cyborg_dashboard/save",
@@ -2307,8 +2370,60 @@ class CyborgDashboard extends HTMLElement {
       this.render();
       setTimeout(() => { this._saved = false; this.render(); }, 2200);
     } catch (err) {
-      this._error = (err && err.message) || "Salvataggio non riuscito";
+      const msg = (err && err.message) || "Salvataggio non riuscito";
+      const conflict = /revision_conflict/i.test((err && err.code) || "")
+        || /modificato altrove/i.test(msg);
+      if (conflict && !retrying) {
+        const merged = await this._mergeFromServer();
+        if (merged) { await this._save(true); return; }
+      }
+      this._error = conflict
+        ? "Il dashboard è stato modificato su un altro schermo e non sono riuscito a unire le due versioni. Ricarica la pagina: le modifiche non salvate di questo schermo andranno perse."
+        : msg;
       this.render();
+    }
+  }
+
+  /**
+   * Rilegge il dashboard dal server e ci rimette sopra i turni locali.
+   *
+   * Solo i turni: sono l'unico dato che questa dashboard scrive **mentre
+   * qualcuno la guarda da un altro schermo**, e sono per loro natura
+   * uniti-bili (un giorno per volta, chiave per chiave). Tutto il resto -
+   * card spostate, sezioni, colori - e' una modifica strutturale che due
+   * schermi non devono fare insieme: li' e' giusto fermarsi e dirlo.
+   */
+  async _mergeFromServer() {
+    try {
+      const res = await this._hass.callWS({ type: "cyborg_dashboard/get" });
+      const server = res && res.dashboard;
+      if (!server) return false;
+      const mine = {};
+      for (const page of (this._dashboard.pages || [])) {
+        for (const sec of (page.sections || [])) {
+          for (const it of (sec.items || [])) {
+            if (it.type === "shifts" && it.data) mine[it.id] = it.data;
+          }
+        }
+      }
+      for (const page of (server.pages || [])) {
+        for (const sec of (page.sections || [])) {
+          for (const it of (sec.items || [])) {
+            if (it.type !== "shifts" || !mine[it.id]) continue;
+            const merged = {};
+            for (const [pid, days] of Object.entries(it.data || {})) merged[pid] = Object.assign({}, days);
+            for (const [pid, days] of Object.entries(mine[it.id])) {
+              merged[pid] = Object.assign(merged[pid] || {}, days);
+            }
+            it.data = merged;
+          }
+        }
+      }
+      this._dashboard = server;
+      this._signature = "";
+      return true;
+    } catch (e) {
+      return false;
     }
   }
 
@@ -8043,10 +8158,54 @@ class CyborgDashboard extends HTMLElement {
     item.data[personId] = Object.assign({}, item.data[personId] || {});
     if (k) item.data[personId][key] = k; else delete item.data[personId][key];
     this._dirty = true;
+    // Dipingere una casella NON ricostruisce la pagina.
+    //
+    // Con `render()` ogni tocco buttava via tutto l'innerHTML e lo rifaceva:
+    // su un telefono la griglia sobbalza, lo scorrimento salta e il tocco
+    // successivo arriva su un nodo che nel frattempo e' stato sostituito.
+    // Qui cambia UNA casella, che e' esattamente quello che e' cambiato.
+    // La firma si azzera lo stesso, cosi' il prossimo ridisegno naturale
+    // parte da zero e non crede che sia tutto uguale.
     this._signature = "";
-    this.render();
+    if (!this._shiftPaintCell(item, personId, key)) this.render();
     if (this._shiftSaveT) clearTimeout(this._shiftSaveT);
     this._shiftSaveT = setTimeout(() => { this._shiftSaveT = null; this._save(); }, 1000);
+  }
+
+  /**
+   * Ridipinge le fasce di una sola casella, in piedi nel DOM.
+   *
+   * Torna false quando la casella non c'e' (un'altra vista, un'altra pagina):
+   * in quel caso chi chiama ricade sul ridisegno completo, che e' lento ma
+   * non sbaglia mai.
+   */
+  _shiftPaintCell(item, personId, key) {
+    const cell = this.querySelector(`[data-sh-day="${item.id}|${key}"]`);
+    if (!cell) return false;
+    const people = this._shiftPeople(item);
+    const slots = cell.querySelectorAll(".sh-slot");
+    if (slots.length !== people.length) return false;
+    people.forEach((p, i) => {
+      const t = this._shiftType(item, this._shiftGet(item, p.id, key));
+      const el = slots[i];
+      el.textContent = t ? t.k : "";
+      el.classList.toggle("empty", !t);
+      el.style.setProperty("--cc", t ? t.color : "transparent");
+      el.style.setProperty("--pc", p.color || "#00e5ff");
+    });
+    // La riga di oggi e il "giorno libero insieme" dipendono dai dati, non
+    // dalla casella: si aggiornano solo se il giorno toccato e' oggi o se
+    // c'e' piu' di una persona, cioe' quando possono davvero essere cambiati.
+    if (key === this._dayKey(new Date()) || people.length > 1) {
+      const top = this.querySelector(`[data-card-id="${item.id}"] .sh-top`);
+      if (top) {
+        const fresh = document.createElement("div");
+        fresh.innerHTML = this._shiftsBody(item);
+        const src = fresh.querySelector(".sh-top");
+        if (src) top.innerHTML = src.innerHTML;
+      }
+    }
+    return true;
   }
 
   /** La finestra della vista, spostata di `offset` passi. Stessa regola dei calendari. */
@@ -16470,7 +16629,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.56.0";
+const CYBORG_BUILD = "0.57.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

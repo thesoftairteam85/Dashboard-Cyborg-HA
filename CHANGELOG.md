@@ -4,6 +4,50 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.57.0] - 2026-09-21
+
+Dal telefono la dashboard aveva i tic: la card si muoveva sotto il dito e
+compilare i turni era una lotta. Tre cause diverse, tutte e tre risolte.
+
+### 1. Il ridisegno non arriva mentre stai toccando
+Una pagina con dei sensori di potenza riceve uno stato nuovo ogni due secondi,
+e finora ogni stato nuovo ricostruiva tutto l'`innerHTML`. Su un computer non
+si nota; su un telefono il nodo che stai toccando viene distrutto e ricreato
+sotto il dito: la pagina sobbalza e il tocco finisce nel vuoto.
+
+Ora, finché c'è un dito sullo schermo — e per mezzo secondo dopo che l'hai
+tolto, un secondo e due decimi se stai scrivendo in un campo — il ridisegno
+**aspetta**. Non si perde: si rimanda, e arriva in un colpo solo con lo stato
+più recente. Dieci aggiornamenti durante un tocco diventano un ridisegno solo.
+
+### 2. Dipingere un turno cambia una casella, non la pagina
+Ogni tocco su un giorno chiamava `render()`: la griglia intera buttata via e
+rifatta per un carattere. Ora cambia la sola casella toccata (sigla, colore
+del turno, colore della persona) e la riga in cima solo quando può davvero
+essere cambiata — il giorno di oggi, o più di una persona sul turnario.
+Se la casella non è sullo schermo — un'altra vista, un'altra pagina — si
+ricade sul ridisegno completo, che è lento ma non sbaglia mai.
+
+### 3. Due schermi non si rubano più la revisione
+Il telefono in mano e il computer aperto sulla stessa dashboard sono la norma.
+Finora uno salvava, l'altro aveva in mano una revisione vecchia e si prendeva
+*«Il dashboard è stato modificato altrove»* — un banner rosso che non diceva
+cosa fare, e sui turni (che si salvano da soli mentre uno dipinge) la modifica
+andava perduta senza che nessuno se ne accorgesse.
+
+Ora, al primo conflitto, si rilegge il dashboard dal server, ci si **rimettono
+sopra i turni appena dipinti** — un giorno per volta, chiave per chiave — e si
+riprova **una volta sola**. Sullo stesso giorno vince l'ultimo tocco. Tutto il
+resto (card spostate, sezioni, colori) resta la versione del server: quella è
+una modifica strutturale che due schermi non devono fare insieme, e lì è
+giusto fermarsi. Se anche la seconda prova fallisce il banner c'è ancora, ma
+dice cosa fare e avverte che le modifiche non salvate si perdono.
+
+### Verifiche
+42 asserzioni nuove (1423) — sezioni 54 e 55 — più le 474 misurate in
+Chromium. Rimettendo ognuno dei tre difetti la suite fallisce: 7, 7 e 8
+asserzioni rispettivamente.
+
 ## [0.56.0] - 2026-09-21
 
 Card **Turni**: il turnario si dipinge. Niente account, niente eventi da compilare.

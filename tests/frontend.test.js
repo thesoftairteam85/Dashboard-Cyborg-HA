@@ -5015,6 +5015,259 @@ console.log("\n== 53. TURNI: IL CALENDARIO SI DIPINGE ==");
   ok("stato ripristinato dopo la sezione 53", el._hass.callWS === savedWS53);
 }
 
+console.log("\n== 54. IL TELEFONO NON DEVE AVERE I TIC ==");
+{
+  // Il difetto, con le sue parole: "dal cellulare la card si muove, sembra che
+  // abbia i tic, cerco di compilarla e non sta ferma". Tre cause distinte, tre
+  // parti qui sotto: il ridisegno che arriva mentre il dito e' giu', il tocco
+  // sul turno che ricostruiva tutta la pagina, e i due schermi che si
+  // rubavano la revisione a vicenda.
+  const savedDash54 = el._dashboard, savedSel54 = el._selected, savedIdx54 = el._pageIndex;
+  const savedSig54 = el._signature, savedEd54 = el._editing;
+  const savedRender54 = el.render, savedQS54 = el.querySelector;
+  const savedBusy54 = el._busyUntil, savedRepaint54 = el._repaintT;
+  const realST54 = global.setTimeout, realCT54 = global.clearTimeout;
+
+  let renders = 0;
+  el.render = function () { renders++; this._signature = this._buildSignature(); };
+
+  const item54 = { id: "t54", type: "shifts", entity_id: "", name: "Turni di lei",
+    size: "xl", appearance: {}, states: {}, actions: {}, devices: [],
+    people: [{ id: "p1", name: "Lei", color: "#ff8fab" }],
+    types: [], view: "mese", data: {}, rotation: null };
+  el._dashboard = { version: 3, revision: 7, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
+    pages: [{ id: "p54", title: "P", icon: "mdi:home", type: "sections",
+      sections: [{ id: "s54", title: "S", items: [item54] }] }] };
+  el._pageIndex = 0; el._selected = null; el._editing = false;
+  el._busyUntil = 0; el._repaintT = null;
+
+  // --- A. il ridisegno aspetta che il dito si alzi ---------------------------
+  el._signature = "una firma qualunque";
+  renders = 0;
+  el.hass = el._hass;
+  ok("senza nessuno che tocca, un nuovo stato ridisegna subito", renders === 1, String(renders));
+  ok("e non lascia niente in coda", !el._repaintT);
+
+  let stCount = 0, cleared = 0, cb54 = null, delay54 = null;
+  global.setTimeout = (f, ms) => { stCount++; cb54 = f; delay54 = ms; return 4242; };
+  global.clearTimeout = () => { cleared++; };
+
+  el._signature = "una firma qualunque";
+  el._markBusy(500);
+  renders = 0; stCount = 0;
+  el.hass = el._hass;
+  ok("col dito sullo schermo il ridisegno NON parte", renders === 0, String(renders));
+  ok("ma non si perde: viene messo in coda", el._repaintT === 4242);
+  ok("e la coda dura quanto manca alla fine del tocco",
+     delay54 > 60 && delay54 <= 500, String(delay54));
+
+  el._signature = "un'altra firma ancora";
+  el.hass = el._hass;
+  ok("dieci stati nuovi durante il tocco restano UNA sola coda", stCount === 1, String(stCount));
+
+  renders = 0;
+  if (typeof cb54 === "function") cb54();
+  ok("quando il tocco finisce il ridisegno arriva, una volta sola", renders === 1, String(renders));
+  ok("e la coda si libera", el._repaintT === null);
+
+  // se nel frattempo la pagina e' gia' aggiornata, il rimandato non serve piu'
+  el._signature = "terza firma";
+  el._markBusy(500);
+  el.hass = el._hass;
+  el._signature = el._buildSignature();
+  renders = 0;
+  ok("un ridisegno rimandato che non serve piu' non viene fatto",
+     typeof cb54 === "function" && (cb54(), renders === 0), String(renders));
+
+  ok("un tocco dura mezzo secondo di grazia",
+     (() => { el._markBusy(); const d = el._busyUntil - Date.now(); return d > 400 && d <= 500; })());
+  ok("scrivere in un campo ne dura di piu': un ridisegno a meta' parola sposta il cursore",
+     (() => { el._markBusy(1200); const d = el._busyUntil - Date.now(); return d > 1000; })());
+
+  el._signature = "quarta firma";
+  el._markBusy(500);
+  el.hass = el._hass;
+  cleared = 0;
+  el.disconnectedCallback();
+  ok("staccando il pannello la coda non resta accesa",
+     el._repaintT === null && cleared > 0, String(cleared));
+
+  // --- B. dipingere un turno cambia UNA casella, non la pagina ---------------
+  function mkSlot54() {
+    const s = { textContent: "?", cls: {}, props: {} };
+    s.classList = { toggle: (n, on) => { s.cls[n] = !!on; } };
+    s.style = { setProperty: (k, v) => { s.props[k] = v; } };
+    return s;
+  }
+  const notToday54 = new Date(); notToday54.setDate(notToday54.getDate() - 3);
+  const key54 = el._dayKey(notToday54);
+  const slot54 = mkSlot54();
+  const cell54 = { querySelectorAll: (sel) => (sel === ".sh-slot" ? [slot54] : []) };
+  el.querySelector = (sel) => (sel === '[data-sh-day="t54|' + key54 + '"]' ? cell54 : null);
+  el._busyUntil = 0; el._repaintT = null;
+  el._shiftSaveT = null;
+
+  renders = 0;
+  el._shiftSet(item54, "p1", key54, "M");
+  ok("dipingere un giorno NON ricostruisce la pagina", renders === 0, String(renders));
+  ok("la casella toccata porta la sigla", slot54.textContent === "M", slot54.textContent);
+  ok("e smette di essere vuota", slot54.cls.empty === false);
+  ok("prende il colore del turno", slot54.props["--cc"] === "#ffd166", slot54.props["--cc"]);
+  ok("e quello della persona", slot54.props["--pc"] === "#ff8fab", slot54.props["--pc"]);
+  ok("il dato e' scritto davvero", el._shiftGet(item54, "p1", key54) === "M");
+  ok("la firma e' azzerata: il prossimo ridisegno vero non crede che sia tutto uguale",
+     el._signature === "", el._signature);
+
+  el._shiftSet(item54, "p1", key54, "");
+  ok("togliere il turno svuota la casella",
+     slot54.textContent === "" && slot54.cls.empty === true, slot54.textContent);
+  ok("e il giorno sparisce dai dati", el._shiftGet(item54, "p1", key54) === "");
+  ok("senza lasciare la chiave vuota dietro di se'",
+     !Object.prototype.hasOwnProperty.call(item54.data.p1 || {}, key54));
+
+  renders = 0;
+  el._shiftSet(item54, "p1", "2026-01-05", "N");
+  ok("una casella che non e' sullo schermo ricade sul ridisegno completo",
+     renders === 1, String(renders));
+
+  const cellVuota54 = { querySelectorAll: () => [] };
+  el.querySelector = () => cellVuota54;
+  renders = 0;
+  el._shiftSet(item54, "p1", key54, "P");
+  ok("se le fasce disegnate non sono quelle delle persone si rifa' tutto, che e' lento ma non sbaglia",
+     renders === 1, String(renders));
+
+  el.querySelector = (sel) => (sel === '[data-sh-day="t54|' + key54 + '"]' ? cell54 : null);
+  el._shiftSaveT = null;
+  stCount = 0; cleared = 0;
+  el._shiftSet(item54, "p1", key54, "M");
+  el._shiftSet(item54, "p1", key54, "P");
+  el._shiftSet(item54, "p1", key54, "N");
+  ok("tre tocchi di fila fanno UN solo salvataggio, non tre",
+     stCount === 3 && cleared === 2, stCount + " timer / " + cleared + " annullati");
+
+  global.setTimeout = realST54; global.clearTimeout = realCT54;
+  el._shiftSaveT = null;
+  el.render = savedRender54; el.querySelector = savedQS54;
+  el._dashboard = savedDash54; el._selected = savedSel54; el._pageIndex = savedIdx54;
+  el._signature = savedSig54; el._editing = savedEd54;
+  el._busyUntil = savedBusy54; el._repaintT = savedRepaint54;
+  ok("stato ripristinato dopo la sezione 54", el.render === savedRender54);
+}
+
+// --- C. due schermi sulla stessa dashboard ----------------------------------
+// Gira in un microtask: cosi' non lascia i suoi stub addosso alle sezioni
+// sincrone che vengono dopo, e finisce comunque prima della catena a 30 ms.
+Promise.resolve().then(async () => {
+  console.log("\n== 55. DUE SCHERMI, UNA REVISIONE SOLA ==");
+  const savedDash55 = el._dashboard, savedWS55 = el._hass.callWS;
+  const savedRender55 = el.render, savedSig55 = el._signature, savedErr55 = el._error;
+  el.render = function () {};
+
+  const mine55 = { id: "t55", type: "shifts", entity_id: "", name: "Turni",
+    size: "xl", appearance: {}, states: {}, actions: {}, devices: [],
+    people: [{ id: "p1", name: "Lei", color: "#ff8fab" }], types: [],
+    view: "mese", rotation: null,
+    data: { p1: { "2026-09-01": "M", "2026-09-03": "P" } } };
+  el._dashboard = { version: 3, revision: 7, theme: { accent: "#00e5ff" }, hierarchy: {}, kiosk: {},
+    pages: [{ id: "p55", title: "P", icon: "mdi:home", type: "sections",
+      sections: [{ id: "s55", title: "S", items: [mine55] }] }] };
+  el._pageIndex = 0;
+
+  const mkServer55 = () => ({ version: 3, revision: 9, theme: { accent: "#00e5ff" },
+    hierarchy: {}, kiosk: {},
+    pages: [{ id: "p55", title: "P", icon: "mdi:home", type: "sections",
+      sections: [{ id: "s55", title: "S", items: [
+        { id: "t55", type: "shifts", entity_id: "", name: "Turni", size: "xl",
+          appearance: {}, states: {}, actions: {}, devices: [],
+          people: [{ id: "p1", name: "Lei", color: "#ff8fab" }], types: [],
+          view: "settimana", rotation: null,
+          data: { p1: { "2026-09-01": "R", "2026-09-02": "N" } } },
+        { id: "luce55", type: "light", entity_id: "switch.luci_scale", name: "Luci scale",
+          size: "s", appearance: {}, states: {}, actions: {}, devices: [] },
+      ] }] }] });
+
+  const conflict55 = () => {
+    const e = new Error("Il dashboard è stato modificato altrove (revisione attuale: 9)");
+    e.code = "revision_conflict";
+    return e;
+  };
+
+  // 1. conflitto -> rilettura -> unione -> riprova, e va a buon fine
+  let saves55 = [], gets55 = 0;
+  el._hass.callWS = (m) => {
+    if (m.type === "cyborg_dashboard/save") {
+      saves55.push({ revision: m.expected_revision, dash: m.dashboard });
+      if (saves55.length === 1) return Promise.reject(conflict55());
+      return Promise.resolve({ saved: true, revision: 10 });
+    }
+    if (m.type === "cyborg_dashboard/get") { gets55++; return Promise.resolve({ dashboard: mkServer55() }); }
+    return Promise.resolve({});
+  };
+  await el._save();
+
+  ok("dopo un conflitto si riprova, una volta sola", saves55.length === 2, String(saves55.length));
+  ok("e prima si rilegge quello che c'e' sul server", gets55 === 1, String(gets55));
+  ok("la riprova parte dalla revisione del server, non dalla mia",
+     !!saves55[1] && saves55[1].revision === 9, saves55[1] && String(saves55[1].revision));
+  const dopo55 = (((el._dashboard.pages || [])[0] || {}).sections || [])[0].items[0] || { data: { p1: {} } };
+  ok("i giorni dipinti sull'altro schermo restano", dopo55.data.p1["2026-09-02"] === "N",
+     JSON.stringify(dopo55.data.p1));
+  ok("quelli dipinti qui pure", dopo55.data.p1["2026-09-03"] === "P");
+  ok("e sullo stesso giorno vince l'ultimo tocco, il mio", dopo55.data.p1["2026-09-01"] === "M",
+     dopo55.data.p1["2026-09-01"]);
+  ok("del resto del dashboard resta la versione del server: due schermi non spostano le card insieme",
+     dopo55.view === "settimana"
+     && el._dashboard.pages[0].sections[0].items[1].id === "luce55", dopo55.view);
+  ok("il banner rosso non compare, perche' non c'e' piu' niente da dire", el._error === "");
+  ok("e la revisione buona e' quella che il server ha risposto", el._dashboard.revision === 10,
+     String(el._dashboard.revision));
+
+  // 2. se anche la riprova va male, si dice cosa fare - non "errore" e basta
+  el._dashboard.revision = 7;
+  saves55 = []; gets55 = 0;
+  el._hass.callWS = (m) => {
+    if (m.type === "cyborg_dashboard/save") { saves55.push(m); return Promise.reject(conflict55()); }
+    if (m.type === "cyborg_dashboard/get") { gets55++; return Promise.resolve({ dashboard: mkServer55() }); }
+    return Promise.resolve({});
+  };
+  await el._save();
+  ok("non si riprova all'infinito: due tentativi e basta", saves55.length === 2, String(saves55.length));
+  ok("il messaggio dice cosa fare, non solo che e' andata male",
+     /Ricarica la pagina/.test(el._error), el._error);
+  ok("e avverte che quello che non e' stato salvato si perde",
+     /andranno perse/.test(el._error), el._error);
+
+  // 3. se la rilettura non riesce, non si riprova alla cieca
+  el._dashboard.revision = 7;
+  saves55 = [];
+  el._hass.callWS = (m) => {
+    if (m.type === "cyborg_dashboard/save") { saves55.push(m); return Promise.reject(conflict55()); }
+    if (m.type === "cyborg_dashboard/get") return Promise.reject(new Error("rete giu'"));
+    return Promise.resolve({});
+  };
+  await el._save();
+  ok("se non si riesce a rileggere il server non si salva sopra alla cieca",
+     saves55.length === 1, String(saves55.length));
+
+  // 4. un errore che NON e' un conflitto resta quello che e'
+  el._dashboard.revision = 7;
+  saves55 = []; gets55 = 0;
+  el._hass.callWS = (m) => {
+    if (m.type === "cyborg_dashboard/save") { saves55.push(m); return Promise.reject(new Error("disco pieno")); }
+    if (m.type === "cyborg_dashboard/get") { gets55++; return Promise.resolve({ dashboard: mkServer55() }); }
+    return Promise.resolve({});
+  };
+  await el._save();
+  ok("un errore che non e' un conflitto non fa partire nessuna unione",
+     saves55.length === 1 && gets55 === 0, saves55.length + "/" + gets55);
+  ok("e viene riportato come e'", el._error === "disco pieno", el._error);
+
+  el._hass.callWS = savedWS55; el.render = savedRender55;
+  el._dashboard = savedDash55; el._signature = savedSig55; el._error = savedErr55;
+  ok("stato ripristinato dopo la sezione 55", el._hass.callWS === savedWS55);
+}).catch((e) => { fail++; console.log("  FAIL sezione 55 e' esplosa -> " + (e && e.stack || e)); });
+
 console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
 {
   const savedReg49 = el._registry, savedSel49 = el._selected, savedDash49 = el._dashboard;
