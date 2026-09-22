@@ -52,6 +52,8 @@ const DEFAULT_DASH = {
     ["08-map-focus",  { pageIndex: 1, autoRooms: true, focusRoom: true }],
     ["09-map-focus-edit", { pageIndex: 1, autoRooms: true, editing: true, focusRoom: true }],
     ["12-map-walls",  { pageIndex: 1, autoRooms: true, balcony: true }],
+    ["14-map-openings", { pageIndex: 1, autoRooms: true, openings: true }],
+    ["16-map-openings-ed", { pageIndex: 1, autoRooms: true, openings: true, editing: true, selectRoom: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
     ["26-ev",         { pageIndex: 0, autoCompose: true, ev: true }],

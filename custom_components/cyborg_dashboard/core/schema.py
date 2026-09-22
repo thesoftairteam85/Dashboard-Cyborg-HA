@@ -73,7 +73,7 @@ from typing import Any
 # mai disegnato da nessuna vista.
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
@@ -185,6 +185,15 @@ MONITOR_GROUP_KEYS = ("voltage", "current", "temperature", "frequency",
 ROOM_MATERIAL_KEYS = ("parquet", "piastrelle", "cemento", "tappeto", "pietra",
                       "prato", "acqua", "neutro")
 
+# Le aperture: porte e finestre che sono un BUCO in un lato, non il lato
+# intero. Tutto in frazioni (0..1) e mai in pixel: la stanza si ridimensiona
+# trascinando una maniglia, e una finestra misurata in pixel finirebbe fuori
+# dal muro al primo trascinamento.
+OPENING_KINDS = ("porta", "portafinestra", "finestra", "basculante", "passaggio")
+# Dodici per stanza: una casa vera ne ha tre o quattro per stanza, dodici e'
+# gia' il doppio del caso peggiore e tiene il documento leggibile.
+MAX_OPENINGS = 12
+
 WALL_TYPE_KEYS = ("wall", "glass", "window", "door", "garage", "railing",
                   "stairs", "open")
 
@@ -239,6 +248,45 @@ def normalize_room(room: dict[str, Any], index: int) -> dict[str, Any]:
     walls = result.get("walls")
     result["walls"] = ([w if w in WALL_TYPE_KEYS else "wall" for w in walls][:24]
                        if isinstance(walls, list) else [])
+
+    # Le aperture sul singolo lato. Fuori range non si scarta: si riporta
+    # dentro. Un valore assurdo arriva quasi sempre da un documento scritto a
+    # mano o da una versione futura, e buttare via la finestra e' peggio che
+    # disegnarla larga il 98% invece del 140%.
+    openings = result.get("openings")
+    clean_openings = []
+    if isinstance(openings, list):
+        for raw in openings[:MAX_OPENINGS]:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                wall = int(raw.get("wall"))
+            except (TypeError, ValueError):
+                continue
+            if wall < 0 or wall > 23:
+                continue
+            kind = raw.get("kind")
+            if kind not in OPENING_KINDS:
+                kind = "finestra"
+
+            def _frac(key, default, lo, hi):
+                try:
+                    return max(lo, min(hi, round(float(raw.get(key, default)), 4)))
+                except (TypeError, ValueError):
+                    return default
+
+            at = _frac("at", 0.5, 0.02, 0.98)
+            width = _frac("w", 0.3, 0.04, 0.98)
+            sill = _frac("sill", 0.0, 0.0, 0.9)
+            height = _frac("h", 0.5, 0.05, 1.0)
+            # Un'apertura piu' alta del muro esce dal tetto. L'altezza cede,
+            # non il davanzale: il davanzale e' una quota che l'utente sente
+            # come "a che altezza sta", l'altezza e' quanto ci sta sopra.
+            if sill + height > 1.0:
+                height = round(max(0.05, 1.0 - sill), 4)
+            clean_openings.append({"wall": wall, "kind": kind, "at": at,
+                                   "w": width, "sill": sill, "h": height})
+    result["openings"] = clean_openings
 
     # Floor material. Empty means "work it out from the name", so a room added
     # later gets a sensible floor without anybody choosing one, while a room

@@ -620,7 +620,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 22, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 23, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -1039,3 +1039,40 @@ assert _sh(rotation={"seq": ["m", "p"]})["rotation"]["seq"] == ["M", "P"]
 # una persona senza id non e' indirizzabile: si scarta
 assert _sh(people=[{"name": "senza id"}])["people"] == []
 print("schema: card Turni (v22) ok")
+
+
+# --- v23: le aperture sono buchi nel muro, non lati interi -----------------
+def _rm(**kw):
+    room = {"id": "r", "title": "R"}
+    room.update(kw)
+    return schema.normalize_room(room, 0)
+
+
+# una stanza senza aperture non ne inventa
+assert _rm()["openings"] == []
+
+ok_op = _rm(openings=[{"wall": 0, "kind": "porta", "at": 0.5, "w": 0.2,
+                       "sill": 0, "h": 0.9}])["openings"]
+assert ok_op == [{"wall": 0, "kind": "porta", "at": 0.5, "w": 0.2,
+                  "sill": 0.0, "h": 0.9}], ok_op
+
+# fuori range NON si scarta: si riporta dentro. Buttare via la finestra e'
+# peggio che disegnarla larga il 98% invece del 300%.
+fix = _rm(openings=[{"wall": 1, "kind": "finestra", "at": 1.4, "w": 3,
+                     "sill": 0.8, "h": 0.9}])["openings"][0]
+assert fix["at"] == 0.98 and fix["w"] == 0.98, fix
+# davanzale + altezza non possono uscire dal tetto: cede l'altezza
+assert fix["sill"] == 0.8 and fix["h"] == 0.2, fix
+
+# un lato non numerico non e' indirizzabile: quella si scarta
+assert _rm(openings=[{"wall": "sinistra"}])["openings"] == []
+assert _rm(openings=[{"wall": -1}])["openings"] == []
+assert _rm(openings=[{"wall": 99}])["openings"] == []
+# un tipo sconosciuto diventa finestra, non sparisce
+assert _rm(openings=[{"wall": 0, "kind": "oblo"}])["openings"][0]["kind"] == "finestra"
+# e il tetto per stanza
+assert len(_rm(openings=[{"wall": 0} for _ in range(40)])["openings"]) == schema.MAX_OPENINGS
+# openings non e' una lista -> nessuna apertura, non un errore
+assert _rm(openings={"wall": 0})["openings"] == []
+assert _rm(openings=[None, 5, "porta"])["openings"] == []
+print("schema: aperture nei muri (v23) ok")
