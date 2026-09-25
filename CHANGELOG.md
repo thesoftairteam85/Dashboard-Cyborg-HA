@@ -4,6 +4,130 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.68.0] - 2026-09-25
+
+La 0.67.0 aveva ragione sulla direzione della luce e torto su come applicarla.
+Guardando il render finale tre stanze su cinque — balcone, camera, bagno — non
+erano *spente*: erano **sparite**. Questa versione corregge quell'errore, che è
+un errore di formula, non di gusto.
+
+### Ambiente più direzionale, non ambiente per direzionale
+
+Il chiaroscuro dei muri era `(0,7 + 0,55·luce) · faccia`. Sembra innocuo:
+moltiplica tutto per l'orientamento del muro. Ed è precisamente il difetto,
+perché moltiplica **anche la componente ambientale**.
+
+La luce ambientale è luce rimbalzata: arriva da tutte le parti, non ha una
+direzione, e quindi **non deve dipendere da come è girato il muro**. Con la
+vecchia formula, il muro di una stanza a luci spente girato dalla parte opposta
+al sole finiva a `0,7 · 0,55 = 0,385`. Su questo fondo scuro un muro a 0,385
+non si distingue dalla pagina.
+
+Ora i due termini si **sommano**: `0,46 + 0,34·faccia + 0,52·luce`.
+
+| | vecchia | nuova |
+|---|---|---|
+| spenta, faccia in ombra | 0,385 | **0,647** |
+| spenta, faccia al sole | 0,700 | **0,800** |
+| accesa, faccia al sole | 1,250 | **1,320** |
+
+Il muro non scende mai sotto ~0,65, e la differenza fra la faccia al sole e
+quella in ombra resta ~0,15: il volume si legge ancora, ma nessuna stanza
+scompare. Stessa correzione sui serramenti, che avevano la stessa forma.
+
+### Il pavimento di una stanza senza luci
+
+Sempre nella 0.67.0 avevo abbassato la base del pavimento a `0,48` per togliere
+il bagliore della cucina bianca, che tirava l'occhio dentro la scatola invece
+che sull'edificio. È stato **troppo**: il cemento del balcone, che non ha luci,
+diventava un rettangolo nero. Base a `0,60`; il massimo a luce piena resta
+`1,20` come prima, quindi il bagliore della cucina non torna.
+
+### Un test che guarda il CSS, non solo il JavaScript
+
+Le asserzioni sul chiaroscuro misuravano `shade`, il numero geometrico — ed era
+giusto. Sbagliato era **il modo in cui il CSS lo usava**, che nessun test
+guardava. Le dieci asserzioni nuove leggono la `calc()` vera dal foglio di
+stile e la valutano ai quattro angoli: stanza spenta / accesa × faccia in ombra
+/ al sole. Una in particolare afferma che l'ambiente **non** dipende
+dall'orientamento, cioè esattamente la proprietà che la vecchia formula
+violava.
+
+Rimettendo la vecchia formula la suite fallisce con `-> 0.385`: verificato.
+
+### In breve
+- frontend 1588 asserzioni, visiva 474 misure, websocket 23, pannello 15
+- nessun cambiamento funzionale: solo numeri di luce
+
+## [0.67.0] - 2026-09-25
+
+*«La mappa fa ancora schifo.»* Cinque cose, e nessuna riguarda il 3D: erano
+tutte scelte di luce e di colore sbagliate.
+
+### 1. Il contorno che non toccava niente
+Ogni stanza aveva un contorno al neon **a quota pavimento**, mentre i muri
+arrivano sessanta pixel più in su. In prospettiva diventava un parallelogramma
+luminoso **staccato sotto la stanza**: la figura più sbagliata della scena, e
+quella che la faceva leggere come un diagramma. Alzarlo in cima ai muri non
+basta — la prospettiva lo ingrandisce e finisce comunque fuori dal bordo.
+
+Coi muri accesi il bordo della stanza lo disegnano i muri. Il contorno resta
+per i due casi in cui è l'unica cosa che lo dice: **muri spenti**, e **stanza
+selezionata o ingrandita**.
+
+### 2. La luce viene da una direzione sola, come il sole
+Il chiaroscuro dei muri era `1 − 0,2·|sin(angolo)|`: una formula **simmetrica**,
+che dava lo stesso grigio al muro a nord e a quello a sud. Quattro pareti
+illuminate uguali non sono un volume, sono un rettangolo.
+
+Ora la normale di ogni lato si confronta con una direzione di luce fissa. Non
+con `max(0, cos)`, che spegnerebbe metà delle pareti: con **mezzo Lambert**, che
+lascia il lato in ombra al 55% — come in una stanza vera, dove l'ombra è
+riempita dalla luce rimbalzata. Le due facce opposte si bilanciano sullo stesso
+valore, ed è quello che dimostra che la sorgente è **una**.
+
+### 3. I muri sono intonaco, non plastica colorata
+Il colore della stanza veniva spalmato su pavimento, muri e contorno: cinque
+stanze facevano cinque scatole fluorescenti, e la scena si leggeva come un
+grafico a torta in tre dimensioni. Il colore serve a **riconoscere** una
+stanza, non a dipingerla — ora resta un velo sui muri e pieno solo sulla
+targhetta e sul contorno.
+
+### 4. Il pavimento non è più la cosa più chiara dello schermo
+Era una superficie orizzontale sotto una luce radente, e brillava più di
+qualunque muro: tirava l'occhio *dentro* la scatola invece che sull'edificio.
+Si è abbassata la **base** della formula già legata alla luce — non un filtro
+fisso sopra, che avrebbe cancellato la differenza fra acceso e spento (che la
+suite visiva misura).
+
+### 5. Il basamento è la sagoma dell'edificio, non un rettangolo
+Ogni piano aveva un rettangolone grigio largo quanto tutto il disegno, e le
+stanze ci stavano sopra **come casse su un vassoio**. Ora ogni stanza posa su
+un ripiano sporgente di quindici pixel, e i ripiani delle stanze vicine si
+sovrappongono fino a **fondersi in un'unica massa** — che è quello che fa una
+soletta vera. Una stanza staccata, tipo un balcone, resta un ripiano a sé:
+anche quello è vero.
+
+L'ombra di contatto non è più una per stanza — cinque macchie con le cuciture
+in mezzo. Si disegna **una volta sola** sul basamento con `drop-shadow`, che
+segue la silhouette di tutto l'insieme.
+
+E le targhette sono più piccole: a bassa scala coprivano il pavimento della
+stanza che stavano annunciando.
+
+### Verifiche
+Le asserzioni sul chiaroscuro sono state **riscritte, non aggiustate**: quella
+vecchia diceva *«i muri paralleli hanno la stessa luce»*, che era esattamente
+il difetto. Adesso verificano che due facce opposte siano diverse, che le
+coppie si bilancino, e che nessuna parete finisca al buio o bruci. 1578
+asserzioni più 474 misurate in Chromium.
+
+### E una cosa che non c'entra con la mappa
+Una prova dei turni aveva le date scritte a calendario fisso e passava solo
+nella settimana in cui era stata scritta. Ora si costruisce **relativa a
+oggi**: un test con una soglia di calendario fissa non sorveglia niente, mente
+e basta.
+
 ## [0.66.0] - 2026-09-22
 
 **Le note del giorno sui turni.** Tieni premuto su un giorno e scrivi con chi

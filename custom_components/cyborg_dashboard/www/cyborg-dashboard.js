@@ -394,6 +394,9 @@ function pointsToSvg(points) {
  * L-shaped room reads as a blob, because the eye needs different shading on
  * differently-oriented faces to resolve the corner.
  */
+/** Da dove arriva la luce, in gradi nel piano della pianta. */
+const SOLE = 125;
+
 function roomEdges(room) {
   const pts = roomPoints(room);
   const w = room.w, h = room.h;
@@ -405,8 +408,22 @@ function roomEdges(room) {
     const len = Math.hypot(dx, dy);
     if (len < 0.5) continue;
     const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    // Il chiaroscuro viene da UNA direzione, come il sole.
+    //
+    // Prima era `1 - 0.2*|sin(angolo)|`: una formula simmetrica, che dava lo
+    // stesso grigio al muro a nord e a quello a sud. Quattro pareti
+    // illuminate uguali non sono un volume, sono un rettangolo - ed e' una
+    // delle ragioni per cui la casa si leggeva piatta.
+    //
+    // Qui la normale uscente del lato si confronta con la direzione della
+    // luce. Non si usa `max(0, cos)`: spegnerebbe del tutto meta' delle
+    // pareti. Con mezzo Lambert il lato in ombra resta al 55% invece che a
+    // zero, che e' come si comporta una stanza vera, dove l'ombra e'
+    // riempita dalla luce rimbalzata.
+    const normale = angle + 90;
+    const verso = Math.cos(((normale - SOLE) * Math.PI) / 180);
     edges.push({ x: x1, y: y1, len, angle,
-      shade: 1 - 0.2 * Math.abs(Math.sin((angle * Math.PI) / 180)) });
+      shade: 0.55 + 0.45 * (0.5 + 0.5 * verso) });
   }
   return edges;
 }
@@ -4171,6 +4188,7 @@ class CyborgDashboard extends HTMLElement {
       }).join("") : "";
 
     const cls = ["fp-room"];
+    if (!wallH) cls.push("nowalls");
     if (selected) cls.push("selected");
     if (this._editing && !ghost) cls.push("editable");
     if (focused) cls.push("focused");
@@ -4184,7 +4202,7 @@ class CyborgDashboard extends HTMLElement {
 
     return `<div class="${cls.join(" ")}"
         data-room="${esc(room.id)}" data-level="${level}" data-material="${esc(material)}"
-        style="--rc:${esc(room.color)};--lit:${lightState.lit.toFixed(3)};${
+        style="--rc:${esc(room.color)};--wh:${wallH.toFixed(1)}px;--lit:${lightState.lit.toFixed(3)};${
           lightState.color ? `--lc:${esc(lightState.color)};` : ""}left:${room.x}px;top:${room.y}px;width:${room.w}px;height:${room.h}px;
           transform:translateZ(${(level * gap).toFixed(2)}px)${rot ? ` rotateZ(${rot}deg)` : ""}">
         <div class="fp-floor" style="clip-path:polygon(${poly})${
@@ -4251,15 +4269,34 @@ class CyborgDashboard extends HTMLElement {
       * Math.max(1, zoom);
     const persp = Math.max(1900, Math.round(span * 3));
 
-    // Only the entrance floor gets a full slab. Repeating it at every storey
-    // turned the stack into three opaque grey planes that hid the rooms below;
-    // upper and lower storeys get a thin outline instead, which still says
-    // "there is a floor here" without becoming the loudest thing on screen.
+    // Il basamento e' la SAGOMA dell'edificio, non un rettangolo.
+    //
+    // Prima ogni piano aveva un rettangolone grigio largo quanto tutto il
+    // disegno, e le stanze ci stavano sopra come casse su un vassoio: era la
+    // ragione principale per cui la scena si leggeva come un diagramma e non
+    // come una casa. Adesso ogni stanza posa su un suo ripiano sporgente di
+    // qualche centimetro, e i ripiani delle stanze vicine si sovrappongono
+    // fino a fondersi in un'unica massa - che e' esattamente quello che fa una
+    // soletta vera. Una stanza staccata dalle altre, tipo un balcone, resta un
+    // ripiano a se': anche quello e' vero.
+    //
+    // L'ombra si disegna UNA volta sola, sul contenitore, con `drop-shadow`:
+    // segue la silhouette di tutto quello che c'e' dentro, quindi da' un
+    // contorno unico invece di una macchia per stanza con le cuciture in
+    // mezzo. Per questo i ripiani sono figli piatti e non volumi 3D: un
+    // `filter` appiattisce il sottoalbero, e qui e' voluto.
+    const SPORTO = 15;
+    const padsOf = (lv) => rooms.filter((r) => (r.level || 0) === lv).map((r) => {
+      const rot = Number(r.rotation) || 0;
+      return `<div class="fp-pad" style="left:${(r.x - SPORTO).toFixed(1)}px;top:${(r.y - SPORTO).toFixed(1)}px;
+        width:${(r.w + SPORTO * 2).toFixed(1)}px;height:${(r.h + SPORTO * 2).toFixed(1)}px;
+        clip-path:polygon(${pointsToCss(roomPoints(r))})${rot ? `;transform:rotate(${rot}deg)` : ""}"></div>`;
+    }).join("");
     const grounds = levels.map((lv) => `
-      <div class="fp-ground${lv === 0 ? " base" : " deck"}" data-ground="${lv}"
-        style="width:${bounds.w + 80}px;height:${bounds.h + 80}px;left:-40px;top:-40px;transform:translateZ(${(lv * gap).toFixed(2)}px);
+      <div class="fp-foot${lv === 0 ? " base" : " deck"}" data-ground="${lv}"
+        style="transform:translateZ(${(lv * gap - 1).toFixed(2)}px);
           opacity:${view.active_level !== null && view.active_level !== undefined && view.active_level !== lv
-            ? 0.06 : (lv === 0 ? 1 : Math.max(0.25, 0.6 - Math.abs(lv) * 0.08)).toFixed(2)}"></div>`).join("");
+            ? 0.06 : (lv === 0 ? 1 : Math.max(0.3, 0.72 - Math.abs(lv) * 0.08)).toFixed(2)}">${padsOf(lv)}</div>`).join("");
 
     const levelBar = levels.length > 1 ? `
       <div class="fp-levels">
@@ -16925,8 +16962,25 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 .fp-viewport.dragging{cursor:grabbing}
 .fp-viewport{cursor:grab}
 .fp-viewport.editing{cursor:default}
-.fp-ground.deck{background:none;border:1px dashed rgba(255,255,255,.16);box-shadow:none}
-.fp-ground{position:absolute;border-radius:14px;background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 40px),rgba(255,255,255,.02);box-shadow:0 0 70px rgba(0,0,0,.6)}
+/* Il basamento: un contenitore piatto largo quanto il disegno, che porta un
+   ripiano per stanza. L'ombra sta QUI e non sui ripiani: drop-shadow segue la
+   silhouette dell'insieme, quindi i ripiani che si toccano proiettano
+   un'ombra sola invece di una macchia per stanza con le cuciture in mezzo. */
+.fp-foot{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;
+  filter:drop-shadow(0 22px 26px rgba(0,0,0,.62))}
+.fp-foot.deck{filter:drop-shadow(0 14px 18px rgba(0,0,0,.45))}
+/* Il ripiano deve VEDERSI: a filo col fondo non sorregge niente, e le stanze
+   tornano a galleggiare. Un paio di toni sopra basta - e' una soletta di
+   cemento vista da lontano, non un pavimento. */
+.fp-pad{position:absolute;
+  background:repeating-linear-gradient(0deg,rgba(255,255,255,.04) 0 1px,transparent 1px 40px),
+    repeating-linear-gradient(90deg,rgba(255,255,255,.04) 0 1px,transparent 1px 40px),
+    linear-gradient(160deg,#1a242f,#131b24)}
+/* Ai piani alti il ripiano e' piu' tenue: il piano terra deve restare quello
+   che regge la scena, non uno dei tre. */
+.fp-foot.deck .fp-pad{background:repeating-linear-gradient(0deg,rgba(255,255,255,.03) 0 1px,transparent 1px 40px),
+    repeating-linear-gradient(90deg,rgba(255,255,255,.03) 0 1px,transparent 1px 40px),
+    rgba(18,28,38,.82)}
 /* The room box is transparent to the pointer; the floor — which carries the
    clip-path of the real footprint — is what receives clicks. Two consequences,
    both of them the point: the notch of an L-shaped room is not clickable
@@ -16951,7 +17005,13 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
   background-size:cover;
   box-shadow:inset 0 0 40px color-mix(in srgb,var(--rc) 14%,transparent),
              inset 0 0 22px rgba(0,0,0,.55);
-  filter:brightness(calc(0.52 + 0.75 * var(--lit,0)))}
+  /* Si tocca la BASE, non si aggiunge un filtro fisso sopra: un filtro fisso
+     cancellerebbe la differenza fra acceso e spento, che la suite visiva
+     misura. 0.67.0 aveva abbassato la base a 0.48 per togliere il bagliore
+     della cucina bianca, ed e' stato troppo: il cemento del balcone, che non
+     ha luci, diventava un rettangolo nero. 0.60 tiene il materiale leggibile
+     a luce spenta; il massimo a luce piena resta 1.20 come prima. */
+  filter:brightness(calc(0.60 + 0.60 * var(--lit,0))) saturate(.88)}
 /* The pool of light itself, thrown from above and fading outwards. Its own
    layer so it can sit over the material without washing the pattern away. */
 .fp-floor::after{content:"";position:absolute;inset:0;pointer-events:none;
@@ -16960,15 +17020,28 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
     color-mix(in srgb,var(--lc,#ffd7a3) 20%,transparent) 45%,
     transparent 78%);
   opacity:calc(var(--lit,0) * .85);mix-blend-mode:screen;transition:opacity .5s ease}
-/* Contact shadow: without this the volumes float and the whole scene reads as
-   flat coloured shapes, which is most of what made it look like a diagram. */
-.fp-room::after{content:"";position:absolute;left:4%;right:4%;top:8%;bottom:-2%;
-  border-radius:14px;background:rgba(0,0,0,.5);filter:blur(11px);
-  transform:translateZ(-2px);pointer-events:none;z-index:-1}
+/* L'ombra di contatto NON e' piu' qui. Era un parallelogramma grigio per
+   stanza, staccato dalla stanza e con una cucitura visibile fra una e
+   l'altra: cinque macchie invece di un edificio. Adesso la proietta il
+   basamento, una volta sola, seguendo la sagoma di tutto (.fp-foot). */
 /* The floor outline is an SVG polygon rather than a CSS border: a border is
-   clipped away by clip-path, so a non-rectangular room would lose its edge. */
-.fp-outline{position:absolute;inset:0;overflow:visible;pointer-events:none}
-.fp-outline polygon{fill:none;stroke:color-mix(in srgb,var(--rc) 60%,transparent);stroke-width:1;vector-effect:non-scaling-stroke}
+   clipped away by clip-path, so a non-rectangular room would lose its edge.
+   COI MURI ACCESI NON SI DISEGNA.
+   Sta a quota pavimento, mentre i muri arrivano a sessanta pixel piu' in su:
+   in prospettiva diventava un parallelogramma luminoso staccato sotto la
+   stanza, un contorno che non tocca niente - la cosa piu' sbagliata della
+   scena, e quella che la faceva leggere come un diagramma. Alzarlo in cima
+   ai muri non basta: la prospettiva lo ingrandisce e finisce comunque fuori
+   dal bordo.
+   Quando i muri ci sono, il bordo della stanza lo disegnano loro. Il
+   contorno resta per i due casi in cui e' l'unica cosa che lo dice: muri
+   spenti, e stanza selezionata o ingrandita. */
+.fp-outline{position:absolute;inset:0;overflow:visible;pointer-events:none;opacity:0}
+.fp-room.nowalls .fp-outline,.fp-room.selected .fp-outline,
+.fp-room.focused .fp-outline,.fp-room.editable .fp-outline{opacity:1}
+/* Il contorno e' l'unico posto dove il colore della stanza sta al pieno, ed
+   e' un filo: e' li' che si riconosce di chi e' la stanza. */
+.fp-outline polygon{fill:none;stroke:color-mix(in srgb,var(--rc) 44%,transparent);stroke-width:1;vector-effect:non-scaling-stroke}
 .fp-room.selected .fp-outline polygon{stroke:#fff;stroke-width:2}
 .fp-room.selected .fp-floor{background:linear-gradient(135deg,color-mix(in srgb,var(--rc) 52%,#0d141d),color-mix(in srgb,var(--rc) 26%,#0b111a));box-shadow:inset 0 0 60px color-mix(in srgb,var(--rc) 45%,transparent),0 0 40px color-mix(in srgb,var(--rc) 70%,transparent)}
 .fp-room.selected .fp-wall{border-color:#fff}
@@ -17136,14 +17209,28 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
    ridisegnano da soli quando si trascina un cursore delle aperture. */
 .fp-walls{position:absolute;inset:0;transform-style:preserve-3d;pointer-events:none}
 .fp-side{position:absolute;transform-style:preserve-3d;pointer-events:none}
+/* I muri sono INTONACO, non plastica colorata.
+   Fino alla 0.66.0 il colore della stanza veniva spalmato su pavimento, muri
+   e contorno: cinque stanze facevano cinque scatole fluorescenti, e la scena
+   si leggeva come un grafico a torta in tre dimensioni. Il colore serve a
+   riconoscere una stanza, non a dipingerla: qui resta un velo - abbastanza da
+   distinguere la cucina dal bagno, non abbastanza da coprire il materiale. */
 .fp-wall{position:absolute;
   background:linear-gradient(to top,
-    color-mix(in srgb,var(--rc) 34%,#070b11) 0%,
-    color-mix(in srgb,var(--rc) 12%,#0a1017) 55%,
-    color-mix(in srgb,var(--rc) 26%,#0a1017) 100%);
-  border:1px solid color-mix(in srgb,var(--rc) 20%,transparent);border-bottom:0;
+    color-mix(in srgb,var(--rc) 13%,#0c1219) 0%,
+    color-mix(in srgb,var(--rc) 5%,#131b24) 55%,
+    color-mix(in srgb,var(--rc) 10%,#1a2430) 100%);
+  border:1px solid color-mix(in srgb,var(--rc) 14%,transparent);border-bottom:0;
   transform-style:preserve-3d;
-  filter:brightness(calc((0.7 + 0.55 * var(--lit,0)) * var(--face,1)))}
+/* La luce di un muro e' AMBIENTE + DIREZIONALE, non ambiente moltiplicato
+   per la direzione. Fino alla 0.67.0 era (0.7 + 0.55*lit) * face: con la
+   luce spenta e il muro girato dalla parte opposta al sole faceva
+   0.7 * 0.55 = 0.385, cioe' un muro a un terzo della sua luminosita', che
+   su questo fondo scuro e' indistinguibile dalla pagina. Una stanza spenta
+   spariva invece di essere spenta. Sommando i due termini il muro non
+   scende mai sotto ~0.65 e la differenza fra la faccia al sole e quella in
+   ombra resta ~0.15, che l'occhio legge come volume senza perdere il muro. */
+  filter:brightness(calc(0.46 + 0.34 * var(--face,1) + 0.52 * var(--lit,0)))}
 /* Lo spessore del muro: faccia interna e coronamento.
    La variabile --wt e' lo spessore in pixel di pianta, scelto dall'utente.
    La faccia interna sta piu' lontana dalla luce, quindi e' piu' scura; il
@@ -17182,7 +17269,7 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
    non hanno lo spessore del muro, e darglielo fa sembrare la finestra murata. */
 .fp-pane{position:absolute;pointer-events:none;
   border:1px solid color-mix(in srgb,var(--rc) 58%,transparent);
-  filter:brightness(calc((0.75 + 0.5 * var(--lit,0)) * var(--face,1)))}
+  filter:brightness(calc(0.52 + 0.34 * var(--face,1) + 0.48 * var(--lit,0)))}
 .fp-pane.finestra,.fp-pane.portafinestra{
   background:linear-gradient(160deg,color-mix(in srgb,#bfe9ff 24%,transparent) 0%,
     color-mix(in srgb,var(--rc) 14%,transparent) 55%,
@@ -17210,7 +17297,9 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
    per wall; the stylesheet multiplies it by the light in the room. */
 .fp-anchor{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d;pointer-events:none}
 .fp-tag{position:absolute;left:0;top:0;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:5px;width:max-content}
-.fp-label{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:99px;background:rgba(6,12,20,.82);border:1px solid color-mix(in srgb,var(--rc) 50%,transparent);backdrop-filter:blur(6px);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--rc);white-space:nowrap}
+/* La targhetta e' un'etichetta, non un'insegna: a bassa scala copriva il
+   pavimento della stanza che sta annunciando. */
+.fp-label{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:99px;background:rgba(6,12,20,.8);border:1px solid color-mix(in srgb,var(--rc) 40%,transparent);backdrop-filter:blur(6px);font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--rc);white-space:nowrap}
 .fp-label ha-icon{--mdc-icon-size:15px}
 .fp-label{pointer-events:auto;cursor:zoom-in;transition:transform .16s,box-shadow .16s}
 .fp-label:hover{transform:scale(1.07);box-shadow:0 0 22px color-mix(in srgb,var(--rc) 55%,transparent)}
@@ -17698,7 +17787,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.66.0";
+const CYBORG_BUILD = "0.68.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

@@ -1252,10 +1252,83 @@ ok("muro est: parte da x=w, angolo 90",
    JSON.stringify(rectEdges[1]));
 ok("muro sud: angolo 180", Math.abs(Math.abs(rectEdges[2].angle) - 180) < 0.01, String(rectEdges[2].angle));
 ok("muro ovest: angolo -90", Math.abs(rectEdges[3].angle + 90) < 0.01, String(rectEdges[3].angle));
-ok("i muri paralleli hanno la stessa luce",
-   Math.abs(rectEdges[0].shade - rectEdges[2].shade) < 1e-9 && rectEdges[0].shade > rectEdges[1].shade,
+// 0.67.0: la luce viene da UNA direzione, come il sole.
+//
+// La regola di prima diceva l'opposto - "i muri paralleli hanno la stessa
+// luce" - ed era il difetto: il muro a nord e quello a sud, che guardano da
+// parti opposte, venivano dipinti dello stesso grigio. Quattro pareti
+// illuminate uguali non sono un volume, sono un rettangolo.
+ok("due muri opposti NON hanno la stessa luce: uno guarda il sole, l'altro no",
+   Math.abs(rectEdges[0].shade - rectEdges[2].shade) > 0.2
+   && Math.abs(rectEdges[1].shade - rectEdges[3].shade) > 0.2,
    rectEdges.map(e => e.shade.toFixed(3)).join());
-ok("i muri perpendicolari hanno luce diversa", Math.abs(rectEdges[0].shade - rectEdges[1].shade) > 0.15);
+// Mezzo Lambert e' simmetrico: la somma di due facce opposte e' costante.
+// E' la prova che c'e' UNA sorgente e non quattro numeri messi a mano.
+ok("e le due coppie opposte si bilanciano sullo stesso valore",
+   Math.abs((rectEdges[0].shade + rectEdges[2].shade)
+            - (rectEdges[1].shade + rectEdges[3].shade)) < 1e-9,
+   rectEdges.map(e => e.shade.toFixed(3)).join());
+ok("i muri perpendicolari hanno luce diversa", Math.abs(rectEdges[0].shade - rectEdges[1].shade) > 0.02);
+// Nessuna parete finisce al buio: in una stanza vera l'ombra e' riempita
+// dalla luce che rimbalza, e una faccia nera sembra un buco.
+ok("nessun muro resta al buio, e nessuno brucia",
+   rectEdges.every((e) => e.shade >= 0.55 - 1e-9 && e.shade <= 1 + 1e-9),
+   rectEdges.map(e => e.shade.toFixed(3)).join());
+// 0.68.0: la luce di un muro e' AMBIENTE + DIREZIONALE.
+//
+// La forma (ambiente + k*luce) * faccia sembrava innocua ed era il difetto
+// peggiore della mappa: moltiplicava anche l'ambiente per l'orientamento,
+// quindi il muro di una stanza SPENTA girato dalla parte opposta al sole
+// finiva a 0.7 * 0.55 = 0.385. Su questo fondo scuro un muro a 0.385 non
+// si distingue dalla pagina: la stanza spariva invece di essere spenta.
+//
+// Qui si legge la formula dal CSS vero e la si valuta ai quattro angoli.
+// Un test che guardasse solo shade non vedrebbe niente: shade e' giusto,
+// e' il modo in cui il CSS lo usa che era sbagliato.
+// Lo stesso selettore compare piu' volte nel foglio (una regola per la
+// geometria, una per il puntatore, una per la luce): si scorrono tutte e si
+// prende quella che porta davvero il filtro, non la prima che capita.
+function cssCalc(selettore) {
+  const ago = "\n" + selettore + "{";
+  for (let i = src.indexOf(ago); i >= 0; i = src.indexOf(ago, i + 1)) {
+    const blocco = src.slice(i, src.indexOf("}", i));
+    const m = blocco.match(/filter:brightness\(calc\((.*)\)\)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+function luce(expr, faccia, acceso) {
+  return Function("f", "l", "return " + expr
+    .replace(/var\(--face,\s*1\)/g, "f")
+    .replace(/var\(--lit,\s*0\)/g, "l") + ";")(faccia, acceso);
+}
+const FMIN = 0.55, FMAX = 1;   // gli estremi che roomEdges puo' produrre
+const exprMuro = cssCalc(".fp-wall");
+ok("la regola del muro esiste ed e' una calc leggibile", !!exprMuro, String(exprMuro));
+const muroSpentoBuio = luce(exprMuro, FMIN, 0);
+const muroSpentoSole = luce(exprMuro, FMAX, 0);
+const muroAccesoSole = luce(exprMuro, FMAX, 1);
+ok("una stanza spenta resta visibile: nessun muro sotto 0.6 di luminosita'",
+   muroSpentoBuio >= 0.6, muroSpentoBuio.toFixed(3));
+ok("ma il volume si legge ancora: la faccia al sole e' piu' chiara di quella in ombra",
+   muroSpentoSole - muroSpentoBuio > 0.1, (muroSpentoSole - muroSpentoBuio).toFixed(3));
+ok("e accendere la luce si vede: almeno mezzo passo di luminosita'",
+   muroAccesoSole - muroSpentoSole > 0.4, (muroAccesoSole - muroSpentoSole).toFixed(3));
+ok("nessun muro brucia oltre 1.4", muroAccesoSole <= 1.4, muroAccesoSole.toFixed(3));
+// L'ambiente NON dipende dall'orientamento: e' luce rimbalzata, arriva da
+// tutte le parti. E' la proprieta' che il vecchio prodotto violava.
+ok("l'ambiente non e' moltiplicato per l'orientamento",
+   Math.abs((luce(exprMuro, FMAX, 0) - luce(exprMuro, FMIN, 0))
+            - (luce(exprMuro, FMAX, 1) - luce(exprMuro, FMIN, 1))) < 1e-9);
+const exprPav = cssCalc(".fp-floor");
+ok("la regola del pavimento esiste", !!exprPav, String(exprPav));
+ok("il pavimento di una stanza spenta non e' nero", luce(exprPav, 1, 0) >= 0.55,
+   luce(exprPav, 1, 0).toFixed(3));
+ok("a luce piena il pavimento non supera il muro piu' chiaro",
+   luce(exprPav, 1, 1) <= muroAccesoSole + 1e-9,
+   luce(exprPav, 1, 1).toFixed(3) + " vs " + muroAccesoSole.toFixed(3));
+ok("acceso e spento restano due cose diverse sul pavimento",
+   luce(exprPav, 1, 1) - luce(exprPav, 1, 0) > 0.4);
 ok("la L genera 6 muri", roomEdges({ w: 200, h: 160, points: L }).length === 6);
 ok("nessun muro di lunghezza zero",
    roomEdges({ w: 200, h: 160, points: [[0,0],[0,0],[1,0],[1,1],[0,1]] }).every(e => e.len > 0.5));
@@ -5108,8 +5181,20 @@ console.log("\n== 53. TURNI: IL CALENDARIO SI DIPINGE ==");
   const hs7 = el._shiftsBody(Object.assign({}, sh, { view: "settimana" }));
   ok("la settimana ne disegna sette",
      (hs7.match(/data-sh-day=/g) || []).length === 7);
-  ok("con due persone la card annuncia il giorno libero insieme",
-     /libero insieme/.test(el._shiftsBody(due)), "");
+  // Il fixture con le date fisse serve alle prove qui sopra, che passano una
+  // data di partenza esplicita. La CARD invece guarda da OGGI: con giorni
+  // scritti a calendario fisso la prova passava il giorno che l'ho scritta e
+  // falliva due giorni dopo. Le date qui si costruiscono relative a oggi.
+  {
+    const d0 = new Date(), giorno = (k) => {
+      const x = new Date(d0); x.setDate(x.getDate() + k); return el._dayKey(x);
+    };
+    const dueOggi = Object.assign({}, due, {
+      data: { a: { [giorno(0)]: "M", [giorno(1)]: "R", [giorno(2)]: "R" },
+              b: { [giorno(0)]: "R", [giorno(1)]: "M", [giorno(2)]: "R" } } });
+    ok("con due persone la card annuncia il giorno libero insieme",
+       /libero insieme/.test(el._shiftsBody(dueOggi)), "");
+  }
 
   // --- editor
   el._selected = { kind: "card", sectionId: "s53", itemId: "sh1" };
