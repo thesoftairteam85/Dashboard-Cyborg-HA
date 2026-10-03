@@ -4,6 +4,84 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.69.0] - 2026-10-03
+
+La card **Raccolta rifiuti**. E una decisione che vale la pena scrivere: il
+calendario **non** si sincronizza dal sito del gestore.
+
+### Perché niente sincronizzazione automatica
+
+Il calendario del comune è una **griglia a colori**. Il testo del PDF contiene
+solo «1 Mercoledi, 2 Giovedi, 3 Venerdi…»: il tipo di rifiuto non è scritto da
+nessuna parte, **è il colore della cella**. L'ho verificato sul PDF vero di
+Martinengo — per estrarlo ho dovuto renderizzare la pagina in immagine e
+guardarla.
+
+Quindi «sincronizziamolo dal sito» non è una scelta di gusto che si potrebbe
+fare meglio: un sincronizzatore dovrebbe fare analisi d'immagine su un PDF che
+cambia impaginazione ogni sei mesi, e si romperebbe **in silenzio**. Una card
+che smette di aggiornarsi senza dirlo è peggio di una card che non c'è.
+
+Qui il calendario sono **regole**: *questi bidoni, in questi giorni, da questa
+data a quest'altra, ogni settimana o a settimane alterne*, più le **eccezioni
+per singola data** quando il gestore sposta un ritiro per una festa. Si scrive
+una volta a semestre, in trenta secondi, e non c'è niente che possa rompersi
+di nascosto.
+
+### Due trappole, trovate sul calendario vero
+
+**L'alternanza non si può scrivere sulla parità della settimana ISO.** Il 2026
+ha **53** settimane ISO: la 53 e la 1 del 2027 sono entrambe dispari, quindi
+una regola «settimane dispari» darebbe **carta due giovedì di fila** a cavallo
+d'anno e poi resterebbe sfasata per sempre. Si contano le settimane da una
+**data di ancoraggio**, che non ha confini d'anno da attraversare. Rimettendo
+la regola ISO la suite fallisce con `-> carta` sul 7 gennaio: verificato.
+
+**Le settimane si contano in UTC.** Nella settimana del cambio d'ora una
+divisione per sette giorni fatta su date locali sbaglia, perché quella
+settimana dura 167 o 169 ore. Due volte l'anno, in silenzio.
+
+### Date vere, non date dalla forma giusta
+
+`DAY_RE` controllava la **forma** e non l'esistenza: `2026-13-45` passava. Non
+è innocuo — in un `<input type="date">` una data impossibile non si può
+mostrare e la casella appare **vuota**, mentre continua a filtrare la regola.
+Una casella vuota che filtra è il difetto peggiore: non c'è niente da guardare
+che spieghi perché non esce nulla. Ora c'è `_clean_day()`, che prova davvero a
+costruire la data.
+
+### Dettagli che vengono dal foglio del comune
+
+- Il PDF dice che i rifiuti vanno esposti **entro le 06:00** del giorno del
+  ritiro: il momento in cui la card serve è la **sera prima**. Quando il ritiro
+  è domani il riquadro si accende e dice *da esporre stasera*. Accendersi
+  sempre non sarebbe un avviso.
+- Una card **senza regole** dice che va configurata, non «nessun ritiro». Sono
+  due cose diverse e una delle due è una bugia.
+- Una cadenza alterna **senza data di partenza** vale ogni settimana invece di
+  tirare a indovinare: sbagliare per eccesso costa un viaggio in cortile,
+  sbagliare per difetto costa il ritiro.
+- Un'eccezione con **lista vuota** significa «quel giorno niente», diverso
+  dall'assenza della data, che significa «vale la regola».
+- Cancellare un bidone lo toglie anche dalle regole e dalle eccezioni che lo
+  nominavano, se no resterebbe una sigla che non corrisponde più a nulla.
+
+### Verifica
+
+Le 30 asserzioni nuove non usano dati inventati: ricostruiscono **sei mesi** del
+calendario vero di Martinengo da cinque regole, e controllano tutti e **27 i
+giovedì** uno per uno, il sabato dell'organico che finisce il **12 settembre**
+(non il 30, che è quando cambia l'orario del centro di raccolta — due date
+diverse sullo stesso foglio), il cavallo d'anno e il cambio dell'ora.
+
+- schema **v25**, frontend **1618** asserzioni, visiva **474** misure
+- tre scene nuove: `85-raccolta`, `86-raccolta-vuota`, `87-raccolta-ed`
+
+### Non ancora fatto
+La **notifica** della sera prima: richiede un lavoro lato integrazione
+(un'attività giornaliera) che è una versione a sé. Oggi la card risponde quando
+la apri.
+
 ## [0.68.0] - 2026-09-25
 
 La 0.67.0 aveva ragione sulla direzione della luce e torto su come applicarla.

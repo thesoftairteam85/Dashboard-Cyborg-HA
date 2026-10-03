@@ -1344,6 +1344,163 @@ ok("il pieno della L e' dentro", pointInPolygon(L, 0.2, 0.8) && pointInPolygon(L
 ok("baricentro di un poligono degenere non produce NaN",
    polygonCentroid([[0.5,0.5],[0.5,0.5],[0.5,0.5]]).every(Number.isFinite));
 
+// ===========================================================================
+// 58. RACCOLTA RIFIUTI
+//
+// I dati non sono inventati: sono il calendario vero del secondo semestre
+// 2026 del Comune di Martinengo, letto dal PDF del gestore. Il senso di
+// questa sezione e' che cinque regole devono riprodurre SEI MESI di
+// griglia, giorno per giorno. Se una sola casella non torna, la card
+// direbbe a qualcuno di mettere fuori il bidone sbagliato.
+// ===========================================================================
+console.log("\n== 58. RACCOLTA RIFIUTI ==");
+
+const RACCOLTA = {
+  id: "wa", type: "waste", horizon: 8, exceptions: {},
+  kinds: [
+    { k: "organico", l: "Organico", color: "#c0714c", icon: "mdi:food-apple-outline" },
+    { k: "residuo", l: "Rifiuto residuo", color: "#9aa5b1", icon: "mdi:trash-can-outline" },
+    { k: "pannolini", l: "Pannolini", color: "#d7dde3", icon: "mdi:baby-face-outline" },
+    { k: "carta", l: "Carta", color: "#6cb4e4", icon: "mdi:newspaper-variant-outline" },
+    { k: "plastica", l: "Plastica", color: "#f2c200", icon: "mdi:bottle-soda-classic-outline" },
+    { k: "vetro", l: "Vetro e lattine", color: "#13b35a", icon: "mdi:glass-fragile" },
+  ],
+  rules: [
+    // Organico il martedi, tutto l anno
+    { kinds: ["organico"], days: [1], every: 1, anchor: "", from: "", to: "" },
+    // ...e anche il sabato, ma SOLO d estate: l ultimo e' il 12 settembre.
+    // Non il 30, che e' quando cambia l orario del centro di raccolta: sono
+    // due date diverse sullo stesso foglio, e confonderle sbaglia di tre
+    // settimane.
+    { kinds: ["organico"], days: [5], every: 1, anchor: "", from: "2026-07-01", to: "2026-09-12" },
+    { kinds: ["residuo", "pannolini"], days: [2], every: 1, anchor: "", from: "", to: "" },
+    { kinds: ["carta"], days: [3], every: 2, anchor: "2026-07-02", from: "", to: "" },
+    { kinds: ["plastica", "vetro"], days: [3], every: 2, anchor: "2026-07-09", from: "", to: "" },
+  ],
+};
+
+// Il giovedi, letto dal PDF uno per uno.
+const GIOVEDI_VERI = {
+  "2026-07-02": "carta", "2026-07-09": "plastica", "2026-07-16": "carta", "2026-07-23": "plastica",
+  "2026-07-30": "carta", "2026-08-06": "plastica", "2026-08-13": "carta", "2026-08-20": "plastica",
+  "2026-08-27": "carta", "2026-09-03": "plastica", "2026-09-10": "carta", "2026-09-17": "plastica",
+  "2026-09-24": "carta", "2026-10-01": "plastica", "2026-10-08": "carta", "2026-10-15": "plastica",
+  "2026-10-22": "carta", "2026-10-29": "plastica", "2026-11-05": "carta", "2026-11-12": "plastica",
+  "2026-11-19": "carta", "2026-11-26": "plastica", "2026-12-03": "carta", "2026-12-10": "plastica",
+  "2026-12-17": "carta", "2026-12-24": "plastica", "2026-12-31": "carta",
+};
+const sbagliati = Object.keys(GIOVEDI_VERI).filter((g) => {
+  const k = wasteDayKinds(RACCOLTA, g);
+  return GIOVEDI_VERI[g] === "carta"
+    ? !(k.length === 1 && k[0] === "carta")
+    : !(k.length === 2 && k[0] === "plastica" && k[1] === "vetro");
+});
+ok("tutti e 27 i giovedì del semestre tornano col foglio del comune",
+   sbagliati.length === 0, sbagliati.join(" "));
+
+// Il sabato dell organico: c e' fino al 12 settembre e poi sparisce.
+ok("il sabato dell'organico c'è fino al 12 settembre",
+   ["2026-07-04", "2026-08-15", "2026-09-05", "2026-09-12"]
+     .every((g) => wasteDayKinds(RACCOLTA, g).join() === "organico"));
+ok("e dal 19 settembre il sabato è vuoto",
+   ["2026-09-19", "2026-09-26", "2026-10-03", "2026-12-26"]
+     .every((g) => wasteDayKinds(RACCOLTA, g).length === 0));
+
+ok("il martedì esce sempre l'organico",
+   ["2026-07-07", "2026-09-29", "2026-12-08"]
+     .every((g) => wasteDayKinds(RACCOLTA, g).join() === "organico"));
+ok("il mercoledì escono residuo e pannolini insieme",
+   ["2026-07-01", "2026-10-21", "2026-12-30"]
+     .every((g) => wasteDayKinds(RACCOLTA, g).join() === "residuo,pannolini"));
+ok("il lunedì e la domenica non esce niente",
+   ["2026-10-05", "2026-10-11", "2026-11-09"]
+     .every((g) => wasteDayKinds(RACCOLTA, g).length === 0));
+
+// LA TRAPPOLA. Il 2026 ha 53 settimane ISO: la 53 e la 1 del 2027 sono
+// entrambe dispari, quindi una regola scritta sulla parita' ISO darebbe
+// CARTA due giovedi di fila e poi resterebbe sfasata per sempre. Chi scrive
+// questa card la seconda volta ci ricasca: il test e' qui per quello.
+ok("a cavallo d'anno l'alternanza non si rompe: 31/12 carta, 7/1 plastica",
+   wasteDayKinds(RACCOLTA, "2026-12-31").join() === "carta"
+   && wasteDayKinds(RACCOLTA, "2027-01-07").join() === "plastica,vetro",
+   wasteDayKinds(RACCOLTA, "2027-01-07").join());
+ok("e nemmeno alla seconda settimana del 2027",
+   wasteDayKinds(RACCOLTA, "2027-01-14").join() === "carta");
+// La parita' ISO, se qualcuno la rimettesse, sbaglierebbe proprio qui:
+// questa riga documenta il valore che NON si deve ottenere.
+ok("la settimana ISO del 31/12/2026 è la 53, cioè dispari come la 1 del 2027",
+   (() => { const d = new Date(2026, 11, 31);
+     const t = new Date(d); t.setDate(t.getDate() + 3 - ((d.getDay() + 6) % 7));
+     const y0 = new Date(t.getFullYear(), 0, 4);
+     return Math.round(((t - y0) / 86400000 + ((y0.getDay() + 6) % 7) - 3) / 7) + 1; })() === 53);
+
+// Il cambio dell ora. In Italia l ora solare torna l ultima domenica di
+// ottobre: la settimana del 25 ottobre 2026 dura 169 ore. Contando le
+// settimane in locale, una divisione per sette giorni sbaglierebbe li'.
+ok("il cambio dell'ora non sfasa l'alternanza",
+   wasteDayKinds(RACCOLTA, "2026-10-22").join() === "carta"
+   && wasteDayKinds(RACCOLTA, "2026-10-29").join() === "plastica,vetro");
+
+// Eccezioni
+const conEcc = Object.assign({}, RACCOLTA, {
+  exceptions: { "2026-12-24": [], "2026-12-23": ["carta"] } });
+ok("una data eccezionale con lista vuota annulla il ritiro",
+   wasteDayKinds(conEcc, "2026-12-24").length === 0);
+ok("e una con una lista sostituisce la regola, non ci si somma",
+   wasteDayKinds(conEcc, "2026-12-23").join() === "carta");
+ok("le altre date restano sulle regole",
+   wasteDayKinds(conEcc, "2026-12-31").join() === "carta");
+
+// Degradazione prudente: alterna senza ancora -> ogni settimana. Sbagliare
+// per eccesso costa un viaggio in cortile, per difetto costa il ritiro.
+const senzaAncora = { rules: [{ kinds: ["carta"], days: [3], every: 2, anchor: "" }] };
+ok("una cadenza alterna senza data di partenza non salta mai un ritiro",
+   ["2026-07-02", "2026-07-09", "2026-07-16"]
+     .every((g) => wasteDayKinds(senzaAncora, g).join() === "carta"));
+
+// Date impossibili
+ok("il 31 febbraio non è una data", wasteParse("2026-02-31") === null);
+ok("il 29 febbraio di un anno non bisestile nemmeno", wasteParse("2026-02-29") === null);
+ok("ma il 29 febbraio del 2028 sì", wasteParse("2028-02-29") !== null);
+ok("una stringa che non è una data non diventa un giorno", wasteParse("boh") === null);
+
+// wasteNext
+const pross = wasteNext(RACCOLTA, "2026-10-05", 5);
+ok("i prossimi ritiri arrivano in ordine e senza buchi",
+   pross.map((r) => r.date).join(" ") === "2026-10-06 2026-10-07 2026-10-08 2026-10-13 2026-10-14",
+   pross.map((r) => r.date).join(" "));
+ok("ogni ritiro porta i suoi rifiuti", pross.every((r) => r.kinds.length > 0));
+ok("senza regole non si cerca all'infinito: si risponde subito niente",
+   wasteNext({ rules: [] }, "2026-10-05", 8).length === 0);
+ok("una regola tutta scaduta non produce ritiri",
+   wasteNext({ rules: [{ kinds: ["x"], days: [1], every: 1, to: "2020-01-01" }] },
+             "2026-10-05", 8).length === 0);
+ok("si parte dal giorno stesso, se è un giorno di ritiro",
+   wasteNext(RACCOLTA, "2026-10-06", 1)[0].date === "2026-10-06");
+
+// La finestra di validita' e' INCLUSIVA agli estremi: un calendario che
+// vale "dal 1 luglio al 12 settembre" comprende il 1 luglio e il 12.
+ok("la finestra di validità comprende i suoi estremi",
+   wasteDayKinds({ rules: [{ kinds: ["x"], days: [0, 1, 2, 3, 4, 5, 6], every: 1,
+                             from: "2026-07-01", to: "2026-07-03" }] }, "2026-07-01").length === 1
+   && wasteDayKinds({ rules: [{ kinds: ["x"], days: [0, 1, 2, 3, 4, 5, 6], every: 1,
+                                from: "2026-07-01", to: "2026-07-03" }] }, "2026-07-03").length === 1);
+
+// Il corpo della card
+const elWa = new Cls();
+elWa._hass = hass;
+ok("una card senza regole dice che va configurata, non che non c'è raccolta",
+   elWa._wasteBody({ id: "w", type: "waste", rules: [] }).includes("non è ancora scritto"));
+const corpo = elWa._wasteBody(RACCOLTA);
+ok("la card disegna le pastiglie dei rifiuti", corpo.includes("wa-chip"));
+ok("e non perde mai il contenitore", corpo.includes("wa-hero") || corpo.includes("wa-vuoto"));
+ok("domani si legge 'domani' e non un giorno della settimana",
+   elWa._wasteQuando(wasteISO(new Date(Date.now() + 86400000)), wasteISO(new Date())) === "domani");
+ok("oggi si legge 'oggi'",
+   elWa._wasteQuando(wasteISO(new Date()), wasteISO(new Date())) === "oggi");
+ok("oltre la settimana si porta dietro la data, se no è ambiguo",
+   /\d/.test(elWa._wasteQuando(wasteISO(new Date(Date.now() + 9 * 86400000)), wasteISO(new Date()))));
+
 // -- fit zoom ---------------------------------------------------------------
 ok("zoom di dettaglio: stanza piccola -> piu' zoom",
    fitZoom(100, 100, 32, 56, 900, 560, 0.6) > fitZoom(400, 400, 32, 56, 900, 560, 0.6));

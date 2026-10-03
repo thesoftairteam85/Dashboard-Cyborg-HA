@@ -1045,6 +1045,7 @@ const CARD_TYPES = [
   { k: "camera", l: "Videocamere", solo: true, d: "Anteprime delle camere; al tocco si apre la diretta." },
   { k: "calendar", l: "Calendari", solo: true, d: "Giorno, settimana e mese di uno o più calendari: turni, impegni, scadenze." },
   { k: "shifts", l: "Turni", solo: true, d: "Il turnario dipinto a dita: scegli il turno, tocchi i giorni. Rotazione automatica e riposi in comune." },
+  { k: "waste", l: "Raccolta rifiuti", solo: true, d: "Cosa esce stasera. Il calendario del comune scritto come regole: niente da sincronizzare, niente che si rompa da solo." },
   { k: "economy", l: "Analisi economica", solo: true, d: "Costi, ricavi e quanto risparmi grazie all'impianto." },
   { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
   { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
@@ -1403,7 +1404,7 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "system", "camera", "calendar", "shifts", "economy", "lights", "irrigation", "trend", "room", "ev",
+  "monitor", "system", "camera", "calendar", "shifts", "waste", "economy", "lights", "irrigation", "trend", "room", "ev",
   "comfort", "thermostat"]);
 
 const COMPOSITE_META = {
@@ -1422,9 +1423,136 @@ const COMPOSITE_META = {
   camera:        ["Videocamere", "Anteprime live", "mdi:cctv", "lg"],
   calendar:      ["Calendari", "Giorno, settimana, mese", "mdi:calendar-month", "lg"],
   shifts:        ["Turni", "Chi lavora e quando", "mdi:calendar-account", "lg"],
+  waste:         ["Raccolta rifiuti", "Quando esce cosa", "mdi:recycle-variant", "md"],
   thermostat:    ["Controllo temperatura", "Termostati e clima", "mdi:thermostat-box", "lg"],
   economy:       ["Analisi economica", "Costi e risparmio", "mdi:cash-multiple", "lg"],
 };
+
+/* ==========================================================================
+ * RACCOLTA RIFIUTI
+ *
+ * Il calendario del comune e' una griglia a COLORI: nel PDF il tipo di
+ * rifiuto non e' scritto da nessuna parte, sta nel colore della cella. Non e'
+ * un dato leggibile da una macchina, quindi "sincronizziamolo dal sito" non
+ * e' una scelta di gusto che si puo' fare meglio: non si puo' fare in modo
+ * affidabile, e un sincronizzatore del genere si romperebbe in silenzio.
+ *
+ * Qui il calendario sono REGOLE, scritte una volta a semestre guardando il
+ * foglio: questi rifiuti, in questi giorni, da questa data a quest altra,
+ * ogni settimana o a settimane alterne. Piu' le eccezioni per singola data,
+ * quando il gestore sposta un ritiro per una festa.
+ * ======================================================================== */
+
+/** Lunedi = 0. getDay() mette la domenica a 0, che in Italia non e' il primo
+ *  giorno della settimana e sfaserebbe ogni regola di un giorno. */
+function wasteDow(d) { return (d.getDay() + 6) % 7; }
+
+function wasteParse(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  // new Date(2026, 1, 31) non e' il 31 febbraio: e' il 3 marzo. Una data
+  // inesistente deve valere come non scritta, non come un altro giorno.
+  return d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3]) ? d : null;
+}
+
+function wasteISO(d) {
+  const p2 = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+}
+
+/** Numero del giorno su una scala continua, calcolato in UTC.
+ *  Serve per contare settimane: in locale, la settimana del cambio d ora dura
+ *  167 o 169 ore e una divisione per 7 giorni darebbe un risultato sbagliato
+ *  due volte l anno. In UTC i giorni sono tutti lunghi uguale. */
+function wasteDayNum(d) {
+  return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+}
+
+/** Indice della settimana che contiene la data, contato dal suo lunedi. */
+function wasteWeekNum(d) { return Math.floor((wasteDayNum(d) - wasteDow(d)) / 7); }
+
+/**
+ * Una regola scatta in questa data?
+ *
+ * L alternanza NON si calcola sulla parita' della settimana ISO. Il 2026 ha
+ * 53 settimane ISO: la 53 e la 1 del 2027 sono entrambe dispari, quindi una
+ * regola "settimane dispari" darebbe lo stesso rifiuto due giovedi di fila e
+ * poi resterebbe sfasata per sempre. Si contano invece le settimane da una
+ * DATA DI ANCORAGGIO, che non ha confini d anno da attraversare.
+ */
+function wasteRuleFires(rule, d) {
+  if (!rule || !d || !Array.isArray(rule.days)) return false;
+  if (!rule.days.includes(wasteDow(d))) return false;
+  const iso = wasteISO(d);
+  if (rule.from && iso < rule.from) return false;
+  if (rule.to && iso > rule.to) return false;
+  const every = Number(rule.every) > 1 ? Number(rule.every) : 1;
+  if (every === 1) return true;
+  const a = wasteParse(rule.anchor);
+  // Cadenza alterna senza ancora: non si sa in quale delle due settimane si
+  // sta. Si degrada a "ogni settimana", cioe' si espone il bidone piu' spesso
+  // del necessario invece di saltare un ritiro. Sbagliare per eccesso qui
+  // costa un viaggio in cortile; sbagliare per difetto costa il ritiro.
+  if (!a) return true;
+  const delta = wasteWeekNum(d) - wasteWeekNum(a);
+  return ((delta % every) + every) % every === 0;
+}
+
+/** Cosa esce in questa data: lista di sigle, eventualmente vuota. */
+function wasteDayKinds(card, iso) {
+  const exc = (card && card.exceptions) || {};
+  // Una data presente fra le eccezioni vince SEMPRE sulle regole, anche
+  // quando porta una lista vuota: lista vuota vuol dire "quel giorno non si
+  // raccoglie niente", ed e' diverso dall assenza della data, che vuol dire
+  // "vale la regola". Due cose diverse, due esiti diversi.
+  if (Object.prototype.hasOwnProperty.call(exc, iso)) {
+    return Array.isArray(exc[iso]) ? exc[iso].slice() : [];
+  }
+  const d = wasteParse(iso);
+  if (!d) return [];
+  const out = [];
+  for (const rule of (card && card.rules) || []) {
+    if (!wasteRuleFires(rule, d)) continue;
+    for (const k of rule.kinds || []) if (!out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
+/** I prossimi `quanti` ritiri a partire da `daISO` incluso. */
+function wasteNext(card, daISO, quanti) {
+  const start = wasteParse(daISO);
+  const out = [];
+  if (!start) return out;
+  const max = Math.max(1, Math.min(60, Number(quanti) || 8));
+  const d = new Date(start);
+  // Un anno di ricerca: oltre, o non ci sono regole o sono tutte scadute, e
+  // continuare a cercare vorrebbe dire ciclare a vuoto per sempre.
+  for (let i = 0; i < 400 && out.length < max; i += 1) {
+    const iso = wasteISO(d);
+    const kinds = wasteDayKinds(card, iso);
+    if (kinds.length) out.push({ date: iso, kinds });
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+/** I sei tipi del calendario di Martinengo, che sono poi quelli di quasi
+ *  ogni comune italiano. Sono un PUNTO DI PARTENZA modificabile, non un
+ *  elenco chiuso: un comune che raccoglie il verde aggiunge la sua riga. */
+const WASTE_DEFAULT_KINDS = [
+  { k: "organico", l: "Organico", color: "#c0714c", icon: "mdi:food-apple-outline" },
+  { k: "residuo", l: "Rifiuto residuo", color: "#9aa5b1", icon: "mdi:trash-can-outline" },
+  { k: "pannolini", l: "Pannolini e assorbenti", color: "#d7dde3", icon: "mdi:baby-face-outline" },
+  { k: "carta", l: "Carta", color: "#6cb4e4", icon: "mdi:newspaper-variant-outline" },
+  { k: "plastica", l: "Plastica", color: "#f2c200", icon: "mdi:bottle-soda-classic-outline" },
+  { k: "vetro", l: "Vetro e lattine", color: "#13b35a", icon: "mdi:glass-fragile" },
+];
+
+const WASTE_DAY_NAMES = ["lunedì", "martedì", "mercoledì", "giovedì",
+  "venerdì", "sabato", "domenica"];
+const WASTE_MONTHS = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+  "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
 
 /* ==========================================================================
  * ANALISI ECONOMICA
@@ -3127,6 +3255,13 @@ class CyborgDashboard extends HTMLElement {
       if (base.seed === "calendar") Object.assign(card, { calendars: [], view: "settimana", colors: {} });
       if (base.seed === "shifts") Object.assign(card, { people: [], types: [], view: "mese",
         data: {}, rotation: { person: "", seq: [], start: "", weeks: 8 } });
+      // La card Raccolta nasce VUOTA di regole ma con i tipi gia' pronti:
+      // i sei bidoni sono gli stessi quasi ovunque, le regole no. Nascere con
+      // delle regole inventate vorrebbe dire mostrare un calendario falso e
+      // credibile, che e' peggio di uno vuoto che chiede di essere riempito.
+      if (base.seed === "waste") Object.assign(card, {
+        kinds: WASTE_DEFAULT_KINDS.map((x) => Object.assign({}, x)),
+        rules: [], exceptions: {}, horizon: 8, remind: true, remind_at: "20:00" });
       if (base.seed === "system") {
         Object.assign(card, { device: this._busiestDevice(), temps: [], disks: [],
           cpu: null, gpu: null, mem_used: null, mem_free: null, mem_total: null,
@@ -8890,6 +9025,91 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /** La finestra della vista, spostata di `offset` passi. Stessa regola dei calendari. */
+  /* --- Raccolta rifiuti ------------------------------------------------ */
+
+  /** I tipi della card, o i sei di partenza se non ne ha ancora. */
+  _wasteKinds(item) {
+    const rows = (item && item.kinds) || [];
+    return rows.length ? rows : WASTE_DEFAULT_KINDS;
+  }
+
+  _wasteKind(item, key) {
+    return this._wasteKinds(item).find((x) => x.k === key)
+      || { k: key, l: key, color: "#9aa5b1", icon: "mdi:trash-can-outline" };
+  }
+
+  /** "oggi", "domani", oppure "martedì 6 ottobre". Un giorno della settimana
+   *  da solo e' ambiguo oltre la settimana corrente: ci va la data. */
+  _wasteQuando(iso, oggiISO) {
+    const d = wasteParse(iso);
+    if (!d) return iso;
+    const oggi = wasteParse(oggiISO);
+    const scarto = oggi ? wasteDayNum(d) - wasteDayNum(oggi) : 99;
+    if (scarto === 0) return "oggi";
+    if (scarto === 1) return "domani";
+    const giorno = WASTE_DAY_NAMES[wasteDow(d)];
+    if (scarto > 1 && scarto < 7) return giorno;
+    return giorno + " " + d.getDate() + " " + WASTE_MONTHS[d.getMonth()];
+  }
+
+  _wasteChip(item, key) {
+    const t = this._wasteKind(item, key);
+    return `<span class="wa-chip" style="--wc:${esc(t.color)}">
+      <ha-icon icon="${esc(t.icon)}"></ha-icon>${esc(t.l)}</span>`;
+  }
+
+  _wasteBody(item) {
+    const oggi = wasteISO(new Date());
+    const regole = (item && item.rules) || [];
+    // Una card senza regole non e' una card che non ha ritiri: e' una card da
+    // configurare, e deve dirlo. Mostrare "nessun ritiro" sarebbe una
+    // risposta falsa a una domanda che nessuno ha ancora impostato.
+    if (!regole.length) {
+      return `<div class="wa">
+        <div class="wa-vuoto">
+          <ha-icon icon="mdi:recycle-variant"></ha-icon>
+          <strong>Il calendario non è ancora scritto</strong>
+          <span>Apri MODIFICA e aggiungi una regola per ogni bidone: quali
+          giorni, da quando a quando, ogni settimana o a settimane alterne.
+          Si scrive una volta a semestre guardando il foglio del comune.</span>
+        </div></div>`;
+    }
+    const prossimi = wasteNext(item, oggi, (item.horizon || 8) + 1);
+    if (!prossimi.length) {
+      return `<div class="wa"><div class="wa-vuoto">
+        <ha-icon icon="mdi:calendar-remove-outline"></ha-icon>
+        <strong>Nessun ritiro nei prossimi dodici mesi</strong>
+        <span>Le regole ci sono ma sono tutte scadute: controlla le date
+        di validità in MODIFICA.</span>
+      </div></div>`;
+    }
+    const primo = prossimi[0];
+    const quando = this._wasteQuando(primo.date, oggi);
+    const d0 = wasteParse(primo.date);
+    const data0 = d0 ? `${WASTE_DAY_NAMES[wasteDow(d0)]} ${d0.getDate()} ${WASTE_MONTHS[d0.getMonth()]}` : primo.date;
+    // Il foglio del comune dice che i rifiuti vanno esposti entro le 06:00
+    // del giorno del ritiro. Il momento in cui questa card serve davvero non
+    // e' la mattina del ritiro: e' la sera prima.
+    const stasera = quando === "domani"
+      ? `<span class="wa-azione">da esporre stasera</span>` : "";
+    const resto = prossimi.slice(1, (item.horizon || 8) + 1);
+    return `<div class="wa">
+      <div class="wa-hero${quando === "domani" ? " urgente" : ""}">
+        <div class="wa-quando">${esc(quando)}${stasera}</div>
+        <div class="wa-chips">${primo.kinds.map((k) => this._wasteChip(item, k)).join("")}</div>
+        <div class="wa-data">${esc(data0)}</div>
+      </div>
+      ${resto.length ? `<div class="wa-lista">${resto.map((r) => {
+        const d = wasteParse(r.date);
+        return `<div class="wa-riga">
+          <span class="wa-gg">${d ? WASTE_DAY_NAMES[wasteDow(d)].slice(0, 3) : ""}
+            <b>${d ? d.getDate() : ""}</b></span>
+          <span class="wa-chips">${r.kinds.map((k) => this._wasteChip(item, k)).join("")}</span>
+        </div>`;
+      }).join("")}</div>` : ""}
+    </div>`;
+  }
+
   _shiftsWindow(item) {
     const view = item.view === "settimana" ? "settimana" : "mese";
     const off = (this._shiftOffset || {})[item.id] || 0;
@@ -10286,6 +10506,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "camera") return this._cameraBody(item);
     if (type === "calendar") return this._calendarBody(item);
     if (type === "shifts") return this._shiftsBody(item);
+    if (type === "waste") return this._wasteBody(item);
     if (type === "economy") return this._economyBody(item);
     if (type === "comfort") return this._comfortBody(item);
     if (type === "thermostat") return this._thermostatBody(item);
@@ -10873,6 +11094,71 @@ class CyborgDashboard extends HTMLElement {
         <label>AGGIORNAMENTO ANTEPRIME (secondi)<input type="number" min="5" max="120" data-prop="refresh" value="${card.refresh || 10}"></label>
         <label class="check"><input type="checkbox" data-prop="live" ${card.live ? "checked" : ""}> Anteprime sempre in diretta</label>
         <span class="hint">In diretta l'immagine è immediata e non c'è nessun intervallo di aggiornamento, ma ogni riquadro tiene aperto un flusso video: con una o due videocamere è la scelta giusta, con otto satura un tablet da parete.</span>
+      </div>`;
+    }
+    if (card.type === "waste") {
+      const kinds = this._wasteKinds(card);
+      const rules = Array.isArray(card.rules) ? card.rules : [];
+      const exc = card.exceptions || {};
+      const giorni = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"];
+      const cadenze = [[1, "ogni settimana"], [2, "una settimana sì e una no"],
+        [3, "una ogni tre"], [4, "una ogni quattro"]];
+      return `<div class="section">
+        <strong>I BIDONI</strong>
+        <span class="hint">Nome e colore di ogni rifiuto. Il colore è quello che userai per riconoscerlo al volo: conviene copiare quelli della legenda del tuo comune.</span>
+        <div class="eco-dev-list">${kinds.map((t, i) => `<div class="eco-dev-edit">
+          <input class="sh-name" data-wa-kl="${i}" value="${esc(t.l)}">
+          <input type="color" data-wa-kc="${i}" value="${esc(t.color || "#9aa5b1")}">
+          ${kinds.length > 1 ? `<button class="mini danger" data-wa-kdel="${i}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}
+        </div>`).join("")}</div>
+        <button class="secondary wide" data-wa-kadd><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI UN BIDONE</button>
+      </div>
+      <div class="section">
+        <strong>LE REGOLE</strong>
+        <span class="hint">Una regola si legge come una frase: <em>questi bidoni, in questi giorni, da quando a quando, con questa cadenza.</em> Il calendario del comune sta tutto in quattro o cinque regole.</span>
+        ${rules.map((r, i) => `<div class="wa-rule">
+          <div class="wa-rule-top">
+            <div class="wa-chips">${kinds.map((t) => `<button type="button"
+              class="wa-chip wa-pick ${(r.kinds || []).includes(t.k) ? "on" : ""}"
+              style="--wc:${esc(t.color)}" data-wa-rk="${i}" data-wa-k="${esc(t.k)}">
+              <ha-icon icon="${esc(t.icon)}"></ha-icon>${esc(t.l)}</button>`).join("")}</div>
+            ${(() => { const k = this._delKey("waste-rule", card.id, String(i));
+              return `<button class="mini danger${this._isArmed(k) ? " armed" : ""}" data-wa-rdel="${i}">
+                <ha-icon icon="${this._isArmed(k) ? "mdi:alert-outline" : "mdi:delete-outline"}"></ha-icon>
+                ${this._isArmed(k) ? "CONFERMA" : ""}</button>`; })()}
+          </div>
+          <div class="wa-dows">${giorni.map((g, n) => `<button type="button"
+            class="wa-dow ${(r.days || []).includes(n) ? "on" : ""}"
+            data-wa-rd="${i}" data-wa-d="${n}">${g}</button>`).join("")}</div>
+          <div class="wa-when">
+            <label>CADENZA<select data-wa-rev="${i}">${cadenze.map(([v, l]) =>
+              `<option value="${v}" ${Number(r.every || 1) === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+            ${Number(r.every || 1) > 1 ? `<label>A PARTIRE DA<input type="date" data-wa-ran="${i}" value="${esc(r.anchor || "")}"></label>` : ""}
+            <label>VALIDA DAL<input type="date" data-wa-rfrom="${i}" value="${esc(r.from || "")}"></label>
+            <label>FINO AL<input type="date" data-wa-rto="${i}" value="${esc(r.to || "")}"></label>
+          </div>
+          ${Number(r.every || 1) > 1 && !r.anchor ? `<span class="hint warn">Senza una data di partenza la cadenza alterna non sa in quale delle due settimane si trova: per non farti saltare un ritiro la regola vale <strong>ogni</strong> settimana finché non la indichi.</span>` : ""}
+        </div>`).join("")}
+        <button class="secondary wide" data-wa-radd><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI UNA REGOLA</button>
+      </div>
+      <div class="section">
+        <strong>ECCEZIONI</strong>
+        <span class="hint">Quando il gestore sposta o salta un ritiro per una festa. Una data senza nessun bidone selezionato vuol dire <em>quel giorno non si raccoglie niente</em>.</span>
+        ${Object.keys(exc).sort().map((day) => `<div class="wa-rule">
+          <div class="wa-rule-top">
+            <strong>${esc(day)}</strong>
+            <div class="wa-chips">${kinds.map((t) => `<button type="button"
+              class="wa-chip wa-pick ${(exc[day] || []).includes(t.k) ? "on" : ""}"
+              style="--wc:${esc(t.color)}" data-wa-ek="${esc(day)}" data-wa-k="${esc(t.k)}">
+              <ha-icon icon="${esc(t.icon)}"></ha-icon>${esc(t.l)}</button>`).join("")}</div>
+            <button class="mini danger" data-wa-edel="${esc(day)}"><ha-icon icon="mdi:delete-outline"></ha-icon></button>
+          </div>
+        </div>`).join("")}
+        <label>AGGIUNGI UNA DATA<input type="date" data-wa-eadd></label>
+      </div>
+      <div class="section">
+        <strong>ELENCO</strong>
+        <label>QUANTI RITIRI MOSTRARE<input type="number" min="3" max="30" data-prop="horizon" value="${card.horizon || 8}"></label>
       </div>`;
     }
     if (card.type === "shifts") {
@@ -13884,6 +14170,149 @@ class CyborgDashboard extends HTMLElement {
         if (row) { row.color = el.value; this._touch(); }
       };
     });
+    /* --- Raccolta rifiuti ---------------------------------------------- */
+    const waKinds = () => (Array.isArray(card.kinds) && card.kinds.length
+      ? card.kinds : WASTE_DEFAULT_KINDS).map((x) => Object.assign({}, x));
+    const waRules = () => (Array.isArray(card.rules) ? card.rules : [])
+      .map((r) => Object.assign({}, r, { kinds: (r.kinds || []).slice(), days: (r.days || []).slice() }));
+    const waExc = () => Object.assign({}, card.exceptions || {});
+    all("[data-wa-kl],[data-wa-kc]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const isL = el.hasAttribute("data-wa-kl");
+        const i = Number(el.getAttribute(isL ? "data-wa-kl" : "data-wa-kc"));
+        const rows = waKinds();
+        if (!rows[i]) return;
+        if (isL) rows[i].l = el.value.slice(0, 28) || rows[i].k;
+        else rows[i].color = el.value;
+        card.kinds = rows;
+        this._touch();
+      };
+    });
+    all("[data-wa-kdel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = waKinds();
+        const gone = rows.splice(Number(el.getAttribute("data-wa-kdel")), 1)[0];
+        card.kinds = rows;
+        // Un bidone cancellato va tolto anche dalle regole e dalle eccezioni
+        // che lo nominavano: lasciarcelo vorrebbe dire una sigla che non
+        // corrisponde piu' a niente, e la card disegnerebbe una pastiglia
+        // grigia senza nome al posto di dire che quel giorno non esce nulla.
+        if (gone) {
+          card.rules = waRules().map((r) => Object.assign({}, r,
+            { kinds: (r.kinds || []).filter((k) => k !== gone.k) }))
+            .filter((r) => r.kinds.length);
+          const ex = waExc();
+          for (const day of Object.keys(ex)) ex[day] = (ex[day] || []).filter((k) => k !== gone.k);
+          card.exceptions = ex;
+        }
+        this._touch();
+      };
+    });
+    const waKAdd = q("[data-wa-kadd]");
+    if (waKAdd) waKAdd.onclick = () => {
+      if (!card) return;
+      const rows = waKinds();
+      rows.push({ k: uid("rif"), l: "Nuovo bidone",
+        color: SERIES_COLORS[rows.length % SERIES_COLORS.length],
+        icon: "mdi:trash-can-outline" });
+      card.kinds = rows;
+      this._touch();
+    };
+    all("[data-wa-rk]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = waRules();
+        const r = rows[Number(el.getAttribute("data-wa-rk"))];
+        if (!r) return;
+        const k = el.getAttribute("data-wa-k");
+        r.kinds = r.kinds.includes(k) ? r.kinds.filter((x) => x !== k) : r.kinds.concat([k]);
+        card.rules = rows;
+        this._touch();
+      };
+    });
+    all("[data-wa-rd]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const rows = waRules();
+        const r = rows[Number(el.getAttribute("data-wa-rd"))];
+        if (!r) return;
+        const n = Number(el.getAttribute("data-wa-d"));
+        r.days = r.days.includes(n) ? r.days.filter((x) => x !== n) : r.days.concat([n]).sort((a, b) => a - b);
+        card.rules = rows;
+        this._touch();
+      };
+    });
+    all("[data-wa-rev],[data-wa-ran],[data-wa-rfrom],[data-wa-rto]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const map = { "data-wa-rev": "every", "data-wa-ran": "anchor",
+          "data-wa-rfrom": "from", "data-wa-rto": "to" };
+        const attr = Object.keys(map).find((a2) => el.hasAttribute(a2));
+        const rows = waRules();
+        const r = rows[Number(el.getAttribute(attr))];
+        if (!r) return;
+        r[map[attr]] = map[attr] === "every" ? Number(el.value) || 1 : el.value;
+        card.rules = rows;
+        this._touch();
+      };
+    });
+    all("[data-wa-rdel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        // Stessa conferma a due tocchi di ogni altra eliminazione: una regola
+        // cancellata per sbaglio si riscrive, ma te ne accorgi fra sei mesi.
+        // _confirmed ridisegna da solo: il primo tocco arma, il secondo
+        // entro cinque secondi elimina, e il bottone cambia faccia nel mezzo.
+        if (!this._confirmed(this._delKey("waste-rule", card.id, el.getAttribute("data-wa-rdel")))) return;
+        const rows = waRules();
+        rows.splice(Number(el.getAttribute("data-wa-rdel")), 1);
+        card.rules = rows;
+        this._touch();
+      };
+    });
+    const waRAdd = q("[data-wa-radd]");
+    if (waRAdd) waRAdd.onclick = () => {
+      if (!card) return;
+      const rows = waRules();
+      const primo = waKinds()[0];
+      rows.push({ kinds: primo ? [primo.k] : [], days: [], from: "", to: "", every: 1, anchor: "" });
+      card.rules = rows;
+      this._touch();
+    };
+    all("[data-wa-ek]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const ex = waExc();
+        const day = el.getAttribute("data-wa-ek");
+        const k = el.getAttribute("data-wa-k");
+        const cur = (ex[day] || []).slice();
+        ex[day] = cur.includes(k) ? cur.filter((x) => x !== k) : cur.concat([k]);
+        card.exceptions = ex;
+        this._touch();
+      };
+    });
+    all("[data-wa-edel]").forEach((el) => {
+      el.onclick = () => {
+        if (!card) return;
+        const ex = waExc();
+        delete ex[el.getAttribute("data-wa-edel")];
+        card.exceptions = ex;
+        this._touch();
+      };
+    });
+    const waEAdd = q("[data-wa-eadd]");
+    if (waEAdd) waEAdd.onchange = () => {
+      if (!card || !waEAdd.value) return;
+      const ex = waExc();
+      // Una data nuova nasce VUOTA, cioe' "quel giorno non si raccoglie
+      // niente": e' il caso di gran lunga piu' frequente di un eccezione.
+      if (!Object.prototype.hasOwnProperty.call(ex, waEAdd.value)) ex[waEAdd.value] = [];
+      card.exceptions = ex;
+      waEAdd.value = "";
+      this._touch();
+    };
     const shList = (key, fallback) => {
       const cur = Array.isArray(card[key]) && card[key].length
         ? card[key].slice() : fallback.slice();
@@ -16108,6 +16537,62 @@ button.mini.danger.armed ha-icon{color:#fff}
   .sh-cell{min-height:48px;padding:4px 2px}
   .sh-key span{display:none}
 }
+/* --- Raccolta rifiuti ---------------------------------------------------- */
+.wa{display:flex;flex-direction:column;gap:10px}
+.wa-vuoto{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;
+  padding:18px 12px;border:1px dashed color-mix(in srgb,var(--accent) 30%,transparent);
+  border-radius:14px}
+.wa-vuoto ha-icon{--mdc-icon-size:30px;color:color-mix(in srgb,var(--accent) 70%,transparent)}
+.wa-vuoto strong{font-size:13px}
+.wa-vuoto span{font-size:11.5px;opacity:.72;max-width:42ch;line-height:1.5}
+/* Il riquadro grande risponde alla sola domanda per cui si apre la card:
+   cosa esce adesso. Tutto il resto e' consultazione e sta sotto, piu' piccolo. */
+.wa-hero{display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:14px;
+  background:color-mix(in srgb,var(--accent) 7%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 22%,transparent)}
+/* Quando il ritiro e' domani il bidone va messo fuori STASERA: e' l unico
+   momento in cui questa card cambia il comportamento di chi la guarda, ed e'
+   l unico in cui si accende. Accendersi sempre non sarebbe un avviso. */
+.wa-hero.urgente{background:color-mix(in srgb,#ffb020 12%,transparent);
+  border-color:color-mix(in srgb,#ffb020 45%,transparent)}
+.wa-quando{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  font:700 15px/1 inherit;text-transform:uppercase;letter-spacing:.06em}
+.wa-azione{font:600 11px/1 inherit;letter-spacing:.04em;text-transform:none;color:#ffb020}
+.wa-data{font-size:11px;opacity:.6}
+.wa-chips{display:flex;flex-wrap:wrap;gap:5px}
+.wa-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:99px;
+  font:650 11.5px/1 inherit;white-space:nowrap;
+  background:color-mix(in srgb,var(--wc) 20%,transparent);
+  border:1px solid color-mix(in srgb,var(--wc) 55%,transparent);
+  color:color-mix(in srgb,var(--wc) 88%,#ffffff)}
+.wa-chip ha-icon{--mdc-icon-size:14px}
+.wa-lista{display:flex;flex-direction:column;gap:2px}
+.wa-riga{display:flex;align-items:center;gap:10px;padding:5px 4px;
+  border-top:1px solid color-mix(in srgb,var(--fg) 8%,transparent)}
+.wa-gg{display:flex;flex-direction:column;align-items:center;min-width:34px;
+  font-size:9.5px;text-transform:uppercase;opacity:.6;letter-spacing:.05em}
+.wa-gg b{font-size:14px;opacity:1;font-weight:700}
+/* L editor: una regola per riga, e la riga si legge come una frase. */
+.wa-rule{display:flex;flex-direction:column;gap:7px;padding:10px;border-radius:12px;
+  background:color-mix(in srgb,var(--fg) 4%,transparent);
+  border:1px solid color-mix(in srgb,var(--fg) 10%,transparent)}
+.wa-dows{display:flex;gap:4px;flex-wrap:wrap}
+.wa-dow{min-width:34px;padding:4px 0;text-align:center;border-radius:8px;cursor:pointer;
+  font:650 11px/1 inherit;text-transform:uppercase;
+  background:color-mix(in srgb,var(--fg) 7%,transparent);
+  border:1px solid color-mix(in srgb,var(--fg) 12%,transparent)}
+.wa-dow.on{background:color-mix(in srgb,var(--accent) 24%,transparent);
+  border-color:var(--accent);color:var(--accent)}
+.wa-when{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+.wa-when label{flex:1;min-width:120px}
+.wa-rule-top{display:flex;gap:8px;align-items:center}
+.wa-rule-top .wa-chips{flex:1}
+.wa-pick{opacity:.45}
+.wa-pick.on{opacity:1}
+@media(max-width:700px){
+  .wa-dow{min-width:30px}
+  .wa-quando{font-size:14px}
+}
 /* --- Calendari ---------------------------------------------------------- */
 .cal{display:flex;flex-direction:column;gap:10px}
 .cal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
@@ -17787,7 +18272,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.68.0";
+const CYBORG_BUILD = "0.69.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

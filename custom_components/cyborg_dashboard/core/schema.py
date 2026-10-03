@@ -75,17 +75,44 @@ DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
+def _clean_day(value):
+    """Una data vera, o niente.
+
+    DAY_RE controlla la FORMA, non l'esistenza: "2026-13-45" la passa, perche'
+    sono quattro cifre, due cifre e due cifre. Una data impossibile non e'
+    innocua: nell'editor un <input type="date"> non riesce a mostrarla e la
+    casella appare VUOTA, mentre la regola continua a essere filtrata da
+    quel valore. Una casella vuota che filtra e' il peggiore dei difetti -
+    non c'e' niente da guardare che spieghi perche' non esce nulla.
+    """
+    testo = str(value or "").strip()[:10]
+    if not DAY_RE.match(testo):
+        return ""
+    try:
+        datetime.date.fromisoformat(testo)
+    except ValueError:
+        return ""
+    return testo
+
+
 def _clean_hhmm(value):
     """Un orario o niente. "25:99" non e' un'ora: vale come non scritto."""
     testo = str(value or "").strip()
     return testo if HHMM_RE.match(testo) else ""
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 #: Hard ceiling on the lines of one comparison chart. Twelve is already past
 #: what most readers can tell apart; it exists so an automatic source cannot
 #: quietly turn a chart into a hairball.
 MAX_TREND_SERIES = 20
+
+#: La card Raccolta. Sei tipi sono gia' piu' di quanti ne usi un comune
+#: italiano; il tetto esiste perche' una lista incollata da fuori non possa
+#: trasformare la card in un elenco infinito.
+MAX_WASTE_KINDS = 10
+MAX_WASTE_RULES = 12
+MAX_WASTE_EXCEPTIONS = 120
 
 DEFAULT_THEME = {
     "mode": "dark", "density": "comfortable", "radius": 16, "gap": 16,
@@ -999,6 +1026,105 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["rotation"] = clean_rot
         else:
             result["rotation"] = {"person": "", "seq": [], "start": "", "weeks": 8}
+    # La card Raccolta (v25): il calendario dei rifiuti come REGOLE, non come
+    # un elenco di date incollato dentro.
+    #
+    # Il calendario del comune e' una griglia a COLORI: il tipo di rifiuto non
+    # e' scritto da nessuna parte nel PDF, sta nel colore della cella. Non e'
+    # leggibile da una macchina, quindi un sincronizzatore automatico non e'
+    # una scelta di gusto: e' impossibile farlo in modo affidabile. Si scrivono
+    # le regole una volta a semestre, in trenta secondi, e non puo' rompersi
+    # niente di nascosto.
+    #
+    # Una regola e': questi rifiuti, in questi giorni della settimana, da
+    # questa data a quest'altra, ogni settimana oppure a settimane alterne.
+    if result.get("type") == "waste":
+        rows = result.get("kinds")
+        kinds = []
+        seen_k = set()
+        if isinstance(rows, list):
+            for row in rows[:MAX_WASTE_KINDS]:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("k") or "").strip()[:16]
+                if not key or key in seen_k:
+                    continue
+                seen_k.add(key)
+                kinds.append({
+                    "k": key,
+                    "l": str(row.get("l") or key)[:28],
+                    "color": str(row.get("color") or "#9aa5b1")[:32],
+                    "icon": str(row.get("icon") or "mdi:trash-can-outline")[:48],
+                })
+        result["kinds"] = kinds
+
+        rows = result.get("rules")
+        rules = []
+        if isinstance(rows, list):
+            for row in rows[:MAX_WASTE_RULES]:
+                if not isinstance(row, dict):
+                    continue
+                ks = row.get("kinds")
+                ks = ([str(x)[:16] for x in ks if isinstance(x, str) and x][:MAX_WASTE_KINDS]
+                      if isinstance(ks, list) else [])
+                days = row.get("days")
+                days = (sorted({int(d) for d in days
+                                if isinstance(d, (int, float)) and 0 <= int(d) <= 6})
+                        if isinstance(days, list) else [])
+                # Una regola senza rifiuti o senza giorni non produce niente:
+                # tenerla vorrebbe dire mostrare una riga che non fa nulla
+                # nell'editor e far credere che il calendario sia configurato.
+                if not ks or not days:
+                    continue
+                # `every` e' 1 (ogni settimana) o 2 (a settimane alterne).
+                try:
+                    every = int(float(row.get("every", 1)))
+                except (TypeError, ValueError):
+                    every = 1
+                every = every if every in (1, 2, 3, 4) else 1
+                anchor = _clean_day(row.get("anchor"))
+                rules.append({
+                    "kinds": ks,
+                    "days": days,
+                    "from": _clean_day(row.get("from")),
+                    "to": _clean_day(row.get("to")),
+                    "every": every,
+                    # L'ancora serve SOLO se la cadenza non e' settimanale.
+                    # Senza ancora un "a settimane alterne" non sa in quale
+                    # delle due settimane sta, e sarebbe sfasato per sempre.
+                    "anchor": anchor if every > 1 else "",
+                })
+        result["rules"] = rules
+
+        # Le eccezioni: quando il gestore sposta o salta un ritiro per una
+        # festa. Mappa data -> lista di rifiuti, dove la LISTA VUOTA significa
+        # "quel giorno non si raccoglie niente" ed e' diversa dall'assenza
+        # della data, che significa "vale la regola".
+        exc = result.get("exceptions")
+        clean_exc = {}
+        if isinstance(exc, dict):
+            cutoff = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+            for day, value in exc.items():
+                if not isinstance(day, str) or _clean_day(day) != day:
+                    continue
+                if day < cutoff:
+                    continue
+                if not isinstance(value, list):
+                    continue
+                clean_exc[day] = [str(x)[:16] for x in value if isinstance(x, str) and x][:MAX_WASTE_KINDS]
+                if len(clean_exc) >= MAX_WASTE_EXCEPTIONS:
+                    break
+        result["exceptions"] = clean_exc
+
+        # Quanti ritiri mostrare in elenco sotto al prossimo.
+        try:
+            result["horizon"] = max(3, min(30, int(float(result.get("horizon", 8)))))
+        except (TypeError, ValueError):
+            result["horizon"] = 8
+        # Il PDF del comune dice che i rifiuti vanno esposti entro le 06:00
+        # del giorno del ritiro: l'avviso utile e' quello della SERA PRIMA.
+        result["remind"] = result.get("remind", True) is not False
+        result["remind_at"] = _clean_hhmm(result.get("remind_at")) or "20:00"
     # La card Calendari: quali calendari, con che vista e con che colori.
     # Lista vuota = "trovali tu", come ovunque.
     if result.get("type") == "calendar":

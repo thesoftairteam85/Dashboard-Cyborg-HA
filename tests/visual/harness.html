@@ -416,6 +416,40 @@ window.__mount=(dash,opts)=>{
             el._noteOpen={id:"turni1",pid:"lui",key:kk(2)};
           }
         }
+        if(opts&&opts.raccolta){
+          var secR=el._sections()[0];
+          // Le regole vere del Comune di Martinengo, secondo semestre 2026.
+          // Le date di validita' sono ancorate a OGGI, se no fra sei mesi la
+          // scena mostrerebbe una card vuota e la suite smetterebbe di
+          // guardare qualcosa senza dirlo a nessuno.
+          var oggiR=new Date();
+          var p2=function(n){return String(n).padStart(2,"0");};
+          var isoR=function(d){return d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate());};
+          // L ancora: il primo giovedi da oggi in avanti.
+          var ancora=new Date(oggiR);
+          while(((ancora.getDay()+6)%7)!==3) ancora.setDate(ancora.getDate()+1);
+          var ancora2=new Date(ancora); ancora2.setDate(ancora2.getDate()+7);
+          // Il sabato dell organico vale ancora per un mese, cosi' la scena
+          // mostra anche una regola con finestra di validita'.
+          var finSab=new Date(oggiR); finSab.setDate(finSab.getDate()+30);
+          secR.items.unshift({id:"racc1",type:"waste",entity_id:"",name:"Raccolta",
+            size:"md",appearance:{icon:"mdi:recycle-variant"},states:{},actions:{},
+            horizon:8,exceptions:{},remind:true,remind_at:"20:00",
+            kinds:[{k:"organico",l:"Organico",color:"#c0714c",icon:"mdi:food-apple-outline"},
+                   {k:"residuo",l:"Rifiuto residuo",color:"#9aa5b1",icon:"mdi:trash-can-outline"},
+                   {k:"pannolini",l:"Pannolini",color:"#d7dde3",icon:"mdi:baby-face-outline"},
+                   {k:"carta",l:"Carta",color:"#6cb4e4",icon:"mdi:newspaper-variant-outline"},
+                   {k:"plastica",l:"Plastica",color:"#f2c200",icon:"mdi:bottle-soda-classic-outline"},
+                   {k:"vetro",l:"Vetro e lattine",color:"#13b35a",icon:"mdi:glass-fragile"}],
+            rules:[{kinds:["organico"],days:[1],every:1,anchor:"",from:"",to:""},
+                   {kinds:["organico"],days:[5],every:1,anchor:"",from:"",to:isoR(finSab)},
+                   {kinds:["residuo","pannolini"],days:[2],every:1,anchor:"",from:"",to:""},
+                   {kinds:["carta"],days:[3],every:2,anchor:isoR(ancora),from:"",to:""},
+                   {kinds:["plastica","vetro"],days:[3],every:2,anchor:isoR(ancora2),from:"",to:""}]});
+          if(opts.raccolta==="vuota"){secR.items[0].rules=[];}
+          if(opts.selectRaccolta){el._editing=true;
+            el._selected={kind:"card",sectionId:secR.id,itemId:"racc1"};}
+        }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
           sec.items.unshift({id:"ecocard",type:"economy",entity_id:"",name:"",size:"xl",

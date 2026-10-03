@@ -623,7 +623,7 @@ def _room(**kw):
     return schema.normalize_item(item, 0)
 
 
-assert schema.SCHEMA_VERSION == 24, schema.SCHEMA_VERSION
+assert schema.SCHEMA_VERSION == 25, schema.SCHEMA_VERSION
 assert _room()["grouping"] == "state", _room()["grouping"]
 assert _room(grouping="domain")["grouping"] == "domain"
 # qualunque valore inventato ricade sul default, non passa cosi' com'e'
@@ -1109,3 +1109,63 @@ assert _shn(notes=[1, 2])["notes"] == {}
 # il testo si accorcia invece di far crescere il documento senza limite
 assert len(_shn(notes={"p1": {"2026-09-22": {"t": "x" * 999}}})["notes"]["p1"]["2026-09-22"]["t"]) == 300
 print("schema: note del giorno sui turni (v24) ok")
+
+
+# ---------------------------------------------------------------------------
+# v25 — la card Raccolta: il calendario come regole, non come date incollate
+# ---------------------------------------------------------------------------
+def _wa(**kw):
+    item = {"id": "wa", "type": "waste"}
+    item.update(kw)
+    return schema.normalize_item(item, 0)
+
+
+# Valori di fabbrica: nessuna regola inventata. Una card che nascesse con un
+# calendario plausibile mostrerebbe date false con la faccia di date vere.
+base = _wa()
+assert base["rules"] == [] and base["kinds"] == [] and base["exceptions"] == {}
+assert base["horizon"] == 8 and base["remind"] is True and base["remind_at"] == "20:00"
+
+# Una regola completa sopravvive intera
+r = _wa(rules=[{"kinds": ["carta"], "days": [3], "every": 2,
+                "anchor": "2026-07-02", "from": "2026-07-01", "to": "2026-12-31"}])["rules"]
+assert r == [{"kinds": ["carta"], "days": [3], "from": "2026-07-01",
+              "to": "2026-12-31", "every": 2, "anchor": "2026-07-02"}], r
+
+# Una regola senza bidoni o senza giorni non produce nulla: si scarta invece
+# di restare nell'editor a far credere che il calendario sia configurato.
+assert _wa(rules=[{"kinds": [], "days": [3]}])["rules"] == []
+assert _wa(rules=[{"kinds": ["carta"], "days": []}])["rules"] == []
+
+# L'ancora serve SOLO alla cadenza alterna: su una regola settimanale e'
+# rumore, e lasciarla farebbe credere che cambi qualcosa.
+assert _wa(rules=[{"kinds": ["carta"], "days": [3], "every": 1,
+                   "anchor": "2026-07-02"}])["rules"][0]["anchor"] == ""
+
+# Giorni fuori scala e doppioni: un "7" non e' un giorno della settimana
+g = _wa(rules=[{"kinds": ["x"], "days": [3, 3, 9, -1, 0]}])["rules"][0]["days"]
+assert g == [0, 3], g
+
+# Date non valide valgono come non scritte, non come date strane
+bad = _wa(rules=[{"kinds": ["x"], "days": [1], "from": "boh", "to": "2026-13-45"}])["rules"][0]
+assert bad["from"] == "" and bad["to"] == ""
+
+# Cadenza assurda -> ogni settimana, che e' il comportamento prudente
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "every": 99}])["rules"][0]["every"] == 1
+
+# Un'eccezione con lista VUOTA si conserva: vuol dire "quel giorno niente",
+# ed e' diverso dall'assenza della data, che vuol dire "vale la regola".
+e = _wa(exceptions={"2026-12-25": []})["exceptions"]
+assert e == {"2026-12-25": []}, e
+
+# I bidoni: sigle doppie scartate, campi accorciati
+k = _wa(kinds=[{"k": "a", "l": "Carta"}, {"k": "a", "l": "Altro"}])["kinds"]
+assert len(k) == 1 and k[0]["l"] == "Carta", k
+
+# Idempotenza: normalizzare due volte non cambia niente
+once = _wa(rules=[{"kinds": ["carta"], "days": [3], "every": 2, "anchor": "2026-07-02"}],
+           kinds=[{"k": "carta", "l": "Carta", "color": "#6cb4e4"}])
+twice = schema.normalize_item(dict(once), 0)
+assert once == twice, (once, twice)
+
+print("schema: raccolta rifiuti (v25) ok")
