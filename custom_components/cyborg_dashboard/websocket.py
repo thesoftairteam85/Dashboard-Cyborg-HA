@@ -146,6 +146,13 @@ async def _ws_save(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
         )
         return
     connection.send_result(msg["id"], {"saved": True, "revision": revision})
+    # Gli avvisi della raccolta sono armati sull'orario scritto nella card:
+    # se si salva un orario nuovo e nessuno riarma, l'avviso continua ad
+    # arrivare a quello vecchio. E' un guasto che si scopre la sera che non
+    # arriva, cioe' quando non serve piu' saperlo.
+    reminders = hass.data.get(DOMAIN, {}).get("reminders")
+    if reminders is not None:
+        hass.async_create_task(reminders.async_rearm())
 
 
 def _log(hass: HomeAssistant):

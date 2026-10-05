@@ -4,6 +4,126 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.71.0] - 2026-10-05
+
+«Clicco sulle notifiche e non mi porta nella sezione dedicata.» Erano due cose:
+la notifica della raccolta **non esisteva**, e nessuna notifica portava da
+nessuna parte.
+
+### Il promemoria della sera prima
+
+Alle 20:00 il pannello è chiuso. Un avviso che esiste solo finché qualcuno
+guarda lo schermo non è un avviso, è una scritta — quindi questo gira dentro
+Home Assistant, che è acceso comunque. Si arma all'orario scritto sulla card
+con `async_track_time_change`, non con un controllo periodico: un ciclo sbaglia
+in due modi opposti, troppo raro e salta la sera, troppo fitto e consuma
+trecentosessantacinque giorni l'anno per mandare trenta avvisi.
+
+Il testo dice la cosa che cambia il comportamento. Non «domani passano» ma
+**«da esporre stasera, entro le 6 di domattina»**, che è quello che c'è scritto
+sul foglio del comune. E **la sera prima di un giorno senza ritiri non arriva
+niente**: «domani niente» tutte le sere è il modo più rapido per far
+disattivare le notifiche.
+
+### La duplicazione che non si poteva evitare, resa rumorosa
+
+Le regole ora sono valutate in **due posti**: nel frontend per disegnare la
+card, e in `core/waste.py` perché l'avviso deve partire col pannello chiuso.
+*La stessa condizione scritta in due posti diversi diverge sempre* — è una
+regola che in questo progetto è già costata.
+
+Qui non si poteva evitare: un browser chiuso non calcola niente, e
+l'alternativa era non avere la funzione. Allora la divergenza non si evita, si
+rende **rumorosa**: le due implementazioni leggono lo **stesso campione**,
+`tests/fixtures/raccolta.json` — **187 giorni** di calendario vero, scritti a
+mano dal PDF del gestore e *non generati dal codice che devono verificare*. Se
+una delle due si sposta, una delle due suite cade.
+
+Verificato mettendo la settimana ISO solo nella versione Python: cade quella, e
+dice `2027-01-07: ['carta'] invece di ['plastica','vetro']`. Verificato
+alterando un giorno del campione: cadono **tutte e due**.
+
+### Una notifica che porta alla card
+
+Un bersaglio è un **riferimento**, e un riferimento marcisce: la card viene
+cancellata, la sezione si sposta di pagina, la pagina sparisce. Portare
+l'utente su una pagina a caso è peggio che non portarlo da nessuna parte,
+perché gli fa credere di aver capito male lui.
+
+Quindi: le coordinate si scrivono **dove si sa dove sta la card**, cioè nel
+codice che genera l'avviso, invece di farle indovinare al pannello per
+somiglianza di testo. E si **verificano al momento del clic**, non a quello
+della scrittura: la freccia compare solo se il bersaglio esiste ancora. Una
+freccia che non porta da nessuna parte è una promessa rotta, e si prova due o
+tre volte prima di concludere che è rotta.
+
+Comanda l'**identificativo della sezione**, non l'indice di pagina salvato: una
+sezione si sposta di pagina dall'editor, e un numero scritto tre settimane fa
+non lo sa. Arrivati, la sezione chiusa si apre (se no la card resta nascosta) e
+la card si accende per due secondi e mezzo — poi si spegne, perché un bordo
+acceso per sempre smette di dire «è questa» e diventa un difetto grafico.
+
+Andare a vedere un avviso vuol dire averlo letto: il contatore si aggiorna da
+solo, se no resta acceso un numero che mente.
+
+### E quelli che Cyborg non ha scritto — che sono il caso vero
+
+Primo tentativo sbagliato per difetto: il collegamento valeva **solo** per gli
+avvisi generati da Cyborg. Ma la notifica della raccolta, nella pratica, arriva
+da un'**automazione Telegram** — e quella non potrà mai portarsi dietro delle
+coordinate. Un collegamento che funziona solo sugli avvisi nostri funziona
+quasi mai.
+
+Quindi, quando le coordinate non ci sono, si deducono. Ma **non** per
+somiglianza di testo: le parole con cui una card si fa riconoscere vengono
+dalla sua **configurazione** — i nomi dei bidoni li ha scritti l'utente — non
+da un vocabolario inventato nel codice. Una parola che compare nell'avviso ed è
+la stessa che lui ha dato a un suo bidone non è una somiglianza: *è la stessa
+parola*.
+
+Tre vincoli, e il terzo è quello che conta:
+
+- **minimo quattro lettere** — le sigle dei turni sono di una o due, e
+  accettarle aggancerebbe qualunque testo;
+- **confine di parola** — «carta» non si aggancia dentro «scartare»;
+- **si risponde solo quando la risposta è una sola.** Due card che potrebbero
+  essere quella giusta non fanno metà ragione a testa: fanno una scommessa, e
+  una scommessa che ogni tanto apre la card sbagliata è peggio di nessun
+  collegamento, perché smetti di fidarti anche di quelli giusti. Nel dubbio la
+  freccia non compare.
+
+Il bersaglio **scritto vince sempre** su quello dedotto — chi ha generato
+l'avviso sapeva dove stava la card, qui invece si sta leggendo del testo. Ma
+se lo scritto è morto (card cancellata) si ripiega sulla deduzione invece di
+non portare da nessuna parte. E il titolo del pulsante dice **dove porta prima
+di toccarlo**: su un bersaglio dedotto è l'unica cosa che distingue «ti porto
+dove vuoi tu» da «ti porto dove credo io».
+
+Il messaggio vero di Oscar è dentro la suite, copiato dalla sua schermata.
+
+### Un avviso che non è uscito di casa non dice «inviato via»
+
+`async_add_local()` scrive nel registro gli avvisi che **Cyborg genera da sé**,
+che non passano da nessun servizio `notify` e quindi nessun evento porterebbe
+lì. Ma il frontend conosceva due provenienze, inviato e ricevuto, e scriveva
+«inviato via Raccolta rifiuti» sotto un promemoria che non è partito verso
+nessun telefono. Ora sono **tre**: *promemoria di Cyborg* è la terza. È il
+genere di bugia che si scopre il giorno che ci si fida e il telefono non ha
+squillato.
+
+### Verifica
+- frontend **1659**, visiva **474** (scena nuova `88-notif-vai`),
+  raccolta **23** (nuova), impianti 49, pannello 25, websocket 23, rilascio 10
+- rimessi tre difetti, la suite cade dove deve: bersaglio non verificato ->
+  `una card cancellata non produce un salto nel vuoto`; deduzione che sceglie
+  il primo candidato -> `nel dubbio, niente`; parole di una lettera ->
+  `le parole corte non agganciano`
+
+### Nota
+Gli avvisi si riarmano a ogni salvataggio della dashboard. Un orario cambiato
+nell'editor che non riarma niente è un guasto che si scopre la sera che
+l'avviso non arriva, cioè troppo tardi.
+
 ## [0.70.0] - 2026-10-04
 
 Tre difetti segnalati da Oscar, e il primo era mio e grosso.

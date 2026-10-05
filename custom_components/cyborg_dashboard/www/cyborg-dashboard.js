@@ -6249,6 +6249,121 @@ class CyborgDashboard extends HTMLElement {
    *    which Home Assistant does not record anywhere. That log lives in the
    *    integration (core/notifications.py) and is pushed here live.
    */
+  /**
+   * Il bersaglio di una notifica e' ancora valido?
+   *
+   * Un bersaglio e' un riferimento, e un riferimento marcisce: la card puo'
+   * essere stata cancellata, la sezione spostata su un'altra pagina, la
+   * pagina tolta. Portare l'utente su una pagina a caso e' peggio che non
+   * portarlo da nessuna parte, perche' gli fa credere di aver capito male.
+   * Si controlla PRIMA di disegnare la riga come toccabile.
+   */
+  _notifTarget(n) {
+    const t = n && n.target;
+    if (!t || t.kind !== "card" || !this._dashboard) return null;
+    const pages = this._dashboard.pages || [];
+    // La pagina memorizzata e' solo un suggerimento: una sezione si sposta di
+    // pagina dall'editor, e un indice salvato tre settimane fa non lo sa.
+    // Comanda l'identificativo della sezione, che non cambia.
+    for (let i = 0; i < pages.length; i += 1) {
+      for (const sec of (pages[i] || {}).sections || []) {
+        if (sec.id !== t.section) continue;
+        const card = (sec.items || []).find((it) => it.id === t.item);
+        if (!card) return null;
+        return { page: i, section: sec.id, item: t.item, nome: card.name || "" };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Le parole con cui una card si fa riconoscere in un testo.
+   *
+   * Servono per gli avvisi che Cyborg NON ha scritto: la notifica della
+   * raccolta, nella pratica, arriva da un'automazione Telegram, e quella non
+   * potra' mai portarsi dietro delle coordinate. Senza questo il collegamento
+   * funzionerebbe solo sugli avvisi nostri, cioe' quasi mai.
+   *
+   * Le parole vengono dalla CONFIGURAZIONE della card - i nomi dei bidoni li
+   * ha scritti l'utente - non da un vocabolario inventato qui. Una parola che
+   * compare nell'avviso ed e' la stessa che lui ha dato a un suo bidone non e'
+   * una somiglianza: e' la stessa parola.
+   *
+   * Minimo quattro lettere: le sigle dei turni sono di una o due, e una
+   * regola che le accettasse aggancerebbe qualunque testo.
+   */
+  _cardKeywords(item) {
+    const out = [];
+    const agg = (v) => {
+      const t = String(v || "").trim().toLowerCase();
+      if (t.length >= 4 && !out.includes(t)) out.push(t);
+    };
+    agg(item.name);
+    if (item.type === "waste") {
+      ["raccolta", "rifiuti", "differenziata", "immondizia"].forEach(agg);
+      for (const k of this._wasteKinds(item)) { agg(k.l); agg(k.k); }
+    }
+    return out;
+  }
+
+  /**
+   * Indovinare la card da un avviso che non porta coordinate.
+   *
+   * Si risponde SOLO quando la risposta e' una sola. Due card che potrebbero
+   * essere quella giusta non fanno meta' ragione a testa: fanno una
+   * scommessa, e una scommessa che ogni tanto apre la card sbagliata e'
+   * peggio di nessun collegamento, perche' smetti di fidarti anche di quelli
+   * giusti. Nel dubbio la freccia non compare.
+   */
+  _notifGuess(n) {
+    const testo = (String((n && n.title) || "") + " " + String((n && n.message) || "")).toLowerCase();
+    if (!testo.trim() || !this._dashboard) return null;
+    const candidati = [];
+    (this._dashboard.pages || []).forEach((pagina, i) => {
+      for (const sec of (pagina || {}).sections || []) {
+        for (const it of sec.items || []) {
+          const parole = this._cardKeywords(it);
+          // Confine di parola: "carta" non deve agganciarsi dentro
+          // "scartare", e "vetro" non dentro "vetrocemento".
+          const colpito = parole.some((w) =>
+            new RegExp("(^|[^\\p{L}])" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+              + "([^\\p{L}]|$)", "u").test(testo));
+          if (colpito) candidati.push({ page: i, section: sec.id, item: it.id, nome: it.name || "" });
+        }
+      }
+    });
+    return candidati.length === 1 ? candidati[0] : null;
+  }
+
+  /**
+   * Il bersaglio da usare per questa notifica: quello scritto, o quello
+   * dedotto. Lo scritto vince sempre - chi ha generato l'avviso sapeva dove
+   * stava la card, mentre qui si sta leggendo del testo.
+   */
+  _notifJump(n) {
+    return this._notifTarget(n) || this._notifGuess(n);
+  }
+
+  /** Porta alla card che la notifica nomina. */
+  _gotoTarget(t) {
+    if (!t) return;
+    this._pageIndex = t.page;
+    // Una sezione chiusa nasconde la card: aprirla fa parte del "portarci".
+    const sec = ((this._dashboard.pages[t.page] || {}).sections || [])
+      .find((x) => x.id === t.section);
+    if (sec && sec.collapsed) sec.collapsed = false;
+    this._notifGoto = t.item;
+    this._touch(true);
+    // Lo scorrimento dopo il ridisegno: prima il nodo non esiste ancora.
+    setTimeout(() => {
+      const el = this.querySelector(`[data-card-id="${t.item}"]`);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      // L'evidenziazione si spegne da sola: un bordo acceso per sempre
+      // smette di dire "e' questa" e diventa un difetto grafico.
+      setTimeout(() => { if (this._notifGoto === t.item) { this._notifGoto = null; this._touch(true); } }, 2600);
+    }, 60);
+  }
+
   _notificationsBody(item) {
     this._subscribe("notif", { type: "persistent_notification/subscribe" }, (ev) => {
       this._notifs = this._notifs || {};
@@ -6293,14 +6408,31 @@ class CyborgDashboard extends HTMLElement {
     const sentRows = sent.slice(0, cap).map((n) => {
       const ch = notifChannel(n.channel);
       const inbound = n.source === "received";
+      // Tre provenienze, non due. Un promemoria che Cyborg genera da solo non
+      // e' uscito di casa: scrivergli "inviato via" dice che e' arrivato su un
+      // telefono quando non e' partito niente, ed e' il genere di bugia che si
+      // scopre il giorno che ci si fida e il telefono non ha squillato.
+      const locale = n.source === "local";
       return `<div class="notif-row${inbound ? " in" : ""}${n.read ? " read" : " unread"}" style="--nc:${esc(ch.color)}">
-        <ha-icon icon="${esc(inbound ? "mdi:message-reply-text" : ch.icon)}"></ha-icon>
+        <ha-icon icon="${esc(inbound ? "mdi:message-reply-text" : locale ? "mdi:bell-badge-outline" : ch.icon)}"></ha-icon>
         <div class="notif-txt" data-notif-read="${esc(n.id)}" data-read="${n.read ? "1" : "0"}"
              title="${n.read ? "Segna come da leggere" : "Segna come letto"}">
-          <strong>${n.read ? "" : '<i class="notif-dot"></i>'}${esc(n.title || (inbound ? "Messaggio ricevuto" : n.channel_label || ch.l))}</strong>
+          <strong>${n.read ? "" : '<i class="notif-dot"></i>'}${esc(n.title || (inbound ? "Messaggio ricevuto" : locale ? "Promemoria" : n.channel_label || ch.l))}</strong>
           <small>${esc(String(n.message || "").slice(0, 180))}</small>
-          <em>${esc(inbound ? "ricevuto da " + (n.channel_label || ch.l) : "inviato via " + (n.channel_label || ch.l))}</em>
+          <em>${esc(inbound ? "ricevuto da " + (n.channel_label || ch.l)
+            : locale ? "promemoria di Cyborg · " + (n.channel_label || ch.l)
+            : "inviato via " + (n.channel_label || ch.l))}</em>
         </div>
+        ${(() => { const t = this._notifJump(n);
+          // Il pulsante compare SOLO se il bersaglio esiste ancora. Una
+          // freccia che non porta da nessuna parte e' una promessa rotta, e
+          // si prova due o tre volte prima di concludere che e' rotta.
+          // Il titolo dice DOVE porta prima di toccarlo: su un bersaglio
+          // dedotto e' l'unica cosa che distingue "ti porto dove vuoi tu" da
+          // "ti porto dove credo io".
+          return t ? `<button class="notif-go" data-notif-go="${esc(n.id)}"
+            title="Vai a ${esc(t.nome || "questa card")}">
+            <ha-icon icon="mdi:arrow-right-circle-outline"></ha-icon></button>` : ""; })()}
         <span class="notif-when">${esc(agoWords(n.ts, now))}</span>
         <button class="notif-x" data-notif-del="${esc(n.id)}" title="Elimina questo avviso"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>`;
@@ -10723,7 +10855,7 @@ class CyborgDashboard extends HTMLElement {
           </div>
         </article>`;
     }
-    return `<article data-card-id="${esc(item.id)}" class="item${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}${item.type === "weather" && item.entity_id ? " tappable" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
+    return `<article data-card-id="${esc(item.id)}" class="item${this._notifGoto === item.id ? " notif-target" : ""}${pulse}${missing}${isFlow ? " flow" : ""}${composite || item.type === "weather" ? " composite" : ""}${item.type === "weather" && item.entity_id ? " tappable" : ""}" style="${style}${glow ? `;box-shadow:0 0 26px color-mix(in srgb, ${esc(accent)} 16%, transparent)` : ""}"
         ${item.type === "weather" && item.entity_id ? `data-weather-open="${esc(item.entity_id)}" class-hint="clickable"` : ""}
         ${composite || item.type === "weather" ? "" : `data-tap data-sec="${esc(section.id)}" data-item="${esc(item.id)}"`}>${head}${body}</article>`;
   }
@@ -13626,6 +13758,20 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = (ev) => {
         ev.stopPropagation();
         this._notifRead([el.getAttribute("data-notif-read")], el.getAttribute("data-read") !== "1");
+      };
+    });
+    all("[data-notif-go]").forEach((el) => {
+      el.onclick = (ev2) => {
+        // Fermare la propagazione: la riga sotto commuta letto/da leggere, e
+        // un tocco solo non deve fare due cose.
+        if (ev2 && ev2.stopPropagation) ev2.stopPropagation();
+        const n = (this._sentNotifs || []).find((x) => x.id === el.getAttribute("data-notif-go"));
+        const t = this._notifJump(n);
+        if (!t) return;
+        // Andare a vedere un avviso vuol dire averlo letto. Lasciarlo da
+        // leggere dopo esserci andati tiene acceso un contatore che mente.
+        if (n && !n.read) this._notifRead([n.id], true);
+        this._gotoTarget(t);
       };
     });
     all("[data-notif-del]").forEach((el) => {
@@ -16980,6 +17126,23 @@ button.mini.danger.armed ha-icon{color:#fff}
 .notif-row.read:hover{opacity:.8}
 .notif-row.unread{box-shadow:inset 2px 0 0 var(--nc,#ffd166)}
 .notif-row [data-notif-read]{cursor:pointer}
+/* La freccia "vai alla card". Compare solo quando il bersaglio esiste
+   ancora: una freccia che non porta da nessuna parte e' una promessa rotta,
+   e si prova due o tre volte prima di concludere che e' rotta. */
+.notif-go{flex-shrink:0;align-self:flex-start;width:24px;height:24px;padding:0;
+  display:flex;align-items:center;justify-content:center;border-radius:7px;
+  border:1px solid color-mix(in srgb,var(--nc,#ffd166) 45%,transparent);
+  background:color-mix(in srgb,var(--nc,#ffd166) 14%,transparent);
+  color:var(--nc,#ffd166);cursor:pointer;transition:transform .14s,box-shadow .14s}
+.notif-go ha-icon{--mdc-icon-size:15px}
+.notif-go:hover{transform:scale(1.1);box-shadow:0 0 14px color-mix(in srgb,var(--nc,#ffd166) 45%,transparent)}
+/* La card appena raggiunta si accende, e si spegne da sola: un bordo acceso
+   per sempre smette di dire "e' questa" e diventa un difetto grafico. */
+.item.notif-target{outline:2px solid var(--accent);outline-offset:3px;
+  animation:cyNotifPulse 2.4s ease-out}
+@keyframes cyNotifPulse{
+  0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 55%,transparent)}
+  100%{box-shadow:0 0 0 22px transparent}}
 .notif-dot{display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:var(--nc,#ffd166);vertical-align:middle;box-shadow:0 0 7px var(--nc,#ffd166)}
 .notif-x{flex-shrink:0;align-self:flex-start;width:22px;height:22px;padding:0;display:flex;align-items:center;justify-content:center;border-radius:7px;border:1px solid transparent;background:transparent;color:var(--primary-text-color);opacity:.35}
 .notif-x ha-icon{--mdc-icon-size:14px}
@@ -18386,7 +18549,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.70.0";
+const CYBORG_BUILD = "0.71.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

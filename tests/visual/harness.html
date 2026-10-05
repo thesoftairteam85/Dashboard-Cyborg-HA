@@ -450,6 +450,35 @@ window.__mount=(dash,opts)=>{
           if(opts.selectRaccolta){el._editing=true;
             el._selected={kind:"card",sectionId:secR.id,itemId:"racc1"};}
         }
+        if(opts&&opts.notifGo){
+          // Una notifica col bersaglio e una senza, fianco a fianco: la
+          // schermata deve mostrare che una porta da qualche parte e l'altra
+          // no, se no il difetto "freccia che non porta niente" non si vede.
+          var secN=el._sections()[0];
+          var raccN=el._sections()[0].items.find(function(x){return x.type==="waste";});
+          el._sentNotifs=[
+            {id:"n1",ts:new Date(Date.now()-600000).toISOString(),read:false,
+             source:"local",channel:"raccolta",channel_label:"Raccolta rifiuti",
+             title:"Domani esce organico",message:"Da esporre stasera, entro le 6 di domattina.",
+             target: raccN?{kind:"card",page:0,section:secN.id,item:raccN.id}:null},
+            {id:"n2",ts:new Date(Date.now()-5400000).toISOString(),read:true,
+             source:"sent",channel:"telegram",channel_label:"Telegram",
+             title:"Allarme inserito",message:"Casa Oscar, perimetro attivo."},
+            // L'avviso VERO di Oscar: arriva da un'automazione Telegram e non
+            // porta coordinate. Deve agganciare la card lo stesso, se no il
+            // collegamento funziona solo sugli avvisi nostri, cioe' quasi mai.
+            {id:"n4",ts:new Date(Date.now()-3600000).toISOString(),read:false,
+             source:"sent",channel:"telegram",channel_label:"Telegram",
+             title:"\u{1F5D1} Raccolta rifiuti domani a Martinengo! Organico",
+             message:"Esporre dalle 21:00 di stasera alle 06:00 di domani. Fonte: rumentologo.it"},
+            {id:"n3",ts:new Date(Date.now()-9000000).toISOString(),read:false,
+             source:"local",channel:"raccolta",channel_label:"Raccolta rifiuti",
+             title:"Domani esce carta",message:"Da esporre stasera.",
+             target:{kind:"card",page:0,section:"sezione-sparita",item:"card-sparita"}}];
+          el._sentPending=false;
+          secN.items.unshift({id:"notifcard",type:"notifications",entity_id:"",name:"",
+            size:"lg",appearance:{},states:{},actions:{},max:8});
+        }
         if(opts&&opts.economy){
           const sec=el._sections().find(x=>x.title==="Energia")||el._sections()[0];
           sec.items.unshift({id:"ecocard",type:"economy",entity_id:"",name:"",size:"xl",

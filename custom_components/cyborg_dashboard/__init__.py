@@ -5,6 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .core.notifications import NotificationLog
+from .core.reminders import WasteReminders
 from .core.scheduler import CyborgScheduler
 from .core.storage import DashboardStorage
 from .panel import async_register_panel, async_unregister_panel
@@ -30,6 +31,18 @@ async def _async_ensure_services(hass: HomeAssistant) -> None:
     if data.get("scheduler") is None:
         data["scheduler"] = CyborgScheduler(hass)
     await data["scheduler"].async_start()
+
+    # Gli avvisi della raccolta: si armano all'orario scritto sulla card e
+    # devono sopravvivere a una ricarica della config entry come gli altri due.
+    #
+    # Lo storage si crea QUI se non c'e' invece di contare sul fatto che
+    # qualcuno l'abbia gia' fatto: questa funzione e' chiamata da due strade
+    # (async_setup e async_setup_entry) e dipendere dall'ordine fra le due e'
+    # il modo in cui si prende un KeyError solo su una delle due.
+    data.setdefault("storage", DashboardStorage(hass))
+    if data.get("reminders") is None:
+        data["reminders"] = WasteReminders(hass, data["storage"], data["notifications"])
+    await data["reminders"].async_start()
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

@@ -1501,6 +1501,172 @@ ok("oggi si legge 'oggi'",
 ok("oltre la settimana si porta dietro la data, se no è ambiguo",
    /\d/.test(elWa._wasteQuando(wasteISO(new Date(Date.now() + 9 * 86400000)), wasteISO(new Date()))));
 
+// ===========================================================================
+// 59. UNA NOTIFICA CHE PORTA DA QUALCHE PARTE
+//
+// Un bersaglio e' un RIFERIMENTO, e un riferimento marcisce: la card viene
+// cancellata, la sezione si sposta di pagina, la pagina sparisce. Portare
+// l'utente su una pagina a caso e' peggio che non portarlo da nessuna parte,
+// perche' gli fa credere di aver capito male lui.
+// ===========================================================================
+console.log("\n== 59. NOTIFICHE CHE PORTANO A UNA CARD ==");
+const elN = new Cls();
+elN._hass = hass;
+elN._dashboard = { pages: [
+  { sections: [{ id: "sA", items: [{ id: "c1", type: "entity" }] }] },
+  { sections: [{ id: "sB", collapsed: true, items: [{ id: "racc", type: "waste" }] }] },
+]};
+const bersaglio = { kind: "card", page: 1, section: "sB", item: "racc" };
+ok("un bersaglio valido si risolve", (() => {
+  const t = elN._notifTarget({ target: bersaglio });
+  return !!t && t.page === 1 && t.section === "sB" && t.item === "racc";
+})());
+ok("una notifica senza bersaglio non ne inventa uno",
+   elN._notifTarget({ title: "x" }) === null);
+ok("un bersaglio che non e' una card non vale",
+   elN._notifTarget({ target: { kind: "boh", section: "sB", item: "racc" } }) === null);
+// La card cancellata: il riferimento resta scritto nella notifica, ma non c'e'
+// piu' niente dove porta.
+ok("una card cancellata non produce un salto nel vuoto",
+   elN._notifTarget({ target: { kind: "card", page: 1, section: "sB", item: "sparita" } }) === null);
+ok("una sezione cancellata nemmeno",
+   elN._notifTarget({ target: { kind: "card", page: 1, section: "sZ", item: "racc" } }) === null);
+// Comanda l'identificativo della sezione, non l'indice di pagina: una sezione
+// si sposta di pagina dall'editor, e un indice salvato tre settimane fa non lo
+// sa. Qui la notifica dice "pagina 0" ma la sezione sta sulla 1.
+ok("se la sezione e' stata spostata, si va dove e' ADESSO",
+   elN._notifTarget({ target: { kind: "card", page: 0, section: "sB", item: "racc" } }).page === 1);
+// --- 59b. Gli avvisi che Cyborg NON ha scritto ---------------------------
+//
+// Il caso vero: la notifica della raccolta arriva da un'automazione Telegram,
+// e quella non potra' mai portarsi dietro delle coordinate. Un collegamento
+// che funziona solo sugli avvisi nostri funziona quasi mai.
+//
+// Le parole con cui una card si fa riconoscere vengono dalla sua
+// CONFIGURAZIONE — i nomi dei bidoni li ha scritti l'utente — non da un
+// vocabolario inventato nel codice.
+// Un elemento suo: sovrascrivere la dashboard di elN romperebbe i test del
+// salto, che piu' sotto si aspettano ancora due pagine.
+const elG = new Cls();
+elG._hass = hass;
+elG._dashboard = { pages: [{ sections: [{ id: "s1", items: [
+  { id: "racc", type: "waste", name: "Raccolta",
+    kinds: [{ k: "organico", l: "Organico" }, { k: "carta", l: "Carta" }], rules: [] },
+  { id: "turni", type: "shifts", name: "Turni" },
+]}]}]};
+// Il messaggio vero di Oscar, copiato dalla sua schermata.
+const TELEGRAM_VERO = {
+  id: "t1", source: "sent", channel: "telegram",
+  title: "🗑 *Raccolta rifiuti domani a Martinengo!* 🟤 Organico 🚮",
+  message: "Esporre dalle *21:00 di stasera* alle *06:00 di domani* _Fonte: rumentologo.it_",
+};
+ok("un avviso Telegram senza coordinate trova lo stesso la card",
+   (elG._notifJump(TELEGRAM_VERO) || {}).item === "racc",
+   JSON.stringify(elG._notifJump(TELEGRAM_VERO)));
+ok("e porta il nome della card, così si sa dove si va prima di toccare",
+   (elG._notifJump(TELEGRAM_VERO) || {}).nome === "Raccolta");
+ok("un avviso che non nomina niente di riconoscibile non inventa una meta",
+   elG._notifJump({ title: "Backup non riuscito", message: "spazio insufficiente sul NAS" }) === null);
+// Confine di parola: "carta" non deve agganciarsi dentro "scartare".
+ok("una parola dentro un'altra parola non conta",
+   elG._notifJump({ title: "Ho scartato il documento", message: "" }) === null);
+// Minimo quattro lettere: le sigle dei turni sono di una o due, e accettarle
+// aggancerebbe qualunque testo.
+ok("le parole corte non agganciano",
+   elG._cardKeywords({ type: "shifts", name: "AB" }).length === 0);
+ok("il nome della card entra fra le parole",
+   elG._cardKeywords({ type: "shifts", name: "Turni" }).includes("turni"));
+
+// LA REGOLA CHE CONTA: se le card possibili sono due, non si risponde.
+// Due card che potrebbero essere quella giusta non fanno meta' ragione a
+// testa: fanno una scommessa, e una scommessa che ogni tanto apre la card
+// sbagliata e' peggio di nessun collegamento, perche' smetti di fidarti anche
+// di quelli giusti.
+elG._dashboard.pages[0].sections[0].items.push(
+  { id: "racc2", type: "waste", name: "Raccolta seconda casa",
+    kinds: [{ k: "organico", l: "Organico" }], rules: [] });
+ok("con due card plausibili la freccia non compare: nel dubbio, niente",
+   elG._notifJump(TELEGRAM_VERO) === null);
+elG._dashboard.pages[0].sections[0].items.pop();
+
+// Il bersaglio SCRITTO vince sempre su quello dedotto: chi ha generato
+// l'avviso sapeva dove stava la card, qui invece si sta leggendo del testo.
+const conScritto = Object.assign({}, TELEGRAM_VERO,
+  { target: { kind: "card", page: 0, section: "s1", item: "turni" } });
+ok("un bersaglio scritto batte quello dedotto",
+   elG._notifJump(conScritto).item === "turni");
+// ...ma solo se e' ancora valido: se la card non c'e' piu', si ripiega sulla
+// deduzione invece di non portare da nessuna parte.
+const scrittoMorto = Object.assign({}, TELEGRAM_VERO,
+  { target: { kind: "card", page: 0, section: "s1", item: "sparita" } });
+ok("se il bersaglio scritto è morto si ripiega sulla deduzione",
+   elG._notifJump(scrittoMorto).item === "racc");
+
+// Tre provenienze, non due. Un promemoria generato da Cyborg non e' uscito di
+// casa: dirgli "inviato via" promette che e' arrivato su un telefono.
+const elP = new Cls();
+elP._hass = hass;
+elP._dashboard = { pages: [{ sections: [{ id: "s", items: [{ id: "racc", type: "waste" }] }] }] };
+elP._sentNotifs = [
+  { id: "a", ts: new Date().toISOString(), read: true, source: "local",
+    channel: "raccolta", channel_label: "Raccolta rifiuti",
+    title: "Domani esce organico", message: "Da esporre stasera." },
+  { id: "b", ts: new Date().toISOString(), read: true, source: "sent",
+    channel: "telegram", channel_label: "Telegram", title: "Allarme", message: "ok" },
+];
+elP._sentPending = false;
+elP._subscribe = () => {};
+const corpoN = elP._notificationsBody({ id: "n", type: "notifications", max: 8 });
+ok("un promemoria locale non dice 'inviato via'",
+   corpoN.includes("promemoria di Cyborg") && !/inviato via Raccolta/.test(corpoN));
+ok("ma un avviso davvero inviato lo dice ancora",
+   corpoN.includes("inviato via Telegram"));
+
+ok("senza dashboard caricata non si promette niente",
+   new Cls()._notifTarget({ target: bersaglio }) === null);
+
+// Andarci davvero
+let dipintoN = 0;
+elN.render = () => { dipintoN += 1; };
+elN.querySelector = () => null;
+elN._pageIndex = 0;
+elN._gotoTarget(elN._notifTarget({ target: bersaglio }));
+ok("si cambia pagina", elN._pageIndex === 1);
+// Una sezione chiusa nasconde la card: aprirla fa parte del "portarci".
+ok("e la sezione chiusa si apre, se no la card resta nascosta",
+   elN._dashboard.pages[1].sections[0].collapsed === false);
+ok("la card raggiunta viene segnata per l'evidenziazione", elN._notifGoto === "racc");
+ok("e il pannello si ridisegna", dipintoN >= 1);
+// Un bersaglio nullo non deve far saltare la pagina a caso.
+const paginaPrima = elN._pageIndex;
+elN._gotoTarget(null);
+ok("un bersaglio nullo non sposta niente", elN._pageIndex === paginaPrima);
+
+// --- 58a. LO STESSO CAMPIONE DELLA SUITE PYTHON --------------------------
+//
+// Le regole della Raccolta sono valutate in DUE posti: qui, per disegnare la
+// card, e in `core/waste.py`, perche' l avviso della sera prima deve partire
+// alle 20:00 anche col pannello chiuso e un browser chiuso non calcola
+// niente. La stessa condizione scritta due volte diverge sempre.
+//
+// La divergenza non si evita: si rende rumorosa. Le due implementazioni
+// leggono lo STESSO file — 187 giorni di calendario vero, scritti a mano dal
+// PDF del gestore e non generati dal codice che devono verificare. Se una
+// delle due si sposta, una delle due suite cade e lo dice.
+const RACC_FIX = JSON.parse(fs.readFileSync("tests/fixtures/raccolta.json", "utf8"));
+const fuoriPosto = Object.keys(RACC_FIX.atteso).filter((g) =>
+  wasteDayKinds(RACC_FIX.card, g).join() !== RACC_FIX.atteso[g].join());
+ok(`tutti i ${Object.keys(RACC_FIX.atteso).length} giorni del campione condiviso tornano`,
+   fuoriPosto.length === 0,
+   fuoriPosto.slice(0, 5).map((g) => g + "=" + wasteDayKinds(RACC_FIX.card, g).join()).join(" "));
+// Il campione deve restare un campione: se qualcuno lo svuota, la riga sopra
+// passerebbe su zero giorni senza guardare piu' niente.
+ok("il campione copre almeno sei mesi, se no non guarda niente",
+   Object.keys(RACC_FIX.atteso).length >= 180);
+ok("e contiene il cavallo d'anno, che è la trappola vera",
+   RACC_FIX.atteso["2027-01-07"] !== undefined
+   && RACC_FIX.atteso["2027-01-07"].join() === "plastica,vetro");
+
 // --- 58b. Importazione di uno schema -------------------------------------
 // Serve a non far riscrivere cinque regole a mano due volte l anno. NON e'
 // una sincronizzazione: il testo si incolla, si vede nell editor e si

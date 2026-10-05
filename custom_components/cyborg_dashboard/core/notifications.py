@@ -224,6 +224,27 @@ class NotificationLog:
         })
 
     @callback
+    def async_add_local(self, partial: dict[str, Any]) -> None:
+        """Scrive un avviso generato da Cyborg stesso, non da un servizio notify.
+
+        Il registro nasce come specchio di quello che Home Assistant manda
+        fuori. Un avviso che Cyborg genera da solo - il promemoria della
+        raccolta - non passa da nessun servizio, quindi nessun evento lo
+        porterebbe qui, e senza questo non comparirebbe da nessuna parte.
+
+        `source: "local"` lo distingue da "inviato" e da "ricevuto": sono tre
+        provenienze diverse, e appiattirle direbbe che l'avviso e' partito
+        verso un telefono quando invece non e' uscito di casa.
+        """
+        voce = dict(partial)
+        voce.setdefault("source", "local")
+        voce.setdefault("channel", "cyborg")
+        voce.setdefault("channel_label", "Cyborg")
+        if not _clean(voce.get("message")) and not _clean(voce.get("title")):
+            return
+        self._append(voce)
+
+    @callback
     def _append(self, partial: dict[str, Any]) -> None:
         self._seq += 1
         entry = dict(partial)

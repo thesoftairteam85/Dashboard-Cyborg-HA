@@ -61,6 +61,7 @@ const DEFAULT_DASH = {
     ["85-raccolta",   { pageIndex: 0, autoCompose: true, raccolta: true }],
     ["86-raccolta-vuota", { pageIndex: 0, autoCompose: true, raccolta: "vuota" }],
     ["87-raccolta-ed", { pageIndex: 0, autoCompose: true, raccolta: true, selectRaccolta: true }],
+    ["88-notif-vai",  { pageIndex: 0, autoCompose: true, raccolta: true, notifGo: true }],
     ["20-overview",   { pageIndex: 0, overview: true }],
     ["25-trend",      { pageIndex: 0, autoCompose: true, trend: true }],
     ["26-ev",         { pageIndex: 0, autoCompose: true, ev: true }],
