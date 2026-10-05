@@ -16,6 +16,15 @@ PANEL_PATH = "cyborg-dashboard"
 WEB_COMPONENT = "cyborg-dashboard"
 STATIC_PATH = "/cyborg_dashboard/static"
 
+# Il secondo pannello: gli impianti presso i clienti.
+#
+# Stesso elemento e stesso modulo del pannello principale, con un `config`
+# diverso. NON un secondo web component: il nome di un custom element si puo'
+# definire una volta sola per documento, quindi una seconda definizione
+# sarebbe un no-op silenzioso e il pannello resterebbe vuoto senza un errore
+# da nessuna parte. Un solo elemento, una sola cache da invalidare.
+FLEET_PATH = "cyborg-impianti"
+
 def _cache_key() -> str:
     """Cache key for the JS module URL: version plus a hash of the file itself.
 
@@ -128,9 +137,31 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         config={"version": version},
         require_admin=False,
     )
+    # `require_admin=True` qui e' deliberato e non e' simmetrico col pannello
+    # di casa: sono dati di case di altri. Un utente non amministratore di
+    # questo Home Assistant non deve nemmeno vedere che esistono.
+    if frontend.async_panel_exists(hass, FLEET_PATH):
+        frontend.async_remove_panel(hass, FLEET_PATH, warn_if_unknown=False)
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=FLEET_PATH,
+        webcomponent_name=WEB_COMPONENT,
+        sidebar_title="Impianti",
+        sidebar_icon="mdi:home-group",
+        module_url=f"{STATIC_PATH}/cyborg-dashboard.js?v={cache_key}",
+        config={"version": version, "mode": "impianti"},
+        require_admin=True,
+    )
 
 
 @callback
 def async_unregister_panel(hass: HomeAssistant) -> None:
-    """Remove the Cyborg Dashboard sidebar panel, if present."""
+    """Rimuove ENTRAMBI i pannelli, se ci sono.
+
+    Dimenticarne uno lascerebbe nella barra laterale una voce che punta a un
+    modulo non piu' servito: cliccarla dara' una pagina bianca, e la pagina
+    bianca sembra un difetto del pannello invece che un residuo di una
+    disinstallazione.
+    """
     frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)
+    frontend.async_remove_panel(hass, FLEET_PATH, warn_if_unknown=False)

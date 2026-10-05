@@ -1549,6 +1549,54 @@ const WASTE_DEFAULT_KINDS = [
   { k: "vetro", l: "Vetro e lattine", color: "#13b35a", icon: "mdi:glass-fragile" },
 ];
 
+/**
+ * Legge uno schema incollato e lo trasforma in bidoni + regole.
+ *
+ * Esiste perche' scrivere cinque regole a mano due volte l anno e' lavoro che
+ * qualcuno puo' fare una volta per te e passarti da incollare. NON e' una
+ * sincronizzazione: nessuno va a prendere niente in rete, e quello che entra
+ * lo si vede subito nell editor e si corregge. Chi incolla sceglie.
+ *
+ * Non si fida di niente di quello che legge: un documento incollato e' testo
+ * arrivato da fuori, e va trattato come i dati di un sensore, non come
+ * configurazione gia' buona.
+ */
+function wasteImport(testo) {
+  let dati;
+  try { dati = JSON.parse(String(testo || "")); } catch (e) { return null; }
+  if (!dati || typeof dati !== "object") return null;
+  const kinds = [];
+  const visti = new Set();
+  for (const row of Array.isArray(dati.kinds) ? dati.kinds.slice(0, 10) : []) {
+    if (!row || typeof row !== "object") continue;
+    const k = String(row.k || "").trim().slice(0, 16);
+    if (!k || visti.has(k)) continue;
+    visti.add(k);
+    kinds.push({ k, l: String(row.l || k).slice(0, 28),
+      color: String(row.color || "#9aa5b1").slice(0, 32),
+      icon: String(row.icon || "mdi:trash-can-outline").slice(0, 48) });
+  }
+  const rules = [];
+  for (const row of Array.isArray(dati.rules) ? dati.rules.slice(0, 12) : []) {
+    if (!row || typeof row !== "object") continue;
+    const ks = (Array.isArray(row.kinds) ? row.kinds : [])
+      // Una regola non puo' nominare un bidone che non esiste: resterebbe una
+      // pastiglia grigia senza nome, e nessuno capirebbe da dove viene.
+      .filter((k) => typeof k === "string" && visti.has(k)).slice(0, 10);
+    const days = Array.isArray(row.days)
+      ? [...new Set(row.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort((x, y) => x - y)
+      : [];
+    if (!ks.length || !days.length) continue;
+    const every = [1, 2, 3, 4].includes(Number(row.every)) ? Number(row.every) : 1;
+    const giorno = (v) => (wasteParse(v) ? String(v) : "");
+    rules.push({ kinds: ks, days, every,
+      anchor: every > 1 ? giorno(row.anchor) : "",
+      from: giorno(row.from), to: giorno(row.to) });
+  }
+  if (!kinds.length || !rules.length) return null;
+  return { kinds, rules };
+}
+
 const WASTE_DAY_NAMES = ["lunedì", "martedì", "mercoledì", "giovedì",
   "venerdì", "sabato", "domenica"];
 const WASTE_MONTHS = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
@@ -2984,6 +3032,31 @@ class CyborgDashboard extends HTMLElement {
   _touch(clean) {
     if (!clean) this._dirty = true;
     this._signature = "";
+    // Un ridisegno mentre si sta scrivendo in un campo lo distrugge e lo
+    // ricrea: il cursore salta all'inizio e, in un <input type="date">, i
+    // segmenti gia' scritti si riselezionano da soli, cosi' le cifre
+    // successive finiscono nel segmento sbagliato. E' il modo esatto in cui
+    // un anno "2026" diventava "0002": il browser commetteva il valore
+    // parziale, onchange ridisegnava, e il campo tornava col giorno
+    // selezionato mentre l'utente stava ancora scrivendo l'anno.
+    //
+    // `_scheduleRender` aveva gia' questa protezione, ma vale solo per i
+    // ridisegni che arrivano da `set hass`: le modifiche dell'utente
+    // chiamavano render() dritto. La stessa condizione scritta in due posti
+    // diversi diverge sempre, ed e' divergita qui.
+    //
+    // Solo per i campi di testo: un <button> non entra, se no la conferma a
+    // due tocchi comparirebbe con mezzo secondo di ritardo.
+    const scrivendo = this.querySelector("input:focus, textarea:focus, select:focus");
+    if (scrivendo && this._busyUntil && Date.now() < this._busyUntil) {
+      if (!this._repaintT) {
+        this._repaintT = setTimeout(() => {
+          this._repaintT = null;
+          this.render();
+        }, Math.max(60, this._busyUntil - Date.now()));
+      }
+      return;
+    }
     this.render();
   }
 
@@ -11159,6 +11232,13 @@ class CyborgDashboard extends HTMLElement {
       <div class="section">
         <strong>ELENCO</strong>
         <label>QUANTI RITIRI MOSTRARE<input type="number" min="3" max="30" data-prop="horizon" value="${card.horizon || 8}"></label>
+      </div>
+      <div class="section">
+        <strong>IMPORTA UNO SCHEMA</strong>
+        <span class="hint">Incolla qui uno schema già scritto e diventa bidoni e regole, che poi correggi da sopra. <strong>Sostituisce</strong> quello che c'è adesso: le eccezioni restano.</span>
+        <textarea class="wa-imp" rows="3" data-wa-imp placeholder='{"kinds":[...],"rules":[...]}'></textarea>
+        <button class="secondary wide" data-wa-impgo><ha-icon icon="mdi:tray-arrow-down"></ha-icon> IMPORTA</button>
+        ${this._wasteImpErr ? `<span class="hint warn">${esc(this._wasteImpErr)}</span>` : ""}
       </div>`;
     }
     if (card.type === "shifts") {
@@ -14302,6 +14382,30 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
+    const waImpGo = q("[data-wa-impgo]");
+    if (waImpGo) waImpGo.onclick = () => {
+      if (!card) return;
+      const box = q("[data-wa-imp]");
+      const letto = wasteImport(box ? box.value : "");
+      if (!letto) {
+        // Un errore si DICE. Un pulsante che non fa niente lascia credere di
+        // aver premuto male, e si riprova all infinito sullo stesso testo.
+        // L'errore vive sull'ELEMENTO, non sulla card: `normalize_item`
+        // conserva i campi che non conosce, quindi una stringa di interfaccia
+        // scritta sulla card finirebbe salvata su disco dentro la dashboard e
+        // ci resterebbe per sempre.
+        this._wasteImpErr = "Non riesco a leggerlo: dev'essere il testo intero, bidoni e regole insieme.";
+        this._touch(true);
+        return;
+      }
+      this._wasteImpErr = null;
+      card.kinds = letto.kinds;
+      card.rules = letto.rules;
+      // Le eccezioni NON si toccano: sono le feste che hai gia' segnato tu, e
+      // uno schema nuovo non ne sa niente.
+      if (!card.exceptions) card.exceptions = {};
+      this._touch();
+    };
     const waEAdd = q("[data-wa-eadd]");
     if (waEAdd) waEAdd.onchange = () => {
       if (!card || !waEAdd.value) return;
@@ -16484,7 +16588,16 @@ button.mini.danger.armed ha-icon{color:#fff}
 .sh-cell.other{opacity:.35}
 .sh-cell.today{border-color:var(--accent);
   box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent)}
-.sh-dnum{font-size:11px;font-weight:650;opacity:.75;text-align:left;line-height:1}
+/* Il numero del giorno. A .75 di opacita' su una casella gia' tinta dal
+   colore della card spariva: accanto a una pastiglia di turno satura l'occhio
+   va sulla pastiglia, e il numero - che e' quello che serve per capire DOVE
+   si sta guardando - restava un'ombra. Opacita' piena e un filo di corpo in
+   piu': non e' decorazione, e' la coordinata della griglia. */
+.sh-dnum{font-size:12px;font-weight:700;line-height:1;text-align:left;
+  color:color-mix(in srgb,var(--fg) 90%,transparent)}
+/* Fuori dal mese il giorno conta meno, ma deve restare leggibile: e' la
+   casella che dice che la settimana continua. */
+.sh-cell.other .sh-dnum{color:color-mix(in srgb,var(--fg) 62%,transparent)}
 .sh-cell.today .sh-dnum{color:var(--accent)}
 /* Il segnalino della nota: un angolo, non un'icona. Una casella di
    calendario e' larga venti pixel, e un'icona la' dentro copre il turno -
@@ -16587,6 +16700,7 @@ button.mini.danger.armed ha-icon{color:#fff}
 .wa-when label{flex:1;min-width:120px}
 .wa-rule-top{display:flex;gap:8px;align-items:center}
 .wa-rule-top .wa-chips{flex:1}
+.wa-imp{width:100%;font:12px/1.4 ui-monospace,monospace;resize:vertical}
 .wa-pick{opacity:.45}
 .wa-pick.on{opacity:1}
 @media(max-width:700px){
@@ -18272,7 +18386,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.69.0";
+const CYBORG_BUILD = "0.70.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

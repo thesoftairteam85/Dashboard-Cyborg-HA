@@ -4,6 +4,105 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.70.0] - 2026-10-04
+
+Tre difetti segnalati da Oscar, e il primo era mio e grosso.
+
+### L'anno che diventava «0002»
+
+Scrivendo la data in una regola della Raccolta, il campo tornava indietro con
+l'anno a `0002` e le cifre successive finivano nel segmento sbagliato.
+
+La causa non è nel campo: è in **`_touch()`**, che chiamava `render()` dritto.
+Ogni `onchange` ricostruiva tutto l'HTML, quindi **distruggeva e ricreava
+l'`<input>` mentre lo stavi usando**. Un `<input type="date"> `commette il
+valore parziale appena arriva una cifra nell'anno; il ridisegno rimetteva il
+campo col giorno riselezionato, e da lì in poi scrivevi nel posto sbagliato.
+
+`_scheduleRender` **aveva già** questa protezione — è quella messa quando «la
+card sembrava avere i tic» — ma vale solo per i ridisegni che arrivano da
+`set hass`. Le modifiche dell'utente passavano da un'altra strada. *La stessa
+condizione scritta in due posti diversi diverge sempre*, e qui è divergita.
+
+Ora `_touch()` rimanda il ridisegno finché c'è un campo di testo a fuoco e la
+finestra di interazione è aperta. Solo i campi: un `<button>` non entra, se no
+la conferma a due tocchi comparirebbe in ritardo.
+
+**Il difetto valeva per ogni campo di ogni editor**, non solo per le date della
+Raccolta. Si notava lì perché un campo data è l'unico che si scrive a segmenti.
+
+### Un anno implausibile non è una data
+
+`_clean_day()` accettava `0002-10-04`, che per Python è una data vera. Nessuno
+la scrive apposta: è quello che resta quando il browser commette l'anno mentre
+lo stai ancora digitando. Salvarla significa ancorare una regola all'anno 2 e
+non capire più perché l'alternanza è sfasata. Ora si accettano solo gli anni
+fra **2000 e 2100**, estremi compresi.
+
+### I numeri del mese nei Turni non si leggevano
+
+`.sh-dnum` stava a `opacity:.75` su una casella già tinta dal colore della
+card. Accanto a una pastiglia di turno satura l'occhio va sulla pastiglia, e il
+numero — che è **la coordinata della griglia**, cioè quello che dice dove stai
+guardando — restava un'ombra. Opacità piena, 12px, e i giorni fuori mese a un
+contrasto più basso ma ancora leggibili.
+
+### Importare uno schema invece di riscriverlo
+
+Campo nuovo in fondo all'editor della Raccolta: si incolla uno schema già
+scritto e diventa bidoni e regole, che poi si correggono da sopra.
+
+**Non è una sincronizzazione**: non va a prendere niente in rete, quello che
+entra si vede subito e si può cambiare. Ma è testo arrivato da fuori, quindi si
+tratta come i dati di un sensore e non come configurazione già buona — regole
+che nominano bidoni inesistenti scartate, giorni fuori scala puliti, date
+impossibili azzerate, bidoni doppi fusi. Le **eccezioni non si toccano**: sono
+le feste già segnate a mano, e uno schema nuovo non ne sa niente.
+Un'importazione che fallisce **lo dice**: un pulsante che non fa niente lascia
+credere di aver premuto male.
+
+### Impianti: l'ossatura
+
+Prima parte del pannello di monitoraggio della flotta clienti.
+
+- **`core/fleet.py`**: registro su uno Store **separato** da quello della
+  plancia (cicli di vita e rischi diversi: un errore di migrazione sulla
+  dashboard di casa non deve potersi portare via i clienti), snapshot
+  normalizzato uguale per tutti e tre i canali, vitalità, regola «la linea è
+  mia».
+- **Secondo pannello** nella barra laterale, `require_admin=True` — sono case
+  di altri. Stesso web component e stesso modulo del pannello di casa: il nome
+  di un custom element si definisce una volta per documento, quindi un secondo
+  elemento sarebbe un no-op silenzioso.
+- Comandi websocket `cyborg_dashboard/fleet` e `/fleet/save`, entrambi
+  riservati agli amministratori. Il salvataggio restituisce quello che è stato
+  salvato **davvero**, non un `ok`.
+
+Decisioni che i test difendono:
+
+- **Quattro stati di vitalità, non tre.** Un impianto che pubblica senza dire
+  *quando* non è vivo e non è morto: è configurato male, e `senza_orologio` lo
+  dice. Contarlo come `ok` sarebbe la bugia più comoda del pannello.
+- **«La linea è mia» guarda il quando, non solo il quanti.** Dieci impianti su
+  venti caduti nello stesso quarto d'ora sono un guasto nostro; gli stessi
+  dieci caduti in giorni diversi sono dieci clienti da richiamare. Il test che
+  conta è quello che verifica il **falso**.
+- **Un `#` o un `+` in un identificativo non è un nome brutto**: è un carattere
+  jolly MQTT, e un impianto chiamato `casa/#` leggerebbe i messaggi di tutti
+  gli altri. Si sanifica una volta sola, nel modello.
+- **Una lettura illeggibile sparisce invece di diventare zero.** Uno zero entra
+  nelle somme e nei grafici come se fosse una misura vera — è lo stesso difetto
+  già pagato sullo script delle temperature dei dischi.
+
+Manca ancora la vista del pannello Impianti nel frontend: la voce compare nella
+barra laterale ma mostra la plancia. **È la prossima.**
+
+### Verifica
+- frontend **1633**, visiva **474**, impianti **49** (nuova), pannello **25**,
+  websocket 23, rilascio 10, schema v25
+- rimesso ciascuno dei quattro difetti, la suite cade dove deve: `-> 1` sul
+  ridisegno, `AssertionError` sull'anno 2, e due sulla regola della linea
+
 ## [0.69.0] - 2026-10-03
 
 La card **Raccolta rifiuti**. E una decisione che vale la pena scrivere: il

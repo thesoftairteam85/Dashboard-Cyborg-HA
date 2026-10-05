@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.loader import async_get_integration
 
+from .core.fleet import FleetStore
 from .core.storage import DashboardConflictError, DashboardStorage
 
 DOMAIN = "cyborg_dashboard"
@@ -29,6 +30,8 @@ TYPE_SCHEDULE_SET = "cyborg_dashboard/schedule/set"
 TYPE_RUN_FOR = "cyborg_dashboard/run_for"
 TYPE_RUN_CANCEL = "cyborg_dashboard/run_for/cancel"
 TYPE_RELEASE = "cyborg_dashboard/release"
+TYPE_FLEET = "cyborg_dashboard/fleet"
+TYPE_FLEET_SAVE = "cyborg_dashboard/fleet/save"
 
 # Quanto vale una risposta di GitHub prima di richiederla. Dieci minuti: le
 # API pubbliche di GitHub danno 60 richieste l'ora per indirizzo IP, e questa
@@ -101,6 +104,8 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_run_for)
     websocket_api.async_register_command(hass, _ws_run_cancel)
     websocket_api.async_register_command(hass, _ws_release)
+    websocket_api.async_register_command(hass, _ws_fleet)
+    websocket_api.async_register_command(hass, _ws_fleet_save)
 
 
 @websocket_api.websocket_command({"type": TYPE_GET})
@@ -385,3 +390,53 @@ async def _ws_release(hass: HomeAssistant, connection: websocket_api.ActiveConne
 
     store[RELEASE_CACHE] = result
     connection.send_result(msg["id"], result)
+
+
+def _fleet_store(hass: HomeAssistant) -> FleetStore:
+    """Una sola istanza per Home Assistant.
+
+    Due `Store` sulla stessa chiave sono due cache in memoria dello stesso
+    file: scrivono a turno e l'ultima vince, portandosi via quello che ha
+    scritto l'altra senza dirlo a nessuno.
+    """
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get("fleet") is None:
+        data["fleet"] = FleetStore(hass)
+    return data["fleet"]
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({"type": TYPE_FLEET})
+@callback
+def _ws_fleet(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+              msg: dict[str, Any]) -> None:
+    """Il registro degli impianti.
+
+    `require_admin` qui non e' simmetrico col pannello di casa, ed e' voluto:
+    dentro ci sono indirizzi e dati di case di altre persone.
+    """
+    async def carica() -> None:
+        connection.send_result(msg["id"], {"fleet": await _fleet_store(hass).async_load()})
+    hass.async_create_task(carica())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({"type": TYPE_FLEET_SAVE, "fleet": dict})
+@callback
+def _ws_fleet_save(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                   msg: dict[str, Any]) -> None:
+    """Salva il registro e restituisce quello che e' stato salvato DAVVERO.
+
+    Non un `ok`: la versione normalizzata. Il frontend deve poter vedere che
+    un identificativo e' stato sanificato o che una riga e' stata scartata,
+    invece di continuare a mostrare quello che aveva mandato lui e scoprire la
+    differenza al prossimo caricamento.
+    """
+    async def salva() -> None:
+        try:
+            pulito = await _fleet_store(hass).async_save(msg.get("fleet") or {})
+        except Exception as err:  # noqa: BLE001
+            connection.send_error(msg["id"], "fleet_save_failed", str(err))
+            return
+        connection.send_result(msg["id"], {"fleet": pulito})
+    hass.async_create_task(salva())

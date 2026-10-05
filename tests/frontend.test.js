@@ -1501,6 +1501,74 @@ ok("oggi si legge 'oggi'",
 ok("oltre la settimana si porta dietro la data, se no è ambiguo",
    /\d/.test(elWa._wasteQuando(wasteISO(new Date(Date.now() + 9 * 86400000)), wasteISO(new Date()))));
 
+// --- 58b. Importazione di uno schema -------------------------------------
+// Serve a non far riscrivere cinque regole a mano due volte l anno. NON e'
+// una sincronizzazione: il testo si incolla, si vede nell editor e si
+// corregge. Ma e' testo arrivato da fuori, e va trattato come i dati di un
+// sensore, non come configurazione gia' buona.
+const SCHEMA_OK = JSON.stringify({
+  kinds: [{ k: "organico", l: "Organico", color: "#c0714c" },
+          { k: "carta", l: "Carta", color: "#6cb4e4" }],
+  rules: [{ kinds: ["organico"], days: [1], every: 1 },
+          { kinds: ["carta"], days: [3], every: 2, anchor: "2026-07-02" }],
+});
+const letto = wasteImport(SCHEMA_OK);
+ok("uno schema buono entra intero", !!letto && letto.kinds.length === 2 && letto.rules.length === 2);
+ok("e produce lo stesso calendario di quello scritto a mano",
+   wasteDayKinds(letto, "2026-07-02").join() === "carta"
+   && wasteDayKinds(letto, "2026-07-09").length === 0
+   && wasteDayKinds(letto, "2026-07-07").join() === "organico");
+ok("testo che non è JSON non fa esplodere niente", wasteImport("ciao") === null);
+ok("JSON che non è un oggetto nemmeno", wasteImport("42") === null);
+ok("uno schema senza regole non vale: lascerebbe la card muta",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "A" }], rules: [] })) === null);
+ok("e nemmeno uno senza bidoni",
+   wasteImport(JSON.stringify({ kinds: [], rules: [{ kinds: ["a"], days: [1] }] })) === null);
+// Una regola che nomina un bidone inesistente resterebbe una pastiglia grigia
+// senza nome, e nessuno capirebbe da dove viene: si scarta la regola.
+ok("una regola che nomina un bidone inesistente viene scartata",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "A" }],
+     rules: [{ kinds: ["a"], days: [1] }, { kinds: ["fantasma"], days: [2] }] })).rules.length === 1);
+ok("giorni fuori scala e doppioni si puliscono",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "A" }],
+     rules: [{ kinds: ["a"], days: [3, 3, 9, -1, 0] }] })).rules[0].days.join() === "0,3");
+// Una data impossibile incollata non deve diventare un confine di validita'
+// invisibile: la casella apparirebbe vuota e continuerebbe a filtrare.
+ok("una data impossibile incollata vale come non scritta",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "A" }],
+     rules: [{ kinds: ["a"], days: [1], from: "2026-13-45" }] })).rules[0].from === "");
+ok("l'ancora si tiene solo se la cadenza è alterna",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "A" }],
+     rules: [{ kinds: ["a"], days: [1], every: 1, anchor: "2026-07-02" }] })).rules[0].anchor === "");
+ok("un bidone doppio entra una volta sola",
+   wasteImport(JSON.stringify({ kinds: [{ k: "a", l: "Primo" }, { k: "a", l: "Secondo" }],
+     rules: [{ kinds: ["a"], days: [1] }] })).kinds.length === 1);
+
+// --- 58c. Il ridisegno non deve rubare il campo che si sta scrivendo -----
+// Il difetto vero: `_touch()` chiamava render() dritto, quindi ogni onchange
+// distruggeva e ricreava l <input>. In un <input type="date"> il browser
+// commette il valore parziale mentre scrivi l anno, il campo torna col
+// giorno riselezionato, e le cifre dopo finiscono nel segmento sbagliato:
+// e' cosi' che "2026" diventava "0002".
+const elT = new Cls();
+elT._hass = hass;
+let dipinti = 0;
+elT.render = () => { dipinti += 1; };
+elT.querySelector = (sel) => (/:focus/.test(sel) ? { tagName: "INPUT" } : null);
+elT._busyUntil = Date.now() + 1000;
+elT._touch();
+ok("con un campo a fuoco il ridisegno NON è immediato", dipinti === 0, String(dipinti));
+ok("ma la modifica è registrata lo stesso", elT._dirty === true);
+elT.querySelector = () => null;      // nessun campo a fuoco
+elT._repaintT = null;
+elT._touch();
+ok("senza nessun campo a fuoco si ridisegna subito", dipinti === 1, String(dipinti));
+elT.querySelector = (sel) => (/:focus/.test(sel) ? { tagName: "INPUT" } : null);
+elT._busyUntil = Date.now() - 1;     // finestra scaduta
+elT._repaintT = null;
+elT._touch();
+ok("e anche a finestra scaduta, se no il pannello resterebbe fermo", dipinti === 2, String(dipinti));
+
 // -- fit zoom ---------------------------------------------------------------
 ok("zoom di dettaglio: stanza piccola -> piu' zoom",
    fitZoom(100, 100, 32, 56, 900, 560, 0.6) > fitZoom(400, 400, 32, 56, 900, 560, 0.6));

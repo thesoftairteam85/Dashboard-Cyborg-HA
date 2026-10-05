@@ -107,7 +107,46 @@ ok("la versione pulita resta quella dichiarata al frontend",
 ok("il calcolo della chiave non blocca il loop degli eventi",
    "async_add_executor_job(_cache_key)" in source)
 
-print()
-print("=" * 46)
+# ---------------------------------------------------------------------------
+# Il secondo pannello: Impianti.
+#
+# Si legge il sorgente vero con ast invece di importarlo (panel.py tira dentro
+# homeassistant). Il punto non e' che le stringhe esistano: e' che le due
+# registrazioni abbiano path DIVERSI e lo STESSO elemento, e che la rimozione
+# le tolga tutte e due.
+# ---------------------------------------------------------------------------
+ok("il pannello Impianti ha un percorso suo",
+   'FLEET_PATH = "cyborg-impianti"' in source)
+ok("e non e' lo stesso del pannello di casa",
+   'PANEL_PATH = "cyborg-dashboard"' in source and "cyborg-impianti" != "cyborg-dashboard")
+
+reg = source[source.index("async def async_register_panel"):]
+ok("si registrano due pannelli, non uno",
+   reg.count("await panel_custom.async_register_panel(") == 2,
+   str(reg.count("await panel_custom.async_register_panel(")))
+# Un SOLO web component per tutti e due. Il nome di un custom element si
+# definisce una volta per documento: una seconda definizione sarebbe un no-op
+# silenzioso, e il pannello resterebbe vuoto senza un errore da nessuna parte.
+ok("entrambi usano lo stesso web component",
+   reg.count("webcomponent_name=WEB_COMPONENT") == 2)
+ok("e lo stesso modulo, quindi una sola cache da invalidare",
+   reg.count("module_url=f\"{STATIC_PATH}/cyborg-dashboard.js?v={cache_key}\"") == 2)
+ok("il pannello Impianti si distingue dal config, non dall'elemento",
+   '"mode": "impianti"' in reg)
+# Sono case di altri: un utente non amministratore non deve nemmeno vederle.
+ok("il pannello Impianti e' riservato agli amministratori",
+   "require_admin=True" in reg)
+ok("quello di casa invece no: da un tablet in camera si accendono le luci",
+   "require_admin=False" in reg)
+# Registrazione ripetibile: una ricarica della config entry non deve esplodere
+# su "panel already registered".
+ok("anche il pannello Impianti si rimuove prima di registrarsi",
+   reg.count("async_panel_exists") == 2 and reg.count("FLEET_PATH") >= 2)
+
+unreg = source[source.index("def async_unregister_panel"):]
+ok("la disinstallazione toglie tutti e due i pannelli",
+   "PANEL_PATH" in unreg and "FLEET_PATH" in unreg)
+
+print("\n" + "=" * 46)
 print(f"{PASS} passati, {FAIL} falliti")
 sys.exit(1 if FAIL else 0)

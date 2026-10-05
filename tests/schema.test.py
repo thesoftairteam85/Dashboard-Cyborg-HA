@@ -1169,3 +1169,19 @@ twice = schema.normalize_item(dict(once), 0)
 assert once == twice, (once, twice)
 
 print("schema: raccolta rifiuti (v25) ok")
+
+
+# Un anno implausibile non e' una data: e' quello che resta quando un
+# <input type="date"> commette il valore mentre stai ancora scrivendo l'anno.
+# "0002-10-04" e' una data valida per Python e nessuno la scrive apposta.
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "anchor": "0002-10-04",
+                   "every": 2}])["rules"][0]["anchor"] == ""
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "0002-10-04"}])["rules"][0]["from"] == ""
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "1999-12-31"}])["rules"][0]["from"] == ""
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "2101-01-01"}])["rules"][0]["from"] == ""
+# Ma gli anni veri restano, estremi compresi
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "2000-01-01"}])["rules"][0]["from"] == "2000-01-01"
+assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "2100-12-31"}])["rules"][0]["from"] == "2100-12-31"
+assert _wa(exceptions={"0002-10-04": []})["exceptions"] == {}
+
+print("schema: anni implausibili scartati ok")

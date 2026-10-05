@@ -89,8 +89,15 @@ def _clean_day(value):
     if not DAY_RE.match(testo):
         return ""
     try:
-        datetime.date.fromisoformat(testo)
+        giorno = datetime.date.fromisoformat(testo)
     except ValueError:
+        return ""
+    # E un anno PLAUSIBILE. "0002-10-04" e' una data vera e nessuno la scrive
+    # apposta: e' quello che resta quando un <input type="date"> commette
+    # l'anno mentre lo stai ancora digitando. Accettarla significa salvare
+    # silenziosamente una regola ancorata all'anno 2 e non capire piu' perche'
+    # l'alternanza e' sfasata.
+    if not 2000 <= giorno.year <= 2100:
         return ""
     return testo
 
