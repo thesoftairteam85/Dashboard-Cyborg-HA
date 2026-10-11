@@ -100,8 +100,34 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     first makes this call safe to run any number of times.
     """
     www = Path(__file__).parent / "www"
+    # Le intestazioni di cache si LASCIANO ACCESE (il valore di fabbrica).
+    #
+    # Prima qui c'era `cache_headers=False`, messo quando l'URL del modulo non
+    # portava ancora un'impronta del file: senza impronta, un browser che
+    # teneva in cache il modulo restava col codice vecchio dopo un
+    # aggiornamento, e spegnere la cache era l'unico modo per evitarlo.
+    #
+    # Da quando `_cache_key()` mette nell'URL versione + sha256 dei byte
+    # spediti, quel rischio non esiste piu': un file diverso e' un URL diverso,
+    # e un file identico puo' essere riusato senza pensarci. La protezione e'
+    # sopravvissuta al motivo per cui era stata messa, ed e' diventata il
+    # difetto.
+    #
+    # Il costo era serio e invisibile da un computer: `web.StaticResource` non
+    # manda nessun `Cache-Control`, quindi il modulo da un megabyte veniva
+    # ripreso a ogni apertura - e `add_extra_js_url` lo carica su OGNI pagina
+    # del frontend, non solo sul pannello. Da telefono, sotto VPN, con una
+    # tacca di segnale, un trasferimento interrotto lascia l'elemento non
+    # definito e Home Assistant mostra "Errore di configurazione". E' il
+    # motivo per cui l'errore era intermittente: non e' il codice che sbaglia
+    # ogni tanto, e' il download che ogni tanto non arriva.
+    #
+    # Verificato su core 2026.9.2 (components/http/server.py):
+    #   StaticPathConfig(url_path, path, cache_headers: bool = True)
+    #   _STATIC_CLASSES = {True: CachingStaticResource, False: web.StaticResource}
+    # e CachingStaticResource mette "public, max-age=2678400" (un mese).
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(STATIC_PATH, str(www), cache_headers=False)]
+        [StaticPathConfig(STATIC_PATH, str(www))]
     )
     if frontend.async_panel_exists(hass, PANEL_PATH):
         frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)

@@ -4,6 +4,67 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.72.0] - 2026-10-11
+
+«Ogni tanto esce *Errore di configurazione*.» La causa era una riga nostra, e
+il fatto che fosse **intermittente** era il pezzo di informazione più
+importante: non è il codice che sbaglia ogni tanto, è un download che ogni
+tanto non arriva.
+
+### Un megabyte riscaricato a ogni apertura
+
+Il modulo del pannello era servito con `cache_headers=False`. Verificato sul
+sorgente di core 2026.9.2 (`components/http/server.py`):
+
+```python
+StaticPathConfig(url_path, path, cache_headers: bool = True)
+_STATIC_CLASSES = {True: CachingStaticResource, False: web.StaticResource}
+```
+
+Con `False` si usa `web.StaticResource`, che **non manda nessun
+`Cache-Control`**: il browser riprende il file ogni volta. E il file è grande
+**un megabyte**, e `add_extra_js_url` lo carica su **ogni pagina del
+frontend**, non solo sul pannello.
+
+Da telefono, sotto VPN, con una tacca di segnale, un trasferimento interrotto
+lascia il custom element non definito — e a quel punto Home Assistant mostra
+*Errore di configurazione*, che è esattamente quello che succedeva.
+
+### Una protezione sopravvissuta al suo motivo
+
+`cache_headers=False` era stato messo **prima** che l'URL del modulo portasse
+un'impronta del file. All'epoca aveva ragione: senza impronta, un browser che
+teneva in cache il modulo restava col codice vecchio dopo un aggiornamento, e
+spegnere la cache era l'unico modo per evitarlo.
+
+Da quando `_cache_key()` mette nell'URL **versione + sha256 dei byte spediti**,
+quel rischio non esiste più: un file diverso è un URL diverso. La protezione è
+rimasta in piedi dopo che il motivo era sparito, e da lì in avanti ha solo
+fatto danni. Ora la cache è quella di fabbrica — un mese.
+
+### Due asserzioni che vanno lette come una sola
+
+In `tests/panel.test.py`:
+
+- la chiamata **non** passa `cache_headers=False`;
+- l'URL del modulo **porta l'impronta** del file.
+
+Sono una **coppia**. La cache si può lasciare accesa *solo* perché l'URL
+cambia col contenuto: chi un giorno togliesse l'impronta dovrebbe rispegnere
+la cache, e viceversa. Separarle vorrebbe dire poter rompere una delle due
+senza accorgersene.
+
+Primo tentativo di test sbagliato, e vale la pena dirlo: cercava
+`cache_headers=False` in tutto il sorgente e falliva sul **commento** che
+spiega perché quella riga è stata tolta. Ora legge la chiamata vera con `ast`.
+Un test che legge i commenti non verifica il programma, verifica la prosa.
+
+### Verifica
+- pannello **28** asserzioni, frontend 1659, visiva 474, raccolta 23,
+  impianti 49, websocket 23, rilascio 10
+- rimesso `cache_headers=False`: la suite cade su
+  `un megabyte a ogni apertura non si regge`
+
 ## [0.71.0] - 2026-10-05
 
 «Clicco sulle notifiche e non mi porta nella sezione dedicata.» Erano due cose:

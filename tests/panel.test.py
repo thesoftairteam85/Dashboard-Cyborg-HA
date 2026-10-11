@@ -108,6 +108,38 @@ ok("il calcolo della chiave non blocca il loop degli eventi",
    "async_add_executor_job(_cache_key)" in source)
 
 # ---------------------------------------------------------------------------
+# La cache del modulo.
+#
+# Queste due asserzioni sono una COPPIA e vanno lette insieme: la cache si puo'
+# lasciare accesa SOLO perche' l'URL porta un'impronta del file. Chi un giorno
+# togliesse l'impronta dall'URL dovrebbe rispegnere la cache, e viceversa.
+# Separarle vorrebbe dire poter rompere una delle due senza accorgersene.
+#
+# Il difetto che hanno chiuso: il modulo da ~1 MB veniva servito senza
+# `Cache-Control`, quindi ripreso a ogni apertura - e `add_extra_js_url` lo
+# carica su OGNI pagina del frontend. Da telefono, sotto VPN, un trasferimento
+# interrotto lascia l'elemento non definito e Home Assistant mostra "Errore di
+# configurazione". Intermittente perche' e' il download a mancare, non il
+# codice a sbagliare.
+# ---------------------------------------------------------------------------
+# Si guarda la CHIAMATA vera con ast, non il testo del file: il primo
+# tentativo cercava "cache_headers=False" in tutto il sorgente e falliva sul
+# commento che spiega perche' quella riga e' stata tolta. Un test che legge i
+# commenti non verifica il programma, verifica la prosa.
+_static = [n for n in ast.walk(tree)
+           if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Name) and n.func.id == "StaticPathConfig"]
+ok("la chiamata StaticPathConfig esiste ancora", len(_static) == 1, str(len(_static)))
+_spenta = any(k.arg == "cache_headers"
+              and isinstance(k.value, ast.Constant) and k.value.value is False
+              for c in _static for k in c.keywords)
+ok("la cache del modulo non e' spenta: un megabyte a ogni apertura non si regge",
+   not _spenta)
+ok("ed e' lecito tenerla accesa perche' l'URL porta l'impronta del file",
+   'cyborg-dashboard.js?v={cache_key}' in source
+   and "hashlib.sha256" in source)
+
+# ---------------------------------------------------------------------------
 # Il secondo pannello: Impianti.
 #
 # Si legge il sorgente vero con ast invece di importarlo (panel.py tira dentro
