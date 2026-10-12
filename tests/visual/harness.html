@@ -447,6 +447,17 @@ window.__mount=(dash,opts)=>{
                    {kinds:["carta"],days:[3],every:2,anchor:isoR(ancora),from:"",to:""},
                    {kinds:["plastica","vetro"],days:[3],every:2,anchor:isoR(ancora2),from:"",to:""}]});
           if(opts.raccolta==="vuota"){secR.items[0].rules=[];}
+          if(opts.raccolta==="sbagliata"){
+            // Le regole COME LE HA SCRITTE OSCAR: carta ogni settimana invece
+            // che a settimane alterne (si somma a plastica) e residuo a
+            // settimane alterne invece che ogni settimana (salta un ritiro).
+            // La scena esiste perche' l'anteprima deve rendere visibili tutti
+            // e due gli sbagli senza doverli cercare.
+            secR.items[0].rules=[
+              {kinds:["plastica","vetro"],days:[3],every:2,anchor:isoR(ancora),from:"",to:""},
+              {kinds:["residuo","pannolini"],days:[2],every:2,anchor:isoR(ancora),from:"",to:""},
+              {kinds:["carta"],days:[3],every:1,anchor:"",from:"",to:""}];
+          }
           if(opts.selectRaccolta){el._editing=true;
             el._selected={kind:"card",sectionId:secR.id,itemId:"racc1"};}
         }

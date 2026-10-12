@@ -1667,6 +1667,67 @@ ok("e contiene il cavallo d'anno, che è la trappola vera",
    RACC_FIX.atteso["2027-01-07"] !== undefined
    && RACC_FIX.atteso["2027-01-07"].join() === "plastica,vetro");
 
+// --- 58d. L'ANTEPRIMA DELLA REGOLA ---------------------------------------
+//
+// Il caso vero: Oscar ha scritto "Carta, giovedi, OGNI settimana" invece di
+// "una si' e una no". La card ha disegnato carta insieme a plastica, e lui se
+// n'e' accorto leggendo il risultato e insospettendosi. E non ha visto la
+// seconda conseguenza, che era peggiore: "Rifiuto residuo, mercoledi, una si'
+// e una no" gli saltava un mercoledi su due, cioe' un ritiro perso.
+//
+// Quattro date sotto la regola glielo avrebbero detto in un secondo.
+const SUE_REGOLE = {
+  kinds: [{ k: "organico", l: "Organico" }, { k: "residuo", l: "Rifiuto residuo" },
+          { k: "pannolini", l: "Pannolini" }, { k: "carta", l: "Carta" },
+          { k: "plastica", l: "Plastica" }, { k: "vetro", l: "Vetro e lattine" }],
+  exceptions: {},
+  rules: [
+    { kinds: ["plastica", "vetro"], days: [3], every: 2, anchor: "2026-10-01", from: "2026-10-01", to: "2026-12-24" },
+    { kinds: ["organico"], days: [1], every: 1, anchor: "", from: "2026-10-01", to: "2026-12-29" },
+    { kinds: ["residuo", "pannolini"], days: [2], every: 2, anchor: "2026-10-08", from: "2026-10-08", to: "2026-12-31" },
+    { kinds: ["carta"], days: [3], every: 1, anchor: "", from: "", to: "" },
+  ],
+};
+// La regola 3 (carta ogni settimana) si somma alla 0 (plastica a settimane
+// alterne) un giovedi su due: e' il sintomo che ha visto lui.
+const prevCarta = wasteRulePreview(SUE_REGOLE, 3, "2026-10-12", 4);
+ok("l'anteprima mostra che la carta esce ogni giovedì",
+   prevCarta.map((x) => x.date).join(" ") === "2026-10-15 2026-10-22 2026-10-29 2026-11-05",
+   prevCarta.map((x) => x.date).join(" "));
+ok("e dice con cosa si somma, invece di lasciarlo scoprire",
+   prevCarta[0].insiemeA.join() === "plastica,vetro" && prevCarta[1].insiemeA.length === 0,
+   JSON.stringify(prevCarta.slice(0, 2)));
+// La regola 2 (residuo a settimane alterne) salta un mercoledi su due. E'
+// l'errore che NON aveva visto, e costa un ritiro invece di un doppione.
+const prevResiduo = wasteRulePreview(SUE_REGOLE, 2, "2026-10-12", 3);
+ok("e che il residuo salta un mercoledì su due",
+   prevResiduo.map((x) => x.date).join(" ") === "2026-10-21 2026-11-04 2026-11-18",
+   prevResiduo.map((x) => x.date).join(" "));
+
+// Con le regole GIUSTE non c'e' nessun doppione sul giovedi.
+const giuste = JSON.parse(JSON.stringify(SUE_REGOLE));
+giuste.rules[3] = { kinds: ["carta"], days: [3], every: 2, anchor: "2026-10-08", from: "", to: "" };
+giuste.rules[2] = { kinds: ["residuo", "pannolini"], days: [2], every: 1, anchor: "", from: "", to: "" };
+ok("corrette le due cadenze, il giovedì non si somma più",
+   wasteRulePreview(giuste, 3, "2026-10-12", 4).every((x) => x.insiemeA.length === 0));
+ok("e il mercoledì non salta più",
+   wasteRulePreview(giuste, 2, "2026-10-12", 3).map((x) => x.date).join(" ")
+     === "2026-10-14 2026-10-21 2026-10-28");
+
+// Un'eccezione che annulla il giorno NON e' una data prodotta dalla regola:
+// mostrarla sarebbe una bugia proprio dove si sta verificando la regola.
+const conEccez = Object.assign({}, giuste, { exceptions: { "2026-10-14": [] } });
+ok("una data annullata a mano si vede barrata, non sparisce e non mente",
+   wasteRulePreview(conEccez, 2, "2026-10-12", 1)[0].annullata === true);
+ok("mentre una data normale non e' annullata",
+   wasteRulePreview(giuste, 2, "2026-10-12", 1)[0].annullata === false);
+// Una regola che non produce niente deve poterlo dire.
+ok("una regola tutta scaduta non produce anteprima",
+   wasteRulePreview({ rules: [{ kinds: ["x"], days: [1], every: 1, to: "2020-01-01" }] },
+                    0, "2026-10-12", 4).length === 0);
+ok("un indice che non esiste non fa esplodere niente",
+   wasteRulePreview(giuste, 99, "2026-10-12", 4).length === 0);
+
 // --- 58b. Importazione di uno schema -------------------------------------
 // Serve a non far riscrivere cinque regole a mano due volte l anno. NON e'
 // una sincronizzazione: il testo si incolla, si vede nell editor e si

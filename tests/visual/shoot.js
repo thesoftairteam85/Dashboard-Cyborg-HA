@@ -285,6 +285,49 @@ const DEFAULT_DASH = {
      zoomed.rooms.filter((r) => r !== fr).every((r) => r.opacity < 0.2),
      zoomed.rooms.map((r) => r.opacity).join());
 
+  // ---- l'anteprima delle regole della Raccolta ----------------------------
+  //
+  // Le regole sono quelle che Oscar ha scritto davvero: carta ogni settimana
+  // invece che a settimane alterne, e residuo a settimane alterne invece che
+  // ogni settimana. L'anteprima deve rendere visibili tutti e due gli sbagli
+  // senza doverli cercare - e il secondo lui non l'aveva visto.
+  console.log("\n== RACCOLTA: L'ANTEPRIMA DELLE REGOLE ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, raccolta: "sbagliata", selectRaccolta: true });
+  await page.waitForTimeout(500);
+  // L'editor e' piu' alto della finestra: senza scorrerlo la schermata
+  // mostrerebbe i bidoni e non le regole, cioe' esattamente la parte da
+  // guardare.
+  await page.evaluate(() => {
+    const b = document.querySelector("[data-wa-radd]");
+    if (b && b.scrollIntoView) b.scrollIntoView({ block: "center" });
+  });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: path.resolve(__dirname, "89-raccolta-anteprima.png") });
+  const prev = await page.evaluate(() => {
+    const righe = Array.from(document.querySelectorAll(".wa-rule"));
+    return righe.map((r) => ({
+      date: Array.from(r.querySelectorAll(".wa-prev-d")).map((x) => x.textContent.trim()),
+      doppi: r.querySelectorAll(".wa-prev-d.doppio").length,
+      nota: (r.querySelector(".wa-prev-n") || {}).textContent || "",
+    }));
+  });
+  ok("ogni regola mostra le sue prossime date", prev.length === 3
+     && prev.every((r) => r.date.length === 4), JSON.stringify(prev.map((r) => r.date.length)));
+  // Carta ogni settimana si somma a plastica un giovedi su due: le pastiglie
+  // doppie devono essere due su quattro, non zero e non quattro.
+  ok("la regola sbagliata mostra i giorni in cui si somma",
+     prev.some((r) => r.doppi === 2), JSON.stringify(prev.map((r) => r.doppi)));
+  ok("e dice con cosa si somma, invece di lasciarlo indovinare",
+     prev.some((r) => /insieme a/.test(r.nota)), JSON.stringify(prev.map((r) => r.nota)));
+  // La regola dell'organico e' giusta: non deve avere nessun doppione, se no
+  // il segnale varrebbe zero.
+  ok("una regola giusta non porta nessuna pastiglia accesa",
+     prev.some((r) => r.doppi === 0), JSON.stringify(prev.map((r) => r.doppi)));
+
   // ---- una card per stanza ------------------------------------------------
   console.log("\n== CARD STANZA ==");
   await page.goto("http://127.0.0.1:8899/harness.html");

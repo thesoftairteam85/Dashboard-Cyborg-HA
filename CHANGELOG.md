@@ -4,6 +4,64 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.73.0] - 2026-10-11
+
+«Non rispetta le regole, non dovrebbero allinearsi plastica/vetro con la
+carta.» Le regole erano scritte male, **ma il difetto è che l'editor lo ha
+lasciato fare in silenzio.**
+
+### Cosa produceva quella configurazione
+
+Due cadenze sbagliate, e la seconda non l'aveva vista nessuno:
+
+| regola scritta | effetto |
+|---|---|
+| Carta · gio · **ogni settimana** | si somma a plastica/vetro un giovedì su due |
+| Rifiuto residuo + pannolini · mer · **una sì e una no** | **salta un mercoledì su due** |
+
+La prima si vede: due bidoni lo stesso giorno. La seconda no, ed è la peggiore
+delle due — un doppione costa un viaggio in cortile, un ritiro saltato costa il
+ritiro. È la stessa asimmetria già scritta nel codice della cadenza senza
+ancora, e qui si è presentata dall'altra parte.
+
+### L'anteprima sotto ogni regola
+
+Un editor che non mostra **cosa produce** una regola obbliga a salvare e andare
+a guardare il risultato — e un errore di cadenza si vede *solo* dal risultato.
+Oscar se n'è accorto leggendo la card e insospettendosi, che è il modo peggiore
+di scoprirlo.
+
+Ora sotto ogni regola ci sono le **prossime quattro date** che genera. Le date
+in cui esce anche altro sono accese in ambra, con sotto scritto **con cosa**.
+Davanti alla regola della carta si legge `gio 15 · gio 22 · gio 29 · gio 5`,
+due accese, *«insieme a Plastica, Vetro e lattine»*: in un secondo.
+
+Due raccolte lo stesso giorno **non sono un errore** — residuo e pannolini
+escono insieme — quindi non si vieta niente e non si corregge niente: si mostra
+il fatto e chi guarda decide. Vietarlo sarebbe il sistema che decide al posto
+dell'utente.
+
+Una regola che non produce nulla nei prossimi dodici mesi lo dice al posto di
+restare muta. Una data annullata da un'eccezione si vede **barrata**: non
+sparisce (sembrerebbe che la regola non scatti) e non si mostra normale
+(sarebbe una bugia proprio nel punto in cui si verifica la regola).
+
+### Verifica
+
+Le asserzioni nuove sono costruite sulle **regole vere di Oscar**, copiate
+dalle sue schermate: una verifica che l'anteprima mostra la carta ogni giovedì
+e con cosa si somma, un'altra che il residuo salta un mercoledì su due.
+Corrette le due cadenze, le stesse asserzioni dicono che il giovedì non si
+somma più e il mercoledì non salta più.
+
+La suite visiva non si limita alla schermata: scorre l'editor fino alle regole
+e **misura** le pastiglie — quattro date per regola, due accese sulla regola
+sbagliata, zero su quella giusta. Due accese e non quattro, e non zero: un
+segnale che si accende sempre o mai non è un segnale.
+
+- frontend **1668**, visiva **478** (scena nuova `89-raccolta-anteprima`),
+  pannello 28, raccolta 23, impianti 49, websocket 23, rilascio 10
+
 ## [0.72.0] - 2026-10-11
 
 «Ogni tanto esce *Errore di configurazione*.» La causa era una riga nostra, e

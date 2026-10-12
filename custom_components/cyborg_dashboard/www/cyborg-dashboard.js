@@ -1519,6 +1519,45 @@ function wasteDayKinds(card, iso) {
   return out;
 }
 
+/**
+ * Le prossime date prodotte da UNA regola, e cosa esce insieme a lei.
+ *
+ * Esiste perche' un editor che non mostra cosa produce una regola costringe a
+ * salvare e andare a guardare. Oscar ha impostato "Carta, giovedi, ogni
+ * settimana" al posto di "una sì e una no": la card ha disegnato carta e
+ * plastica lo stesso giorno, e lui se n'e' accorto leggendo il risultato e
+ * insospettendosi. Quattro date sotto la regola glielo avrebbero detto subito.
+ *
+ * Il campo `insiemeA` porta le sigle degli ALTRI bidoni che escono quel
+ * giorno: due raccolte lo stesso giorno sono legittime - residuo e pannolini
+ * escono insieme - quindi non e' un errore da vietare, e' un fatto da
+ * mostrare. Chi guarda decide.
+ */
+function wasteRulePreview(card, indice, daISO, quanti) {
+  const regole = (card && card.rules) || [];
+  const regola = regole[indice];
+  const out = [];
+  const start = wasteParse(daISO);
+  if (!regola || !start) return out;
+  const max = Math.max(1, Math.min(12, Number(quanti) || 4));
+  const d = new Date(start);
+  for (let i = 0; i < 400 && out.length < max; i += 1) {
+    const iso = wasteISO(d);
+    if (wasteRuleFires(regola, d)) {
+      // Le eccezioni vincono sulle regole: una data annullata a mano non e'
+      // una data che questa regola produce, e mostrarla sarebbe una bugia
+      // proprio nel punto in cui si sta verificando la regola.
+      const effettivi = wasteDayKinds(card, iso);
+      const miei = regola.kinds || [];
+      const insiemeA = effettivi.filter((k) => !miei.includes(k));
+      const annullata = !miei.some((k) => effettivi.includes(k));
+      out.push({ date: iso, insiemeA, annullata });
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
 /** I prossimi `quanti` ritiri a partire da `daISO` incluso. */
 function wasteNext(card, daISO, quanti) {
   const start = wasteParse(daISO);
@@ -11343,6 +11382,29 @@ class CyborgDashboard extends HTMLElement {
             <label>FINO AL<input type="date" data-wa-rto="${i}" value="${esc(r.to || "")}"></label>
           </div>
           ${Number(r.every || 1) > 1 && !r.anchor ? `<span class="hint warn">Senza una data di partenza la cadenza alterna non sa in quale delle due settimane si trova: per non farti saltare un ritiro la regola vale <strong>ogni</strong> settimana finché non la indichi.</span>` : ""}
+          ${(() => {
+            // La prova del nove della regola, sotto la regola stessa. Un
+            // editor che non mostra cosa produce costringe a salvare e andare
+            // a guardare, e un errore di cadenza si vede solo dal risultato.
+            const pros = wasteRulePreview(card, i, wasteISO(new Date()), 4);
+            if (!pros.length) {
+              return `<span class="hint warn">Questa regola non produce nessun ritiro nei prossimi dodici mesi: controlla i giorni e le date di validità.</span>`;
+            }
+            const giorni = pros.map((x) => {
+              const d = wasteParse(x.date);
+              const eti = d ? `${WASTE_DAY_NAMES[wasteDow(d)].slice(0, 3)} ${d.getDate()}` : x.date;
+              return `<span class="wa-prev-d${x.insiemeA.length ? " doppio" : ""}${x.annullata ? " annullata" : ""}">${esc(eti)}</span>`;
+            }).join("");
+            // I doppioni si NOMINANO. Due raccolte lo stesso giorno sono
+            // legittime - residuo e pannolini escono insieme - quindi non si
+            // vieta niente: si dice con cosa, e chi guarda decide.
+            const doppi = [...new Set(pros.flatMap((x) => x.insiemeA))]
+              .map((k) => this._wasteKind(card, k).l);
+            return `<div class="wa-prev">
+              <span class="wa-prev-l">PROSSIME</span>${giorni}
+              ${doppi.length ? `<span class="wa-prev-n">· insieme a ${esc(doppi.join(", "))}</span>` : ""}
+            </div>`;
+          })()}
         </div>`).join("")}
         <button class="secondary wide" data-wa-radd><ha-icon icon="mdi:plus"></ha-icon> AGGIUNGI UNA REGOLA</button>
       </div>
@@ -16847,6 +16909,20 @@ button.mini.danger.armed ha-icon{color:#fff}
 .wa-rule-top{display:flex;gap:8px;align-items:center}
 .wa-rule-top .wa-chips{flex:1}
 .wa-imp{width:100%;font:12px/1.4 ui-monospace,monospace;resize:vertical}
+/* L'anteprima della regola: quattro date sotto la regola che le genera.
+   E' la differenza fra "ho scritto una regola" e "so cosa fa". */
+.wa-prev{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:2px}
+.wa-prev-l{font:650 9px/1 inherit;letter-spacing:.09em;opacity:.5}
+.wa-prev-d{padding:2px 7px;border-radius:99px;font:600 10.5px/1 inherit;
+  background:color-mix(in srgb,var(--fg) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--fg) 12%,transparent)}
+/* Un giorno in cui esce anche altro non e' un errore - residuo e pannolini
+   escono insieme - ma si vede, perche' spesso e' il segno di una cadenza
+   sbagliata. */
+.wa-prev-d.doppio{border-color:color-mix(in srgb,#ffb020 55%,transparent);
+  background:color-mix(in srgb,#ffb020 14%,transparent);color:#ffb020}
+.wa-prev-d.annullata{text-decoration:line-through;opacity:.45}
+.wa-prev-n{font-size:10px;opacity:.65}
 .wa-pick{opacity:.45}
 .wa-pick.on{opacity:1}
 @media(max-width:700px){
@@ -18549,7 +18625,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.72.0";
+const CYBORG_BUILD = "0.73.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.
