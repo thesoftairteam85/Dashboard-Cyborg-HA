@@ -4,6 +4,95 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.74.0] - 2026-11-18
+
+Dopo il trasloco: rinomine, stanze nuove, una casa vecchia rimasta dentro HA.
+Tre cose chieste da Oscar e un difetto trovato strada facendo.
+
+### Una rinomina in Home Assistant non rompe piu' la plancia
+
+Il dashboard salva gli entity_id. Home Assistant li lascia rinominare ma non
+avvisa chi li usa: dopo il trasloco la card Monitoraggio mostrava
+`sensor.lavatrice_potenza` scritto in chiaro con «—» accanto, e duecento
+rinomine in arrivo avrebbero fatto lo stesso su mezza plancia.
+
+Nuovo `core/renames.py`: ascolta `entity_registry_updated` (verificato su core
+2026.11.1: `old_entity_id` c'e' **solo** quando l'id cambia davvero) e
+riscrive i riferimenti nel dashboard salvato.
+
+- **Stringa intera, mai sottostringa.** Rinominare `sensor.x` non deve toccare
+  `sensor.x_2`. Rimessa apposta la sostituzione «dentro il testo»: la prova
+  fallisce su tre asserzioni.
+- **Anche le chiavi.** Colori per entita', gerarchia dei carichi: lo schema
+  usa l'id come chiave in piu' punti, e un colore attaccato a un id morto e'
+  un colore perso.
+- **Una raffica, un salvataggio.** Duecento rinomine in due secondi diventano
+  una sola revisione: duecento revisioni avrebbero mandato in conflitto ogni
+  schermo aperto duecento volte. Le catene `a→b→c` si risolvono.
+- **Gli schermi aperti lo sanno.** Nuovo `cyborg_dashboard/subscribe`: il
+  pannello rilegge da solo, a meno che non abbia modifiche in sospeso: in quel
+  caso non sovrascrive niente, e al salvataggio il percorso di conflitto gia'
+  esistente prende la versione del server.
+
+Le preferenze **Energia** di Home Assistant invece non seguono le rinomine
+(il core aggiorna solo i propri sensori di potenza): vanno riallineate a
+mano. Verificato sul sorgente, non supposto.
+
+### Card Stanza: trovare i dispositivi
+
+«Il programma dovrebbe trovarle in base al nome, e se non le trova devo poter
+cercare l'entita' per nome, sennò ci metto anni.» Nell'editor della stanza:
+
+- **Suggeriti dal nome**: gli apparecchi che nel nome dicono la stanza.
+  Parole intere: «Bagno brutto» non prende «Presa Bagno bello», «Camera da
+  letto» non prende «Videocamera». Una stanza composta («Salotto & Cucina»)
+  basta per meta'.
+- **Cerca per nome**: in tutta la casa, anche cio' che sta in un'altra stanza,
+  con scritto dove sta adesso.
+- **Una riga per apparecchio**, non per entita': una presa Shelly ne ha
+  quindici. Il pulsante assegna l'area all'apparecchio **in Home Assistant**,
+  quindi lo vedono anche la mappa e le altre card.
+- Niente si sposta da solo (vincolo 7): e' un elenco, sposta solo il tocco.
+
+### Termostato: l'editor non si apriva
+
+Due difetti, non una funzione mancante:
+
+1. Un'unita' `climate` scelta in passato e poi sparita faceva leggere
+   `.attributes` di `undefined`: l'**editor intero** non si apriva. La card da
+   correggere era proprio quella impossibile da toccare.
+2. La X degli interruttori di sospensione toglieva per **posizione** nella
+   lista salvata, mentre la lista mostrata contava solo le entita' esistenti:
+   con una voce sparita in mezzo, il clic ne cancellava un'altra e quella
+   visibile restava li' per sempre.
+
+Ora le voci sparite si vedono, in ambra, con scritto «non esiste più in Home
+Assistant», e la X toglie per id. Rimesso il difetto: quattro prove rosse.
+
+### Mappa 3D: la pianta del robot sotto le stanze
+
+Un'entita' `image.` (la mappa di Ecovacs) stesa sul pavimento, sotto le
+stanze, per ricalcarle sopra. Trasparenza, larghezza, spostamento e rotazione
+dall'editor della mappa; alla prima scelta prende la larghezza della casa.
+Un `<img>` con la propria opacita' e non un'opacita' sul mondo, che
+appiattirebbe il 3D (lezione della 0.58). Solo `image.`: una telecamera e'
+un flusso. Schema: `view.underlay`, normalizzato e con limiti.
+
+### Trappola pagata
+
+`_roomCandidates` esisteva gia' (stanze della mappa 3D): il metodo nuovo con
+lo stesso nome lo sovrascriveva **in silenzio**, e i suggerimenti tornavano
+vuoti. In una classe JavaScript vince l'ultima definizione, senza errori.
+L'ha trovato la prova nuova, non l'occhio. Rinominato `_roomCardCandidates`.
+
+### Verifica
+
+- frontend **1668** · nuove 0.74 **32** · rinomine **26** · visiva **478**
+  · pannello 28 · websocket 23 · raccolta 23 · impianti 49 · rilascio 10
+- Le due suite nuove entrano nella CI che taglia la Release.
+- Guardati gli scatti dell'editor della stanza, del termostato con un'unita'
+  sparita e della mappa con la pianta di fondo.
+
 ## [0.73.0] - 2026-10-11
 
 «Non rispetta le regole, non dovrebbero allinearsi plastica/vetro con la

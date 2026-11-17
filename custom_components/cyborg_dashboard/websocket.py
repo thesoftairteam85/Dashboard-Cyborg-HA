@@ -32,6 +32,7 @@ TYPE_RUN_CANCEL = "cyborg_dashboard/run_for/cancel"
 TYPE_RELEASE = "cyborg_dashboard/release"
 TYPE_FLEET = "cyborg_dashboard/fleet"
 TYPE_FLEET_SAVE = "cyborg_dashboard/fleet/save"
+TYPE_DASHBOARD_SUBSCRIBE = "cyborg_dashboard/subscribe"
 
 # Quanto vale una risposta di GitHub prima di richiederla. Dieci minuti: le
 # API pubbliche di GitHub danno 60 richieste l'ora per indirizzo IP, e questa
@@ -106,6 +107,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_release)
     websocket_api.async_register_command(hass, _ws_fleet)
     websocket_api.async_register_command(hass, _ws_fleet_save)
+    websocket_api.async_register_command(hass, _ws_dashboard_subscribe)
 
 
 @websocket_api.websocket_command({"type": TYPE_GET})
@@ -172,6 +174,29 @@ def _ws_notifications(hass: HomeAssistant, connection: websocket_api.ActiveConne
         "notifications": log.async_list(msg["limit"]) if log else [],
         "available": log is not None,
     })
+
+
+@websocket_api.websocket_command({"type": TYPE_DASHBOARD_SUBSCRIBE})
+@callback
+def _ws_dashboard_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Avvisa il pannello quando il dashboard e' stato riscritto lato server.
+
+    Oggi lo riscrive solo chi segue le rinomine degli entity_id. Senza questo
+    avviso uno schermo aperto - il tablet a muro, che non si ricarica mai -
+    resterebbe con gli id vecchi in memoria e mostrerebbe trattini finche'
+    qualcuno non lo ricarica a mano.
+    """
+    follower = hass.data.get(DOMAIN, {}).get("renames")
+    if follower is None:
+        connection.send_error(msg["id"], "not_ready", "Servizio rinomine non ancora pronto")
+        return
+
+    @callback
+    def forward(revision: int) -> None:
+        connection.send_message(websocket_api.event_message(msg["id"], {"revision": revision}))
+
+    connection.subscriptions[msg["id"]] = follower.async_subscribe(forward)
+    connection.send_result(msg["id"])
 
 
 @websocket_api.websocket_command({"type": TYPE_NOTIFICATIONS_SUBSCRIBE})

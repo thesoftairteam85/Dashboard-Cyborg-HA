@@ -6,6 +6,7 @@ from homeassistant.core import HomeAssistant
 
 from .core.notifications import NotificationLog
 from .core.reminders import WasteReminders
+from .core.renames import EntityRenameFollower
 from .core.scheduler import CyborgScheduler
 from .core.storage import DashboardStorage
 from .panel import async_register_panel, async_unregister_panel
@@ -43,6 +44,12 @@ async def _async_ensure_services(hass: HomeAssistant) -> None:
     if data.get("reminders") is None:
         data["reminders"] = WasteReminders(hass, data["storage"], data["notifications"])
     await data["reminders"].async_start()
+
+    # Chi segue le rinomine degli entity_id: deve esistere prima che qualcuno
+    # rinomini qualcosa, quindi parte qui insieme agli altri servizi di fondo.
+    if data.get("renames") is None:
+        data["renames"] = EntityRenameFollower(hass, data["storage"])
+    await data["renames"].async_start()
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

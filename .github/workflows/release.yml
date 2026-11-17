@@ -43,6 +43,12 @@ jobs:
       - name: Logica del pannello
         run: node tests/frontend.test.js
 
+      - name: Rinomine degli entity_id
+        run: python3 tests/renames.test.py
+
+      - name: Stanze, termostato, pianta di fondo (0.74)
+        run: node tests/frontend074.test.js
+
   release:
     name: Release
     needs: prove

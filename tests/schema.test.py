@@ -1185,3 +1185,17 @@ assert _wa(rules=[{"kinds": ["x"], "days": [1], "from": "2100-12-31"}])["rules"]
 assert _wa(exceptions={"0002-10-04": []})["exceptions"] == {}
 
 print("schema: anni implausibili scartati ok")
+
+# --- 0.74: pianta di fondo della mappa 3D -----------------------------------
+assert schema.normalize_view({})["underlay"] is None
+u = schema.normalize_view({"underlay": {"entity": "image.negro_mappa"}})["underlay"]
+assert u == {"entity": "image.negro_mappa", "opacity": 0.55, "x": 0.0, "y": 0.0,
+             "width": 600.0, "rotate": 0.0}, u
+# Una telecamera e' un flusso, non una pianta.
+assert schema.normalize_view({"underlay": {"entity": "camera.salotto"}})["underlay"] is None
+assert schema.normalize_view({"underlay": "image.x"})["underlay"] is None
+u = schema.normalize_view({"underlay": {"entity": "image.m", "opacity": 7, "width": -3,
+                                        "rotate": 999, "x": "nan"}})["underlay"]
+assert u["opacity"] == 1.0 and u["width"] == 50.0 and u["rotate"] == 180.0 and u["x"] == 0.0, u
+assert schema.normalize_view(schema.normalize_view({"underlay": {"entity": "image.m", "x": 12.34}}))["underlay"]["x"] == 12.3
+print("schema: pianta di fondo ok")

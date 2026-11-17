@@ -2100,6 +2100,48 @@ function esc(v) {
 }
 function domainOf(entityId) { return String(entityId || "").split(".")[0]; }
 
+/**
+ * Le parole di un nome di stanza che servono a riconoscerla in un altro nome.
+ *
+ * "Salotto & Cucina" -> ["salotto", "cucina"]. Si tolgono gli accenti (il
+ * sensore si chiama "Camera" anche se l'area e' scritta "Càmera"), e si tengono
+ * solo le parole di almeno quattro lettere: "e", "di", "la" e i numeri
+ * riconoscerebbero mezza casa.
+ */
+function roomNameTokens(name) {
+  return String(name || "").toLowerCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !/^\d+$/.test(w));
+}
+
+/**
+ * Il testo nomina la stanza? Vero se contiene TUTTE le parole del nome come
+ * parole intere, oppure - per un nome composto come "Salotto & Cucina" -
+ * almeno una, perche' "Presa Cucina" sta in "Salotto & Cucina".
+ *
+ * Parole intere e non sottostringhe: "bagno" non deve riconoscere
+ * "bagnoschiuma", e la "N" di "Nonno" non e' un turno di notte.
+ */
+function matchesRoomName(text, tokens) {
+  if (!tokens || !tokens.length) return false;
+  const words = new Set(String(text || "").toLowerCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .split(/[^a-z0-9]+/).filter(Boolean));
+  if (tokens.every((t) => words.has(t))) return true;
+  // Un nome di una parola sola deve esserci per intero; uno composto basta
+  // per meta'. "Bagno brutto" NON deve prendere tutto cio' che dice "bagno":
+  // c'e' anche un "Bagno bello".
+  return tokens.length > 1 && /&|\be\b|\+|\//.test(tokens.__source || "")
+    ? tokens.some((t) => words.has(t)) : false;
+}
+
+/** Come roomNameTokens, ma ricorda se il nome unisce due stanze ("A & B"). */
+function roomMatcher(name) {
+  const tokens = roomNameTokens(name);
+  Object.defineProperty(tokens, "__source", { value: String(name || "").toLowerCase() });
+  return tokens;
+}
+
 const WIND_ROSE = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
                    "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"];
 function windRose(deg) {
@@ -2962,6 +3004,11 @@ class CyborgDashboard extends HTMLElement {
       const res = await this._hass.callWS({ type: "cyborg_dashboard/get" });
       this._dashboard = res.dashboard;
       this._error = "";
+      // Il server riscrive il dashboard da solo quando un entity_id viene
+      // rinominato in Home Assistant: senza questo avviso uno schermo aperto
+      // (il tablet a muro non si ricarica mai) resterebbe con gli id vecchi.
+      this._subscribe("dash", { type: "cyborg_dashboard/subscribe" },
+        (ev) => this._onServerRevision(ev && ev.revision));
       // Una volta per caricamento di pagina si chiede a GitHub qual e'
       // l'ultima versione: e' quello che fa accendere la pastiglia in testata
       // senza che nessuno apra niente. Il backend tiene la risposta dieci
@@ -2973,6 +3020,33 @@ class CyborgDashboard extends HTMLElement {
         pages: [{ id: "home", title: "Cyborg", icon: "mdi:hexagon-multiple-outline", sections: [] }] };
     }
     this.render();
+  }
+
+  /**
+   * Il server ha riscritto il dashboard (oggi: una rinomina di entity_id).
+   *
+   * Se questo schermo non ha modifiche in sospeso, si rilegge e basta. Se le
+   * ha, NON si rilegge: butterebbe via il lavoro di chi sta modificando. Al
+   * suo prossimo salvataggio la revisione non tornera', e il percorso di
+   * conflitto gia' esistente (_mergeFromServer) prendera' la versione del
+   * server - che e' quella con gli id giusti.
+   *
+   * La cache del registro si butta in ogni caso: una rinomina e' anche una
+   * modifica del registro, e una stanza che legge l'id vecchio dal registro
+   * vecchio mostrerebbe un'entita' che non esiste piu'.
+   */
+  async _onServerRevision(revision) {
+    const mine = (this._dashboard && Number(this._dashboard.revision)) || 0;
+    if (!Number.isFinite(Number(revision)) || Number(revision) <= mine) return;
+    this._registry = null;
+    if (this._dirty) { this._touch(true); return; }
+    try {
+      const res = await this._hass.callWS({ type: "cyborg_dashboard/get" });
+      if (res && res.dashboard && !this._dirty) {
+        this._dashboard = res.dashboard;
+        this._touch(true);
+      }
+    } catch (e) { /* al prossimo caricamento */ }
   }
 
   /**
@@ -3935,6 +4009,66 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /**
+   * Cosa si potrebbe mettere in questa stanza: per nome (suggerimenti) o per
+   * ricerca libera.
+   *
+   * Una riga per APPARECCHIO e non per entita': una presa Shelly porta quindici
+   * entita', e assegnare l'area all'apparecchio le sposta tutte insieme - e'
+   * quello che fa gia' _assignArea. Le entita' senza apparecchio (helper,
+   * template) restano una riga ciascuna.
+   *
+   * Niente viene spostato da qui: e' un elenco. Sposta solo il tocco sul
+   * pulsante (vincolo 7: il riconoscimento suggerisce, non applica).
+   */
+  _roomCardCandidates(card, query) {
+    const reg = this._registry;
+    if (!reg || !card || !card.area) return [];
+    const states = this._hass.states;
+    const cat = reg.category || {};
+    const areaOf = {};
+    for (const [aid, ids] of Object.entries(reg.byArea || {})) for (const id of ids) areaOf[id] = aid;
+    const q = String(query || "").trim().toLowerCase();
+    const tokens = q ? null : roomMatcher(this._areaName(card.area));
+    if (!q && !(tokens && tokens.length)) return [];
+    const groups = new Map();
+    for (const id of Object.keys(states)) {
+      if (cat[id]) continue;                       // diagnostica e configurazione
+      if (areaOf[id] === card.area) continue;      // gia' qui
+      const dev = (reg.entityDevice || {})[id] || null;
+      const devName = dev ? ((reg.deviceName || {})[dev] || "") : "";
+      const name = states[id].attributes.friendly_name || id;
+      const text = devName + " " + name + " " + id.split(".")[1].replace(/_/g, " ");
+      const hit = q ? text.toLowerCase().includes(q) : matchesRoomName(text, tokens);
+      if (!hit) continue;
+      const key = dev || id;
+      if (!groups.has(key)) {
+        groups.set(key, { key, entity: id, label: devName || name, ids: [],
+          area: areaOf[id] ? this._areaName(areaOf[id]) : "" });
+      }
+      groups.get(key).ids.push(id);
+    }
+    // Prima chi non ha nessuna stanza (sono quelli che nessuno trova), poi gli
+    // altri; dentro ciascun gruppo in ordine di nome.
+    return Array.from(groups.values()).sort((a, b) =>
+      (a.area ? 1 : 0) - (b.area ? 1 : 0) || a.label.localeCompare(b.label));
+  }
+
+  _roomCandidateRows(card, list) {
+    const label = this._areaName(card.area);
+    return list.slice(0, 30).map((g) => {
+      const st = this._hass.states[g.entity];
+      return `<div class="entity-result-row">
+        <ha-icon icon="${esc(autoIcon(g.entity, st))}"></ha-icon>
+        <div class="err-text"><strong>${esc(g.label)}</strong><small>${esc(
+          (g.area ? "ora in " + g.area : "senza stanza") + " · "
+          + (g.ids.length > 1 ? g.ids.length + " entità" : g.entity))}</small></div>
+        <button class="mini" data-orphan-assign="${esc(g.entity)}" title="Metti in ${esc(label)} in Home Assistant"><ha-icon icon="mdi:home-plus"></ha-icon></button>
+      </div>`;
+    }).join("") + (list.length > 30
+      ? `<div class="entity-result-empty">…e altri ${list.length - 30}: scrivi qualcosa di più preciso.</div>` : "");
+  }
+
+  /**
    * The "no area" block shown under an entity picker.
    *
    * mode "pick"   - rows can be tapped to add the entity to this room by hand
@@ -4084,6 +4218,31 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /** Plan bounds, used to size and centre the world. */
+  /**
+   * La pianta di fondo: un'immagine stesa SOTTO le stanze, sul piano del
+   * pavimento, per ricalcarle sopra (di solito la mappa del robot).
+   *
+   * Un <img> e non uno sfondo CSS del mondo: il mondo ha preserve-3d, e
+   * un'opacita' o uno sfondo sul contenitore appiattirebbero tutta la scena
+   * (lezione della 0.58). L'opacita' sta sull'immagine, che non ha figli.
+   * translateZ(-2px) la mette sotto il terreno del piano terra (-1px), cosi'
+   * le stanze non ci affondano dentro.
+   *
+   * L'URL viene da entity_picture, che porta un token a scadenza: si rilegge
+   * a ogni disegno, mai salvato nel dashboard.
+   */
+  _underlayMarkup(view) {
+    const u = view && view.underlay;
+    if (!u || !u.entity) return "";
+    const st = this._hass.states[u.entity];
+    const pic = st && st.attributes && st.attributes.entity_picture;
+    if (!pic) return "";
+    const n = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    return `<img class="fp-underlay" src="${esc(pic)}" alt="" draggable="false"
+      style="left:${n(u.x, 0)}px;top:${n(u.y, 0)}px;width:${n(u.width, 600)}px;opacity:${n(u.opacity, 0.55)};
+        transform:translateZ(-2px) rotate(${n(u.rotate, 0)}deg)">`;
+  }
+
   _planBounds() {
     const rooms = this._rooms();
     if (!rooms.length) return { w: 600, h: 400 };
@@ -4614,6 +4773,7 @@ class CyborgDashboard extends HTMLElement {
         <div class="fp-stage">
           <div class="fp-world" style="width:${bounds.w}px;height:${bounds.h}px;margin-left:${-bounds.w / 2}px;margin-top:${-bounds.h / 2}px;
             transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw))${shift}">
+            ${this._underlayMarkup(view)}
             ${grounds}
             ${rooms.map((r) => this._renderRoom(r, view)).join("")}
           </div>
@@ -5279,6 +5439,31 @@ class CyborgDashboard extends HTMLElement {
           <span class="hint">Vale per le icone sulla mappa e per l'elenco sotto. <strong>Tenendo premuto</strong> si fa sempre l'altra cosa, così comando e dettagli restano entrambi raggiungibili senza cambiare impostazione.</span>
         </label>
       </div>
+      ${(() => {
+        const u = view.underlay || null;
+        const imgs = Object.keys(this._hass.states).filter((id) => domainOf(id) === "image");
+        const st = u ? this._hass.states[u.entity] : null;
+        const nm = (id) => ((this._hass.states[id] && this._hass.states[id].attributes.friendly_name) || id);
+        const b = this._planBounds();
+        return `<div class="section">
+        <strong>PIANTA DI FONDO</strong>
+        <span class="hint">Un'immagine stesa sotto le stanze, per ricalcarle sopra. La mappa del robot aspirapolvere è la migliore: l'ha disegnata girando davvero per casa. Si vede anche fuori dalla modifica, attenuata.</span>
+        <label>IMMAGINE<select data-underlay-entity>
+          <option value="">— nessuna —</option>
+          ${imgs.map((id) => `<option value="${esc(id)}" ${u && u.entity === id ? "selected" : ""}>${esc(nm(id))}</option>`).join("")}
+        </select></label>
+        ${!imgs.length ? '<span class="hint">Nessuna entità <code>image</code> in Home Assistant.</span>' : ""}
+        ${u && !st ? `<span class="hint warn">L'entità <code>${esc(u.entity)}</code> non esiste più: scegline un'altra o togli la pianta.</span>` : ""}
+        ${u && st && !st.attributes.entity_picture ? '<span class="hint warn">Questa entità non ha ancora un\'immagine da mostrare: il robot la pubblica dopo il primo giro.</span>' : ""}
+        ${u ? `
+        <label>TRASPARENZA · ${Math.round((u.opacity ?? 0.55) * 100)}%<input type="range" min="0.1" max="1" step="0.05" data-underlay-prop="opacity" value="${u.opacity ?? 0.55}"></label>
+        <label>LARGHEZZA · ${Math.round(u.width ?? 600)} px<input type="range" min="50" max="${Math.max(1200, Math.round(b.w * 3))}" step="5" data-underlay-prop="width" value="${u.width ?? 600}"></label>
+        <label>SPOSTA ORIZZONTALE · ${Math.round(u.x ?? 0)}<input type="range" min="${-Math.round(b.w)}" max="${Math.round(b.w)}" step="1" data-underlay-prop="x" value="${u.x ?? 0}"></label>
+        <label>SPOSTA VERTICALE · ${Math.round(u.y ?? 0)}<input type="range" min="${-Math.round(b.h)}" max="${Math.round(b.h)}" step="1" data-underlay-prop="y" value="${u.y ?? 0}"></label>
+        <label>ROTAZIONE · ${Math.round(u.rotate ?? 0)}°<input type="range" min="-180" max="180" step="1" data-underlay-prop="rotate" value="${u.rotate ?? 0}"></label>
+        <span class="hint">Metti la camera dall'alto (<ha-icon icon="mdi:crop-free" style="--mdc-icon-size:14px"></ha-icon>) per allineare: in prospettiva la pianta sembra spostata anche quando non lo è.</span>` : ""}
+      </div>`;
+      })()}
     </aside>`;
   }
 
@@ -11628,10 +11813,21 @@ class CyborgDashboard extends HTMLElement {
       const allUnits = Object.keys(this._hass.states).filter((id) => domainOf(id) === "climate");
       const chosen = Array.isArray(card.units) && card.units.length ? card.units : null;
       const chosenManual = this._thermoManual(card);
+      // Tutte le voci salvate, ANCHE quelle che in Home Assistant non esistono
+      // piu': nascoste qui, restavano nel dashboard per sempre senza un modo
+      // di toglierle (vincolo 7: cio' che il sistema scarta resta raggiungibile).
+      const savedManual = Array.isArray(card.manual) ? card.manual : [];
       const hints = this._thermoManualHints(card);
       const switchable = Object.keys(this._hass.states).filter((id) =>
         ["input_boolean", "switch"].includes(domainOf(id)));
-      const name = (id) => (this._hass.states[id].attributes.friendly_name || id);
+      // Un'unita' scelta in passato e poi sparita (un trasloco, un'integrazione
+      // rimossa) faceva lanciare un'eccezione qui, e l'editor intero non si
+      // apriva: proprio la card da correggere diventava impossibile da toccare.
+      const name = (id) => {
+        const st = this._hass.states[id];
+        return (st && st.attributes.friendly_name) || id;
+      };
+      const gone = (id) => !this._hass.states[id];
       const q3 = (this._entityQuery || "").trim().toLowerCase();
       const matches = switchable
         .filter((id) => !chosenManual.includes(id))
@@ -11647,10 +11843,10 @@ class CyborgDashboard extends HTMLElement {
           <button class="${chosen ? "" : "active"}" data-thermo-mode-sel="auto">Tutte</button>
           <button class="${chosen ? "active" : ""}" data-thermo-mode-sel="manual">Scelte da me</button>
         </div>
-        ${chosen ? `<div class="eco-dev-list">${chosen.map((id, i) => `<div class="eco-dev-edit">
-            <ha-icon icon="mdi:thermostat-box"></ha-icon>
-            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
-            <button class="mini danger" data-thermo-drop="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+        ${chosen ? `<div class="eco-dev-list">${chosen.map((id) => `<div class="eco-dev-edit${gone(id) ? " gone" : ""}">
+            <ha-icon icon="${gone(id) ? "mdi:alert-circle-outline" : "mdi:thermostat-box"}"></ha-icon>
+            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(gone(id) ? id + " · non esiste più in Home Assistant" : id)}</small></div>
+            <button class="mini danger" data-thermo-drop="${esc(id)}" title="Togli"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>`).join("")}</div>
           <label>AGGIUNGI UN'UNITÀ<select data-thermo-pick>
             <option value="">— scegli —</option>
@@ -11663,11 +11859,12 @@ class CyborgDashboard extends HTMLElement {
         <span class="hint">Gli interruttori che fermano le automazioni non sono dispositivi, sono uno <strong>stato dell'impianto</strong>: stanno in cima alla card, con scritto per esteso cosa comportano. <strong>Li scegli tu</strong>: qui sotto ci sono al massimo dei suggerimenti presi dal nome, e un nome non dice cosa fa davvero un'entità.</span>
         <label class="check"><input type="checkbox" data-prop="show_manual" ${card.show_manual !== false ? "checked" : ""}> Mostra la riga di sospensione</label>
         ${card.show_manual === false ? "" : `
-        ${chosenManual.length ? `<div class="eco-dev-list">${chosenManual.map((id, i) => `<div class="eco-dev-edit">
-            <ha-icon icon="mdi:hand-back-right"></ha-icon>
-            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(id)}</small></div>
-            <button class="mini danger" data-thermo-man-drop="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
-          </div>`).join("")}</div>`
+        ${savedManual.length ? `<div class="eco-dev-list">${savedManual.map((id) => `<div class="eco-dev-edit${gone(id) ? " gone" : ""}">
+            <ha-icon icon="${gone(id) ? "mdi:alert-circle-outline" : "mdi:hand-back-right"}"></ha-icon>
+            <div class="ede-txt"><strong>${esc(name(id))}</strong><small>${esc(gone(id) ? id + " · non esiste più in Home Assistant" : id)}</small></div>
+            <button class="mini danger" data-thermo-man-drop="${esc(id)}" title="Togli"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>`).join("")}</div>
+          <span class="hint">Puoi sceglierne quanti vuoi: ognuno diventa una riga con il suo interruttore.</span>`
           : `<span class="hint">Nessun interruttore indicato: la riga non compare finché non ne scegli uno.</span>`}
         ${hints.length ? `<div class="th-hints">
           <span class="hint">Possibili candidati, trovati dal nome. <strong>Nessuno è attivo</strong> finché non lo aggiungi tu — il nome di un'entità è un indizio, non una dichiarazione di cosa fa.</span>
@@ -11842,6 +12039,20 @@ class CyborgDashboard extends HTMLElement {
           : "Nessuna area configurata in Home Assistant. Creale in Impostazioni → Aree."}</span>
         ${card.area ? `<span class="hint">${ids.length} dispositivi visibili su ${pool.length} nell'area.</span>` : ""}
       </div>
+      ${card.area ? (() => {
+        const sugg = this._roomCardCandidates(card, "");
+        const found = this._roomFind ? this._roomCardCandidates(card, this._roomFind) : [];
+        return `<div class="section">
+        <strong>TROVA I DISPOSITIVI</strong>
+        <span class="hint">Il pulsante <ha-icon icon="mdi:home-plus" style="--mdc-icon-size:14px"></ha-icon> mette l'apparecchio in <strong>${esc(this._areaName(card.area))}</strong> <em>in Home Assistant</em>, con tutte le sue entità: lo vedranno anche la mappa e le altre card. Niente si sposta finché non lo tocchi.</span>
+        ${sugg.length ? `<div class="entity-result-head">SUGGERITI DAL NOME · ${sugg.length}</div>
+          <div class="entity-result-note">Hanno nel nome «${esc(this._areaName(card.area))}». Un nome è un indizio, non una prova: controlla prima di toccare.</div>
+          ${this._roomCandidateRows(card, sugg)}` : ""}
+        <label>CERCA PER NOME<input type="text" data-room-find value="${esc(this._roomFind || "")}" placeholder="presa, lavatrice, sensore…" autocomplete="off"></label>
+        <div data-room-find-results>${this._roomFind
+          ? (this._roomCandidateRows(card, found) || '<div class="entity-result-empty">Nessun risultato fuori da questa stanza.</div>') : ""}</div>
+      </div>`;
+      })() : ""}
       ${card.area ? `<div class="section">
         <strong>COME RAGGRUPPARE</strong>
         <div class="seg">
@@ -13501,6 +13712,21 @@ class CyborgDashboard extends HTMLElement {
         };
       }
       this._bindEntityRows();
+      // Ricerca nella stanza: aggiorna solo il proprio riquadro, cosi' il campo
+      // non viene ricreato a ogni lettera e il cursore non salta.
+      const find = q("[data-room-find]");
+      if (find && card.type === "room") {
+        find.oninput = () => {
+          this._roomFind = find.value;
+          const box = q("[data-room-find-results]");
+          if (!box) return;
+          const found = this._roomFind.trim() ? this._roomCardCandidates(card, this._roomFind) : [];
+          box.innerHTML = this._roomFind.trim()
+            ? (this._roomCandidateRows(card, found) || '<div class="entity-result-empty">Nessun risultato fuori da questa stanza.</div>')
+            : "";
+          this._bindOrphanRows();
+        };
+      }
     }
 
     // --- page management
@@ -13652,6 +13878,40 @@ class CyborgDashboard extends HTMLElement {
         };
       }
     });
+    const und = q("[data-underlay-entity]");
+    if (und) {
+      und.onchange = () => {
+        const view = this._page().view;
+        if (!und.value) { view.underlay = null; this._touch(); return; }
+        const prev = view.underlay || {};
+        // Alla prima scelta la pianta prende la larghezza della casa disegnata:
+        // un punto di partenza vicino al giusto, invece di 600 px a caso.
+        view.underlay = Object.assign({ opacity: 0.55, x: 0, y: 0, rotate: 0,
+          width: Math.round(this._planBounds().w) }, prev, { entity: und.value });
+        this._touch();
+      };
+    }
+    all("[data-underlay-prop]").forEach((el) => {
+      const apply = (commit) => {
+        const view = this._page().view;
+        if (!view.underlay) return;
+        const key = el.getAttribute("data-underlay-prop");
+        view.underlay[key] = parseFloat(el.value);
+        // Mentre si trascina si sposta solo l'immagine, senza ridisegnare la
+        // pagina: un ridisegno a ogni pixel ricrea il cursore sotto il dito.
+        const img = q(".fp-underlay");
+        if (img && !commit) {
+          const u = view.underlay;
+          img.style.left = u.x + "px"; img.style.top = u.y + "px";
+          img.style.width = u.width + "px"; img.style.opacity = u.opacity;
+          img.style.transform = `translateZ(-2px) rotate(${u.rotate}deg)`;
+          return;
+        }
+        this._touch();
+      };
+      el.oninput = () => apply(false);
+      el.onchange = () => apply(true);
+    });
     all("[data-flow-toggle]").forEach((el) => {
       el.onclick = (ev) => {
         ev.stopPropagation();
@@ -13700,7 +13960,11 @@ class CyborgDashboard extends HTMLElement {
     all("[data-thermo-drop]").forEach((el) => {
       el.onclick = () => {
         if (!card || !Array.isArray(card.units)) return;
-        card.units.splice(Number(el.getAttribute("data-thermo-drop")), 1);
+        // Per id e non per posizione: la posizione mostrata e quella salvata
+        // possono non coincidere, e allora la X toglieva un'altra voce.
+        const id = el.getAttribute("data-thermo-drop");
+        card.units = card.units.filter((u) => u !== id);
+        if (Array.isArray(card.order)) card.order = card.order.filter((k) => k !== id);
         this._touch();
       };
     });
@@ -13716,7 +13980,11 @@ class CyborgDashboard extends HTMLElement {
     all("[data-thermo-man-drop]").forEach((el) => {
       el.onclick = () => {
         if (!card || !Array.isArray(card.manual)) return;
-        card.manual.splice(Number(el.getAttribute("data-thermo-man-drop")), 1);
+        // Per id: la lista mostrata contava solo le entita' esistenti, quella
+        // salvata anche le sparite, e la X per posizione toglieva la voce
+        // sbagliata - quella che si vedeva restava li' per sempre.
+        const id = el.getAttribute("data-thermo-man-drop");
+        card.manual = card.manual.filter((m) => m !== id);
         this._touch();
       };
     });
@@ -17588,6 +17856,9 @@ button.mini.danger.armed ha-icon{color:#fff}
 .al-extra summary:hover{opacity:.9;color:var(--accent)}
 .eco-dev-edit{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;
   background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 16%,transparent)}
+.eco-dev-edit.gone{background:color-mix(in srgb,#ffb020 8%,transparent);border-color:color-mix(in srgb,#ffb020 35%,transparent)}
+.eco-dev-edit.gone ha-icon{color:#ffb020}
+.eco-dev-edit.gone small{color:#ffb020}
 .cf-edit-row{padding:10px;margin-bottom:8px;border-radius:12px;border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 70%,transparent)}
 .cf-edit-tools{display:flex;gap:6px;justify-content:flex-end;margin-top:8px}
 .eco-dev-edit>ha-icon{--mdc-icon-size:16px;color:var(--accent);flex-shrink:0}
@@ -17791,6 +18062,8 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 @media (max-width:700px){.pt-hint{display:none}}
 
 .fp-viewport{position:relative;height:min(74vh,760px);min-height:420px;border-radius:20px;overflow:hidden;touch-action:none;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);background:radial-gradient(120% 90% at 50% 15%,color-mix(in srgb,var(--accent) 9%,#0b1119) 0%,#080d14 70%);perspective:var(--persp,1900px);perspective-origin:50% 42%}
+.fp-underlay{position:absolute;height:auto;transform-origin:0 0;pointer-events:none;user-select:none;
+  image-rendering:auto;filter:none}
 .fp-stage{position:absolute;left:50%;top:50%;width:0;height:0;transform-style:preserve-3d}
 .fp-world{position:absolute;transform-style:preserve-3d;transform:scale(var(--zoom)) rotateX(var(--pitch)) rotateZ(var(--yaw));transition:transform .28s cubic-bezier(.4,0,.2,1)}
 /* While a finger or the mouse is turning the house the easing has to go, or
@@ -18625,7 +18898,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.73.0";
+const CYBORG_BUILD = "0.74.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

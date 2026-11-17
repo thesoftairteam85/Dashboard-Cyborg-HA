@@ -206,7 +206,7 @@ DEFAULT_VIEW = {"yaw": 32, "pitch": 56, "zoom": 1.0, "wall_height": 62,
                 "wall_thickness": 9,
                 "show_walls": True, "show_labels": True, "level_gap": 150,
                 "active_level": None, "tap_action": "toggle",
-                "badges": "sintesi"}
+                "badges": "sintesi", "underlay": None}
 
 # A storey index is deliberately signed and bounded: -3 covers cellars and
 # garages below grade, +8 is far past any residential building. Bounding it at
@@ -404,6 +404,45 @@ def _normalize_spots(spots: Any) -> dict[str, list[float]]:
     return out
 
 
+def normalize_underlay(value: Any) -> dict[str, Any] | None:
+    """La pianta di fondo della mappa 3D: un'entita' ``image.`` stesa sotto le stanze.
+
+    Nata per la mappa del robot aspirapolvere (Ecovacs la pubblica come
+    entita' ``image``): e' una pianta della casa disegnata da chi ci e'
+    passato davvero, e ricalcarci sopra le stanze e' molto piu' facile che
+    disegnarle a occhio.
+
+    Solo ``image.`` e non ``camera.``: una telecamera e' un flusso, e uno
+    stream sotto la mappa la terrebbe in movimento senza motivo. ``None``
+    vuol dire nessuna pianta. Posizione e misura sono in pixel del mondo
+    della mappa, come le stanze; i limiti tengono la pianta dentro la scena
+    anche se qualcuno scrive a mano un numero assurdo.
+    """
+    if not isinstance(value, dict):
+        return None
+    entity = value.get("entity")
+    if not isinstance(entity, str) or not entity.startswith("image.") or len(entity) > 255:
+        return None
+
+    def num(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            v = float(value.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        if v != v:          # NaN
+            return default
+        return max(lo, min(hi, v))
+
+    return {
+        "entity": entity,
+        "opacity": round(num("opacity", 0.55, 0.1, 1.0), 2),
+        "x": round(num("x", 0, -4000, 4000), 1),
+        "y": round(num("y", 0, -4000, 4000), 1),
+        "width": round(num("width", 600, 50, 6000), 1),
+        "rotate": round(num("rotate", 0, -180, 180), 1),
+    }
+
+
 def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
     result = dict(DEFAULT_VIEW)
     if isinstance(view, dict):
@@ -456,6 +495,7 @@ def normalize_view(view: dict[str, Any] | None) -> dict[str, Any]:
     # it — the same defect already fixed on the card rows, still present here.
     tap = result.get("tap_action")
     result["tap_action"] = tap if tap in ("toggle", "more-info") else "toggle"
+    result["underlay"] = normalize_underlay(result.get("underlay"))
     return result
 
 
