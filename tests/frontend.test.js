@@ -6603,7 +6603,7 @@ console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
   const soloMiei = Object.assign({}, alCard, { zones: mine.map((z) => z.id) });
   const hOk = el._renderCard(soloMiei, alSec);
   ok("quando è tutto a posto lo dice in una riga sola",
-     /tutto a posto/.test(hOk) && !/class="az-chip"/.test(hOk),
+     /nessun guasto/.test(hOk) && !/class="az-chip"/.test(hOk),
      (hOk.match(/class="az-chip"[\s\S]{0,60}/) || [""])[0]);
 
   // la soglia di batteria è una scelta
@@ -6622,6 +6622,158 @@ console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
      && zones.length > 8, String(zones.length));
   ok("il blocco si può spegnere",
      !/al-zones/.test(el._renderCard(Object.assign({}, alCard, { show_zones: false }), alSec)));
+
+  // --- 0.75.0: ogni sensore con DUE risposte: com'e' il contatto, e che cosa fa per l'allarme.
+  {
+    const mineIds = mine.map((z) => z.id);
+    const only = Object.assign({}, alCard, { zones: mineIds });
+    // riga per ogni sensore, anche quando e' tutto a posto: prima ne restava una frase sola
+    const hList = el._renderCard(only, alSec);
+    ok("ogni sensore ha la sua riga, anche se e' tutto a posto",
+       (hList.match(/class="az-r"/g) || []).length === mineIds.length,
+       (hList.match(/class="az-r"/g) || []).length + " vs " + mineIds.length);
+    ok("la riga dice lo stato fisico con parole del sensore",
+       /chiuso/.test(hList) && /nessun movimento/.test(hList) && /integro/.test(hList) && /asciutto/.test(hList));
+    ok("ogni riga apre i dettagli dell'entita'",
+       mineIds.every((id) => hList.includes('data-more-info="' + id + '"')));
+    ok("senza Alarmo non si inventa nessun ruolo e non parte nessuna chiamata",
+       !/az-role/.test(hList) && !wsCalls.some((c) => c.type === "alarmo/sensors"));
+    ok("righe: nessun undefined e div bilanciati",
+       !/undefined/.test(hList)
+       && (hList.match(/<div/g) || []).length === (hList.match(/<\/div>/g) || []).length);
+
+    // il pannello Alarmo si riconosce dalla firma, non dal nome
+    const alarmoAttrs = (extra) => Object.assign({ friendly_name: "Allarme", supported_features: 1 | 2 | 8,
+      arm_mode: null, open_sensors: null, bypassed_sensors: [], delay: null }, extra || {});
+    states["alarm_control_panel.ajax"] = S("disarmed", alarmoAttrs());
+    ok("il pannello con arm_mode/open_sensors/bypassed_sensors e' Alarmo",
+       el._alarmIsAlarmo(states["alarm_control_panel.ajax"]) === true);
+    ok("un pannello qualunque no", el._alarmIsAlarmo(S("disarmed", { supported_features: 1 })) === false);
+
+    ok("_alarmoShape accetta una mappa con modes[]",
+       !!el._alarmoShape({ "binary_sensor.a": { modes: ["away"] } }));
+    ok("e rifiuta qualunque altra forma",
+       el._alarmoShape(null) === null && el._alarmoShape([]) === null
+       && el._alarmoShape({ x: { modes: "away" } }) === null
+       && el._alarmoShape({ dashboard: null }) === null);
+
+    // Alarmo c'e' ma non ha ancora risposto: la card chiede, una volta sola.
+    // callWS viene intercettata e rimessa subito (la chiamata parte in modo
+    // sincrono), cosi' non si intreccia con le sezioni che seguono.
+    const asked49 = [];
+    const realWS49 = el._hass.callWS;
+    el._hass.callWS = (m) => { asked49.push(m); return new Promise(() => {}); };
+    el._alarmoSensors = null; el._alarmoAt = 0; el._alarmoLoading = false;
+    el._renderCard(only, alSec);
+    el._renderCard(only, alSec);
+    el._hass.callWS = realWS49;
+    ok("con Alarmo la card chiede alarmo/sensors, e una sola volta alla volta",
+       asked49.filter((c) => c.type === "alarmo/sensors").length === 1, JSON.stringify(asked49));
+    el._alarmoLoading = false;
+
+    // configurazione: la porta e' in Fuori casa e Notte, il movimento solo Fuori casa
+    const cfg = {
+      "binary_sensor.z_porta":      { modes: ["away", "night"], always_on: false, enabled: true },
+      "binary_sensor.z_finestra":   { modes: ["away", "home", "night"], always_on: false, enabled: true },
+      "binary_sensor.z_bagno":      { modes: ["away"], always_on: false, enabled: false },
+      "binary_sensor.z_movimento":  { modes: ["away"], always_on: false, enabled: true },
+      "binary_sensor.z_fumo":       { modes: [], always_on: true, enabled: true },
+      "binary_sensor.z_allagamento":{ modes: [], always_on: false, enabled: true },
+      "binary_sensor.z_tamper":     { modes: ["away"], always_on: false, enabled: true },
+    };   // z_persa: NON configurato in Alarmo
+    el._alarmoSensors = cfg; el._alarmoAt = Date.now(); el._alarmoLoading = false;
+    const roleOf = (id, panel, c) => el._alarmRole(
+      { id }, c || cfg, (panel || states["alarm_control_panel.ajax"]).attributes,
+      el._alarmCurrentMode(panel || states["alarm_control_panel.ajax"]));
+
+    // disarmato: dice in quali modalita' si attiva
+    ok("disarmato: il ruolo dice in quali modalita' si attivera'",
+       roleOf("binary_sensor.z_porta").key === "idle"
+       && /Fuori casa/.test(roleOf("binary_sensor.z_porta").text)
+       && /Notte/.test(roleOf("binary_sensor.z_porta").text));
+    ok("sempre attivo resta tale anche a centrale disarmata",
+       roleOf("binary_sensor.z_fumo").key === "always");
+    ok("un sensore in nessuna modalita' lo dice, non tace",
+       roleOf("binary_sensor.z_allagamento").key === "none");
+    ok("un sensore che Alarmo non conosce e' «non gestito»",
+       roleOf("binary_sensor.z_persa").key === "unmanaged");
+    ok("un sensore spento in Alarmo e' «disattivato»",
+       roleOf("binary_sensor.z_bagno").key === "disabled");
+
+    // armato Fuori casa
+    states["alarm_control_panel.ajax"] = S("armed_away", alarmoAttrs({ arm_mode: "away" }));
+    ok("armato Fuori casa: il movimento e' attivo",
+       roleOf("binary_sensor.z_movimento").key === "active");
+    // armato In casa: il movimento NON e' attivo (e' normale, lo si dice)
+    states["alarm_control_panel.ajax"] = S("armed_home", alarmoAttrs({ arm_mode: "home" }));
+    const rm = roleOf("binary_sensor.z_movimento");
+    ok("armato In casa: il movimento NON e' attivo e lo dice con il nome della modalita'",
+       rm.key === "inactive" && /In casa/.test(rm.text), JSON.stringify(rm));
+    ok("armato In casa: la finestra e' attiva", roleOf("binary_sensor.z_finestra").key === "active");
+    ok("armato In casa: il fumo e' attivo comunque", roleOf("binary_sensor.z_fumo").key === "always");
+    // escluso
+    states["alarm_control_panel.ajax"] = S("armed_away", alarmoAttrs({ arm_mode: "away",
+      bypassed_sensors: ["binary_sensor.z_finestra"] }));
+    ok("un sensore escluso e' «escluso», non «attivo»",
+       roleOf("binary_sensor.z_finestra").key === "bypassed");
+    // arm_mode assente: si ricava dallo stato
+    states["alarm_control_panel.ajax"] = S("armed_night", alarmoAttrs({ arm_mode: null }));
+    ok("senza arm_mode la modalita' si ricava dallo stato del pannello",
+       el._alarmCurrentMode(states["alarm_control_panel.ajax"]) === "night");
+    ok("in transizione (arming) la modalita' resta quella del pannello",
+       el._alarmCurrentMode(S("arming", alarmoAttrs({ arm_mode: "away" }))) === "away");
+
+    // la card intera
+    states["alarm_control_panel.ajax"] = S("armed_home", alarmoAttrs({ arm_mode: "home" }));
+    const hA = el._renderCard(only, alSec);
+    ok("la card mostra il ruolo di ogni sensore",
+       (hA.match(/class="az-role"/g) || []).length === mineIds.length,
+       (hA.match(/class="az-role"/g) || []).length + " vs " + mineIds.length);
+    ok("e la sintesi non dice «tutto a posto» ma quanti sono attivi e quanti no",
+       /az-sum/.test(hA) && /attivi/.test(hA) && /non gestiti da Alarmo/.test(hA)
+       && /non attivi in In casa/.test(hA) && !/tutto a posto/.test(hA),
+       (hA.match(/class="az-sum"[\s\S]{0,260}/) || [""])[0]);
+    ok("i sensori che richiedono attenzione stanno in cima",
+       hA.indexOf("data-more-info=\"binary_sensor.z_persa\"") < hA.indexOf("data-more-info=\"binary_sensor.z_porta\"")
+       && hA.indexOf("data-more-info=\"binary_sensor.z_persa\"") >= 0);
+    ok("alarmo: nessun undefined e div bilanciati",
+       !/undefined/.test(hA) && (hA.match(/<div/g) || []).length === (hA.match(/<\/div>/g) || []).length);
+
+    // Alarmo non risponde: lo si dice, non si mostrano ruoli
+    el._alarmoSensors = null; el._alarmoAt = Date.now();
+    const hF = el._renderCard(only, alSec);
+    ok("se Alarmo non risponde la card lo dice e non mostra ruoli",
+       /Alarmo non risponde/.test(hF) && !/class="az-role"/.test(hF));
+
+    // il sensore che Alarmo protegge e che la classe non riconosce resta raggiungibile
+    B("binary_sensor.z_strano", "update", "off");
+    el._alarmoSensors = Object.assign({}, cfg, { "binary_sensor.z_strano": { modes: ["away"], always_on: false, enabled: true } });
+    ok("in automatico entra anche il sensore che Alarmo protegge ma la classe scarta",
+       el._alarmZones(alCard).some((z) => z.id === "binary_sensor.z_strano"));
+    ok("con un elenco scelto a mano no: l'utente decide",
+       !el._alarmZones(only).some((z) => z.id === "binary_sensor.z_strano"));
+    delete states["binary_sensor.z_strano"];
+
+    // il caricamento vero, su un oggetto a parte: nessuna interferenza con el
+    const mkLoader = (ws) => ({ _hass: { callWS: ws }, _touch() { this.touched = true; },
+      _alarmoShape: el._alarmoShape, _alarmoSensors: null, _alarmoAt: 0, _alarmoLoading: false });
+    const okL = mkLoader(async (m) => (m.type === "alarmo/sensors" ? cfg : { dashboard: null }));
+    const koL = mkLoader(async () => { throw new Error("unknown_command"); });
+    const oddL = mkLoader(async () => ({ dashboard: null }));
+    Promise.all([el._loadAlarmoSensors.call(okL), el._loadAlarmoSensors.call(koL),
+                 el._loadAlarmoSensors.call(oddL)]).then(() => {
+      ok("_loadAlarmoSensors salva la configurazione valida e ridisegna",
+         okL._alarmoSensors === cfg && okL._alarmoAt > 0 && okL._alarmoLoading === false && okL.touched === true);
+      ok("se il comando non esiste resta null, senza rompere la card",
+         koL._alarmoSensors === null && koL._alarmoLoading === false && koL.touched === true);
+      ok("una risposta di un'altra forma vale «non lo so»", oddL._alarmoSensors === null);
+    });
+
+    // pulizia
+    states["alarm_control_panel.ajax"] = S("disarmed", { friendly_name: "Centrale",
+      supported_features: 1 | 2 | 8 });
+    el._alarmoSensors = null; el._alarmoAt = 0; el._alarmoLoading = false;
+  }
 
   // editor
   el._dashboard.pages[0].sections = [alSec];

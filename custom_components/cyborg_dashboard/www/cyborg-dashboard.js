@@ -1903,6 +1903,12 @@ const ALARM_MODES = [
 ];
 const ALARM_TRIGGER_BIT = 8;
 
+/** Le modalita' di Alarmo (`arm_mode`) e il loro nome in italiano. */
+const ALARM_MODE_WORD = { away: "Fuori casa", home: "In casa", night: "Notte",
+                          custom: "Parziale", vacation: "Vacanza" };
+const ALARM_MODE_OF_STATE = { armed_away: "away", armed_home: "home", armed_night: "night",
+  armed_custom_bypass: "custom", armed_vacation: "vacation" };
+
 /** disarmato / armato / in transizione / allarme. Drives colour and layout. */
 function alarmPhase(state) {
   if (state === "triggered") return "fire";
@@ -7046,7 +7052,20 @@ class CyborgDashboard extends HTMLElement {
   _alarmZones(item) {
     const classes = this._alarmZoneClasses();
     const picked = Array.isArray(item.zones) && item.zones.length ? item.zones : null;
-    const ids = picked || this._alarmAutoZones();
+    let ids = picked;
+    if (!ids) {
+      ids = this._alarmAutoZones();
+      // Cio' che il riconoscimento per classe scarta deve restare raggiungibile:
+      // un sensore che Alarmo protegge davvero compare anche se non ha una
+      // device_class fra quelle note. Solo in modo automatico: un elenco scritto
+      // a mano resta quello che l'utente ha scelto.
+      if (this._alarmIsAlarmo(this._hass.states[item.entity_id]) && this._alarmoSensors) {
+        const have = new Set(ids);
+        for (const k of Object.keys(this._alarmoSensors)) {
+          if (!have.has(k) && this._hass.states[k] && domainOf(k) === "binary_sensor") ids.push(k);
+        }
+      }
+    }
     if (!this._registry && !this._registryLoading) this._loadRegistry();
     const reg = this._registry || {};
     const entDev = reg.entityDevice || {};
@@ -7083,7 +7102,137 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /**
-   * The one line that decides whether the house can be armed.
+   * Il pannello e' Alarmo? Lo si capisce da cio' che dichiara, non dal nome.
+   *
+   * Lo stato fisico di un sensore Home Assistant lo conosce su ogni marca:
+   * aperto, chiuso, movimento. Quello che NESSUNA entita' dice e' il suo ruolo
+   * rispetto all'allarme: in quale modalita' e' attivo, se e' sempre attivo,
+   * se e' escluso. Questo lo sa solo il motore dell'allarme, e Alarmo lo
+   * espone in un comando suo. La card lo chiede soltanto quando il pannello
+   * porta la firma di Alarmo (i tre attributi qui sotto): su qualunque altra
+   * centrale non parte nessuna chiamata e la lista mostra il solo stato fisico.
+   */
+  _alarmIsAlarmo(st) {
+    const a = (st && st.attributes) || null;
+    return !!a && "arm_mode" in a && "open_sensors" in a && "bypassed_sensors" in a;
+  }
+
+  /**
+   * Valida la risposta di `alarmo/sensors`: una mappa entity_id -> configurazione
+   * con `modes` che e' una lista. Qualunque altra forma vale «non lo so»:
+   * mostrare un ruolo inventato e' peggio di non mostrarlo.
+   */
+  _alarmoShape(r) {
+    if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+    for (const v of Object.values(r)) {
+      if (!v || typeof v !== "object" || !Array.isArray(v.modes)) return null;
+    }
+    return r;
+  }
+
+  /**
+   * Legge da Alarmo la configurazione dei sensori (modalita', sempre attivo,
+   * abilitato). Il comando e' un semplice callback websocket di Alarmo, senza
+   * `require_admin`: lo puo' chiamare anche l'utente del chiosco.
+   *
+   * Si rilegge al piu' ogni 30 s, e solo mentre la card viene disegnata: nessun
+   * timer, quindi nessun ciclo. Se fallisce resta `null` e la card lo dice.
+   */
+  async _loadAlarmoSensors() {
+    if (this._alarmoLoading) return;
+    this._alarmoLoading = true;
+    let res = null;
+    try {
+      res = this._alarmoShape(await this._hass.callWS({ type: "alarmo/sensors" }));
+    } catch (err) { res = null; }
+    this._alarmoSensors = res;
+    this._alarmoAt = Date.now();
+    this._alarmoLoading = false;
+    this._touch();
+  }
+
+  /** La modalita' in cui il pannello e' armato adesso, o null se non lo e'. */
+  _alarmCurrentMode(st) {
+    if (!st) return null;
+    const s = st.state;
+    if (s === "disarmed" || s === "disarming" || !s) return null;
+    const m = st.attributes && st.attributes.arm_mode;
+    if (typeof m === "string" && ALARM_MODE_WORD[m]) return m;
+    return ALARM_MODE_OF_STATE[s] || null;
+  }
+
+  /** Cosa dice il contatto, in parole: dipende da cio' che misura. */
+  _alarmPhysical(z) {
+    if (z.unavailable) return { text: "non risponde", color: "#c77dff" };
+    const on = z.open;
+    const OK = "#06d6a0";
+    switch (z.dc) {
+      case "door": case "window": case "garage_door": case "opening":
+        return on ? { text: "aperto", color: "#ffd166" } : { text: "chiuso", color: OK };
+      case "motion":
+        return on ? { text: "movimento", color: "#4cc9f0" } : { text: "nessun movimento", color: OK };
+      case "occupancy":
+        return on ? { text: "presenza", color: "#4cc9f0" } : { text: "libero", color: OK };
+      case "vibration":
+        return on ? { text: "urto", color: "#ff924c" } : { text: "fermo", color: OK };
+      case "sound":
+        return on ? { text: "rumore", color: "#ff924c" } : { text: "silenzio", color: OK };
+      case "smoke": case "gas": case "carbon_monoxide":
+        return on ? { text: "ALLARME", color: "#ff3d71" } : { text: "ok", color: OK };
+      case "moisture":
+        return on ? { text: "bagnato", color: "#ff3d71" } : { text: "asciutto", color: OK };
+      case "tamper":
+        return on ? { text: "manomesso", color: "#ff3d71" } : { text: "integro", color: OK };
+      case "safety": case "problem":
+        return on ? { text: "problema", color: "#ff3d71" } : { text: "ok", color: OK };
+      default:
+        return on ? { text: "attivo", color: "#ffd166" } : { text: "a riposo", color: OK };
+    }
+  }
+
+  /**
+   * Il ruolo di un sensore rispetto all'allarme, o null se non si puo' dire.
+   *
+   * Cinque risposte vere e una onesta:
+   *   unmanaged  Home Assistant lo vede, Alarmo no: non protegge niente.
+   *   disabled   Alarmo lo conosce ma e' spento.
+   *   bypassed   armato, ma escluso (la centrale lo ignora per questa volta).
+   *   always     sempre attivo (fumo, manomissione: non dipende dalla modalita').
+   *   active     armato in una modalita' che lo comprende.
+   *   inactive   armato in una modalita' che NON lo comprende (normale: il
+   *              movimento interno in «In casa»).
+   * A centrale disarmata non esiste una modalita' corrente: si dice in quali
+   * si attivera' (`idle`) oppure che non e' attivo in nessuna (`none`).
+   */
+  _alarmRole(z, cfg, attrs, mode) {
+    if (!cfg) return null;
+    const c = cfg[z.id];
+    const OK = "#06d6a0", DIM = "#8ea3b8", WARN = "#ff924c", AMBER = "#ffd166";
+    if (!c) return { key: "unmanaged", text: "non gestito da Alarmo", color: WARN };
+    if (c.enabled === false) return { key: "disabled", text: "disattivato in Alarmo", color: DIM };
+    const modes = Array.isArray(c.modes) ? c.modes : [];
+    const byp = Array.isArray(attrs && attrs.bypassed_sensors) ? attrs.bypassed_sensors : [];
+    const word = (m) => ALARM_MODE_WORD[m] || m;
+    if (mode) {
+      if (byp.includes(z.id)) return { key: "bypassed", text: "escluso", color: AMBER };
+      if (c.always_on) return { key: "always", text: "sempre attivo", color: OK };
+      if (modes.includes(mode)) return { key: "active", text: "attivo", color: OK };
+      return { key: "inactive", text: "non attivo in " + word(mode), color: DIM };
+    }
+    if (c.always_on) return { key: "always", text: "sempre attivo", color: OK };
+    if (!modes.length) return { key: "none", text: "non attivo in nessuna modalità", color: WARN };
+    return { key: "idle", text: "si attiva con: " + modes.map(word).join(" · "), color: DIM };
+  }
+
+  /**
+   * L'elenco dei sensori con il loro stato rispetto all'allarme.
+   *
+   * Prima la card diceva solo «N sensori, tutto a posto»: una porta chiusa e un
+   * sensore che l'allarme non vede apparivano uguali. Adesso ogni sensore e'
+   * una riga con DUE risposte distinte: com'e' il contatto (aperto, chiuso,
+   * movimento) e che cosa fa per l'allarme (attivo, non attivo in questa
+   * modalita', escluso, non gestito). Le righe che richiedono attenzione
+   * stanno in cima.
    *
    * An open contact does not stop Home Assistant from calling `alarm_arm_away`
    * - the panel decides that, and most panels either refuse or arm with the
@@ -7091,6 +7240,14 @@ class CyborgDashboard extends HTMLElement {
    */
   _alarmZonesBlock(item) {
     if (item.show_zones === false) return "";
+    const panel = this._hass.states[item.entity_id];
+    const aware = this._alarmIsAlarmo(panel);
+    if (aware && !this._alarmoLoading
+        && (!this._alarmoAt || Date.now() - this._alarmoAt > 30000)) this._loadAlarmoSensors();
+    const cfg = aware ? (this._alarmoSensors || null) : null;
+    const attrs = (panel && panel.attributes) || {};
+    const mode = cfg ? this._alarmCurrentMode(panel) : null;
+
     const rows = this._alarmZones(item).filter((z) => !z.missing);
     if (!rows.length) return "";
     const lowLevel = Number.isFinite(Number(item.battery_warn)) ? Number(item.battery_warn) : 20;
@@ -7107,14 +7264,62 @@ class CyborgDashboard extends HTMLElement {
           <ha-icon icon="${esc(icon)}"></ha-icon><b>${list.length}</b> ${esc(label)}
         </button>` : "";
 
-    const detail = (list) => list.map((z) => `<button class="az-row" data-more-info="${esc(z.id)}">
-        <span class="az-k">${esc(z.name)}</span>
-        <span class="az-a">${esc(z.area)}</span>
-        <span class="az-s">${esc(z.unavailable ? "non risponde"
-          : z.battery !== null ? z.battery.toFixed(0) + "%" : z.open ? "aperto" : "")}</span>
-      </button>`).join("");
-
     const problems = alarmNow.concat(tampered, gone, flat);
+    const roleMap = new Map(rows.map((z) => [z.id, this._alarmRole(z, cfg, attrs, mode)]));
+    const roleOf = (z) => roleMap.get(z.id) || null;
+
+    // Una riga di sintesi che NON dice «tutto a posto»: dice quanti sensori
+    // l'allarme sta davvero usando, e quanti no.
+    let summary = "";
+    if (cfg) {
+      const roles = rows.map(roleOf);
+      const n = (...keys) => roles.filter((r) => r && keys.includes(r.key)).length;
+      const parts = [];
+      parts.push(mode ? n("active", "always") + " attivi" : n("idle", "always") + " protetti");
+      if (n("inactive")) parts.push(n("inactive") + " non attivi in " + ALARM_MODE_WORD[mode]);
+      if (n("bypassed")) parts.push(n("bypassed") + " esclusi");
+      if (n("unmanaged")) parts.push(n("unmanaged") + " non gestiti da Alarmo");
+      if (n("none")) parts.push(n("none") + " senza modalità");
+      if (n("disabled")) parts.push(n("disabled") + " disattivati");
+      const attention = n("unmanaged", "none", "disabled", "bypassed") > 0;
+      summary = `<span class="az-sum" style="--sc:${attention ? "#ffd166" : "#06d6a0"}">
+          <ha-icon icon="${attention ? "mdi:shield-alert-outline" : "mdi:shield-check"}"></ha-icon>
+          ${esc(rows.length + " sensori · " + parts.join(" · "))}</span>`;
+    } else if (aware && this._alarmoAt && !this._alarmoSensors) {
+      // Alarmo c'e' ma non risponde: meglio dirlo che mostrare ruoli a caso.
+      summary = `<span class="az-sum" style="--sc:#ffd166">
+          <ha-icon icon="mdi:shield-alert-outline"></ha-icon>
+          ${esc(rows.length + " sensori · Alarmo non risponde: lo stato rispetto all'allarme non è disponibile")}</span>`;
+    } else if (!problems.length && !open.length) {
+      summary = `<span class="az-sum" style="--sc:#06d6a0">
+          <ha-icon icon="mdi:shield-check"></ha-icon> ${esc(rows.length + " sensori, nessun guasto")}</span>`;
+    }
+
+    const bad = new Set(problems.map((z) => z.id));
+    const rank = (z) => {
+      if (bad.has(z.id)) return 0;
+      if (open.includes(z)) return 1;
+      const r = roleOf(z);
+      if (r && ["unmanaged", "none", "disabled", "bypassed"].includes(r.key)) return 2;
+      return 3;
+    };
+    const ordered = rows.slice().sort((a, b) => rank(a) - rank(b)
+      || String(a.area).localeCompare(String(b.area), "it")
+      || String(a.name).localeCompare(String(b.name), "it"));
+
+    const line = (z) => {
+      const p = this._alarmPhysical(z);
+      const r = roleOf(z);
+      const sub = [z.area, z.kind, z.battery !== null ? "batt. " + z.battery.toFixed(0) + "%" : ""]
+        .filter(Boolean).join(" · ");
+      return `<button class="az-r" data-more-info="${esc(z.id)}" style="--rc:${esc(p.color)}">
+          <span class="az-dot"></span>
+          <span class="az-n"><b>${esc(z.name)}</b><small>${esc(sub)}</small></span>
+          <span class="az-p">${esc(p.text)}</span>
+          ${r ? `<span class="az-role" data-role="${esc(r.key)}" style="--ro:${esc(r.color)}">${esc(r.text)}</span>` : ""}
+        </button>`;
+    };
+
     return `<div class="al-zones">
       <div class="az-chips">
         ${chip(alarmNow, "in allarme", "mdi:alert-octagon", "#ff3d71")}
@@ -7122,14 +7327,11 @@ class CyborgDashboard extends HTMLElement {
         ${chip(open, "aperte", "mdi:door-open", "#ffd166")}
         ${chip(gone, "non rispondono", "mdi:wifi-off", "#c77dff")}
         ${chip(flat, "batteria scarica", "mdi:battery-alert", "#ff924c")}
-        ${!problems.length && !open.length
-          ? `<span class="az-ok"><ha-icon icon="mdi:shield-check"></ha-icon> ${rows.length} sensori, tutto a posto</span>` : ""}
+        ${summary}
       </div>
-      ${open.length ? `<div class="az-list">
-        <h6>Aperte adesso — inserendo, la centrale le escluderà o rifiuterà</h6>
-        ${detail(open)}</div>` : ""}
-      ${problems.length ? `<div class="az-list bad">
-        <h6>Da guardare</h6>${detail(problems)}</div>` : ""}
+      ${open.length ? `<div class="az-note">${panel && /^armed_|^arming|^triggered|^pending/.test(panel.state)
+        ? "Aperte adesso" : "Aperte adesso — inserendo, la centrale le escluderà o rifiuterà"}</div>` : ""}
+      <div class="az-all">${ordered.map(line).join("")}</div>
     </div>`;
   }
 
@@ -17413,6 +17615,26 @@ button.mini.danger.armed ha-icon{color:#fff}
 .az-a{font:10px ui-monospace,monospace;opacity:.4}
 .az-s{font:600 10px ui-monospace,monospace;opacity:.65}
 .al-zones .az-list.bad .az-s{color:#ff924c}
+.az-sum{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:var(--sc,#06d6a0)}
+.az-sum ha-icon{--mdc-icon-size:15px;flex-shrink:0}
+.az-note{font-size:10px;opacity:.55}
+.az-all{display:flex;flex-direction:column}
+.az-r{display:grid;grid-template-columns:10px minmax(0,1fr) auto;grid-template-areas:"dot name phys" ". role role";
+  column-gap:9px;row-gap:3px;align-items:center;width:100%;padding:8px 0;background:transparent;border:0;
+  color:inherit;text-align:left;cursor:pointer;
+  border-bottom:1px solid color-mix(in srgb,var(--divider-color) 55%,transparent)}
+.az-r:last-child{border-bottom:0}
+.az-r:hover .az-n b{color:var(--accent)}
+.az-dot{grid-area:dot;width:8px;height:8px;border-radius:50%;background:var(--rc);
+  box-shadow:0 0 6px color-mix(in srgb,var(--rc) 70%,transparent)}
+.az-n{grid-area:name;min-width:0}
+.az-n b{display:block;font-size:11.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.az-n small{display:block;font:9.5px ui-monospace,monospace;opacity:.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.az-p{grid-area:phys;font:600 10.5px ui-monospace,monospace;color:var(--rc);white-space:nowrap}
+.az-role{grid-area:role;justify-self:start;max-width:100%;font:600 9.5px ui-monospace,monospace;letter-spacing:.03em;
+  padding:2px 8px;border-radius:99px;color:var(--ro);
+  border:1px solid color-mix(in srgb,var(--ro) 40%,transparent);
+  background:color-mix(in srgb,var(--ro) 10%,transparent)}
 .al-head{display:flex;align-items:center;gap:11px;margin-top:12px;padding:11px 12px;border-radius:13px;
   background:color-mix(in srgb,var(--al) 11%,transparent);border:1px solid color-mix(in srgb,var(--al) 34%,transparent)}
 .al-head>ha-icon{--mdc-icon-size:26px;color:var(--al);flex-shrink:0}
@@ -18898,7 +19120,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.74.0";
+const CYBORG_BUILD = "0.75.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

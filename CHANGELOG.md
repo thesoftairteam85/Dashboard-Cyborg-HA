@@ -4,6 +4,40 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.75.0] - 2026-11-24
+
+### La card Sicurezza elenca ogni sensore e dice cosa fa per l'allarme
+
+Prima la card scriveva «N sensori, tutto a posto»: una porta chiusa, un
+movimento che l'allarme ignora e un sensore che Alarmo non conosce
+apparivano uguali. Adesso ogni sensore e' una riga con **due** risposte:
+
+- **com'e' il contatto**, con parole del sensore: aperto / chiuso,
+  movimento / nessun movimento, integro / manomesso, asciutto / bagnato;
+- **che cosa fa per l'allarme**: attivo, non attivo nella modalita' corrente
+  («non attivo in In casa»), sempre attivo, escluso, disattivato in Alarmo,
+  non gestito da Alarmo. A centrale disarmata dice in quali modalita' si
+  attivera'.
+
+In cima stanno i sensori che chiedono attenzione (guasti, aperture, esclusi,
+non gestiti). La riga di sintesi dice quanti sensori l'allarme sta usando
+davvero, non «tutto a posto».
+
+- **Dove lo legge.** Dal comando websocket `alarmo/sensors` di Alarmo (non e'
+  riservato agli amministratori: funziona anche con l'utente del chiosco) e
+  dagli attributi del pannello (`arm_mode`, `bypassed_sensors`). Si attiva
+  solo se il pannello ha la firma di Alarmo; su altre centrali la lista
+  mostra il solo stato fisico e non parte alcuna chiamata. Rilettura al piu'
+  ogni 30 s, solo mentre la card e' disegnata.
+- **Onesta'.** Se Alarmo non risponde la card lo dice, non mostra ruoli
+  inventati.
+- **Niente si perde.** Un sensore che Alarmo protegge ma la cui classe non e'
+  fra quelle note compare comunque (solo in modo automatico: un elenco scelto
+  a mano resta quello che hai scelto).
+- Il sensore di movimento e di presenza erano gia' fra le classi riconosciute.
+
+Test: frontend 1700, visual 489 (scena nuova «79b»).
+
 ## [0.74.0] - 2026-11-18
 
 Dopo il trasloco: rinomine, stanze nuove, una casa vecchia rimasta dentro HA.

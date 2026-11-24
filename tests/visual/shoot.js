@@ -1775,6 +1775,78 @@ const DEFAULT_DASH = {
      zn.scrollW + " vs " + zn.winW);
   await page.screenshot({ path: path.resolve(__dirname, "79-alarm-zones.png") });
 
+  // --- 0.75.0: la lista sensori con il ruolo di ciascuno rispetto all'allarme
+  const alr = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const st = el._hass.states;
+    const mk = (id, dc, state, name) => { st[id] = { entity_id: id, state,
+      attributes: { friendly_name: name, device_class: dc }, last_changed: new Date().toISOString(),
+      last_updated: new Date().toISOString(), context: {} }; };
+    mk("binary_sensor.vz_porta", "door", "off", "Porta ingresso");
+    mk("binary_sensor.vz_portafinestra", "door", "off", "Porta finestra");
+    mk("binary_sensor.vz_finestra", "window", "on", "Finestra bagno");
+    mk("binary_sensor.vz_movimento", "motion", "off", "Movimento soggiorno");
+    mk("binary_sensor.vz_garage", "garage_door", "off", "Garage");
+    st["alarm_control_panel.allarme"] = Object.assign({}, st["alarm_control_panel.allarme"], {
+      state: "armed_home",
+      attributes: Object.assign({}, st["alarm_control_panel.allarme"].attributes, {
+        arm_mode: "home", open_sensors: { "binary_sensor.vz_finestra": "on" },
+        bypassed_sensors: ["binary_sensor.vz_finestra"], delay: null }) });
+    el._alarmoSensors = {
+      "binary_sensor.vz_porta":        { modes: ["away", "home", "night"], always_on: false, enabled: true },
+      "binary_sensor.vz_portafinestra":{ modes: ["away", "night"], always_on: false, enabled: true },
+      "binary_sensor.vz_finestra":     { modes: ["away", "home"], always_on: false, enabled: true },
+      "binary_sensor.vz_movimento":    { modes: ["away"], always_on: false, enabled: true },
+    };   // il garage non e' configurato in Alarmo
+    el._alarmoAt = Date.now() + 3600000;   // niente richiesta vera durante lo scatto
+    el._alarmoLoading = false;
+    el._signature = ""; el.render();
+    await new Promise((r) => setTimeout(r, 400));
+    const zonesEl = document.querySelector(".al-zones");
+    const card = zonesEl.closest(".item");
+    const cb = card.getBoundingClientRect();
+    const rows = Array.from(card.querySelectorAll(".az-r")).map((r) => {
+      const b = r.getBoundingClientRect();
+      const role = r.querySelector(".az-role");
+      return { id: r.getAttribute("data-more-info"), h: Math.round(b.height), right: Math.round(b.right),
+        phys: r.querySelector(".az-p").textContent.trim(),
+        role: role ? role.textContent.trim() : "", roleKey: role ? role.getAttribute("data-role") : "",
+        roleRight: role ? Math.round(role.getBoundingClientRect().right) : 0,
+        dot: getComputedStyle(r.querySelector(".az-dot")).backgroundColor };
+    });
+    const find = (id) => rows.find((r) => r.id === id) || {};
+    return { rows, cardRight: Math.round(cb.right), n: rows.length,
+      sum: (card.querySelector(".az-sum") || {}).textContent || "",
+      scrollW: document.documentElement.scrollWidth, winW: window.innerWidth,
+      porta: find("binary_sensor.vz_porta"), pf: find("binary_sensor.vz_portafinestra"),
+      mov: find("binary_sensor.vz_movimento"), gar: find("binary_sensor.vz_garage"),
+      fin: find("binary_sensor.vz_finestra"),
+      firstId: rows.length ? rows[0].id : null };
+  });
+  ok("la lista ha una riga per ogni sensore sorvegliato", alr.n >= 5, String(alr.n));
+  ok("In casa: la porta e' chiusa e attiva",
+     alr.porta.phys === "chiuso" && alr.porta.roleKey === "active", JSON.stringify(alr.porta));
+  ok("In casa: la porta finestra e' chiusa ma NON attiva, e lo dice",
+     alr.pf.phys === "chiuso" && alr.pf.roleKey === "inactive" && /In casa/.test(alr.pf.role),
+     JSON.stringify(alr.pf));
+  ok("In casa: il movimento e' a riposo e non attivo",
+     /nessun movimento/.test(alr.mov.phys) && alr.mov.roleKey === "inactive", JSON.stringify(alr.mov));
+  ok("il garage che Alarmo non conosce e' «non gestito»",
+     alr.gar.roleKey === "unmanaged", JSON.stringify(alr.gar));
+  ok("una finestra aperta ed esclusa e' ambra e dice «escluso»",
+     alr.fin.phys === "aperto" && alr.fin.roleKey === "bypassed" && /255,\s*209,\s*102/.test(alr.fin.dot),
+     JSON.stringify(alr.fin));
+  ok("quello che richiede attenzione sta in cima, non in fondo",
+     alr.firstId === "binary_sensor.vz_finestra", String(alr.firstId));
+  ok("la sintesi dice quanti sono attivi e quanti no, non «tutto a posto»",
+     /attivi/.test(alr.sum) && !/tutto a posto/.test(alr.sum), alr.sum);
+  ok("riga e ruolo non escono dalla card",
+     alr.rows.every((r) => r.right <= alr.cardRight + 1 && r.roleRight <= alr.cardRight + 1),
+     JSON.stringify([alr.cardRight, alr.rows.map((r) => [r.right, r.roleRight])]));
+  ok("le righe sono toccabili", alr.rows.every((r) => r.h >= 36), JSON.stringify(alr.rows.map((r) => r.h)));
+  ok("lista sensori: nessuno scorrimento orizzontale", alr.scrollW <= alr.winW + 1);
+  await page.screenshot({ path: path.resolve(__dirname, "79b-alarm-sensor-list.png") });
+
   const znEd = await page.evaluate(async () => {
     const el = window.__EL__;
     const sec = el._sections().find((s2) => s2.items.some((i) => i.entity_id
