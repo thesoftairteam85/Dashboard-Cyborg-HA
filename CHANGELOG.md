@@ -4,6 +4,41 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.77.0] - 2026-11-25
+
+### Nuova card «Consumi per dispositivo»: chi ha consumato, e quando
+
+Nata da una domanda di Oscar: «stanotte alle 3 il contatore segnava 3 kW, chi
+e' stato?». La card Andamento disegna una linea per grandezza: le linee si
+incrociano, non si sommano, e quello che nessuna presa misura non compariva.
+
+- **Il generale e' la pila.** I carichi misurati sono impilati uno sopra
+  l'altro e in cima c'e' **«Non misurato»** = generale meno somma dei carichi.
+  Sui dati veri della notte del 24/11: asciugatrice 01:40-04:05 (1,5 kWh) e
+  uno spunto di 2,26 kW alle 03:05 che nessuna presa vedeva.
+- **Zoom trascinando**, come lo Storico di Sentinella; doppio clic o «Togli
+  zoom» per uscire. Lo zoom **rilegge** i dati al passo giusto, non ingrandisce
+  le medie: fino a 3 ore storico grezzo (lo spunto vero), fino a 3 giorni
+  statistiche a 5 minuti (solo dentro la loro vita: il recorder le cancella
+  dopo `keep_days`, e un grafico vuoto direbbe «nessun consumo»), poi orarie
+  e giornaliere. La card dice a parole quale risoluzione sta usando.
+- **Mirino**: fermandosi su un istante, il generale, il suo picco
+  nell'intervallo e ogni carico che stava consumando.
+- **Eventi riconosciuti** sopra il grafico: cicli dei dispositivi con orario e
+  kWh, picchi non misurati, lunghi tratti di «Non misurato». Toccarli porta lo
+  zoom li'. I picchi brevi ripetuti si raggruppano in una riga sola.
+- **Legenda con i kWh** del periodo e la quota di ciascuno; ogni voce si
+  accende e si spegne. Il picco del generale resta tratteggiato.
+- Contatore e prese si **scelgono** nell'editor: la card propone i candidati
+  (contatore dal nome, prese dal pannello Energia), non li applica (vincolo 7).
+  Fino a 12 carichi; un carico nidificato dentro un altro scelto non viene
+  contato due volte.
+- SVG scritto a mano alla larghezza vera, decimali dell'asse presi dal passo,
+  nessuna libreria, nessuna animazione.
+
+Test: `frontend077` 59, `consumption` 8, visiva `consumi.js` 21 (scene
+90-95); suite esistenti invariate e verdi.
+
 ## [0.76.0] - 2026-11-25
 
 ### Anteprime delle videocamere: piccola, media, grande

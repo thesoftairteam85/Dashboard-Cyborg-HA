@@ -113,6 +113,9 @@ SCHEMA_VERSION = 25
 #: what most readers can tell apart; it exists so an automatic source cannot
 #: quietly turn a chart into a hairball.
 MAX_TREND_SERIES = 20
+# Mirrors MAX_CONS_LOADS / CONS_RANGES in cyborg-dashboard.js.
+MAX_CONS_LOADS = 12
+CONS_HOURS = (6, 24, 72, 168, 720)
 
 #: La card Raccolta. Sei tipi sono gia' piu' di quanti ne usi un comune
 #: italiano; il tetto esiste perche' una lista incollata da fuori non possa
@@ -655,6 +658,32 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
                 if row:
                     clean[group] = row
         result["limits"] = clean
+    if result.get("type") == "consumption":
+        # Consumi per dispositivo (0.77.0): il generale in cima, i carichi
+        # impilati sotto. Solo entita' scelte dall'utente: la card SUGGERISCE
+        # il contatore e le prese, non le applica da sola (vincolo 7).
+        total = result.get("total")
+        result["total"] = total if isinstance(total, str) and "." in total else ""
+        loads = result.get("loads")
+        clean_loads: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if isinstance(loads, list):
+            for row in loads:
+                if not isinstance(row, dict):
+                    continue
+                entity = row.get("entity")
+                if not isinstance(entity, str) or "." not in entity or entity in seen:
+                    continue
+                if entity == result["total"]:
+                    continue
+                seen.add(entity)
+                clean_loads.append({"entity": entity, "name": str(row.get("name") or "")[:60]})
+        result["loads"] = clean_loads[:MAX_CONS_LOADS]
+        try:
+            hours = int(float(result.get("hours", 24)))
+        except (TypeError, ValueError):
+            hours = 24
+        result["hours"] = hours if hours in CONS_HOURS else 24
     if result.get("type") == "trend":
         # Where the lines come from.
         #

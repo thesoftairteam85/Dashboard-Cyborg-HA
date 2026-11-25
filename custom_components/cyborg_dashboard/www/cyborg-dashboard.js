@@ -1050,6 +1050,7 @@ const CARD_TYPES = [
   { k: "comfort", l: "Temperature", solo: true, d: "Temperatura e umidità stanza per stanza, con il giudizio di comfort e la scala colore." },
   { k: "ev", l: "Auto elettrica", solo: true, d: "Stato di carica, potenza alla colonnina, autonomia e tempo alla ricarica completa." },
   { k: "room", l: "Stanza", solo: true, d: "Una stanza intera in una card: luci, clima, aperture e sensori dell'area, con i comandi." },
+  { k: "consumption", l: "Consumi per dispositivo", solo: true, d: "Chi ha consumato e quando: i dispositivi impilati sotto il generale, il «Non misurato» in cima, zoom trascinando sul grafico." },
   { k: "trend", l: "Confronto andamenti", solo: true, d: "Più grandezze sullo stesso grafico: temperature interne contro l'esterna, umidità, potenze." },
   { k: "lights", l: "Luci", solo: true, d: "Tutte le luci per stanza: accensione, intensità, colore, temperatura, effetti e orari." },
   { k: "irrigation", l: "Irrigazione", solo: true, d: "Zone di irrigazione: avvio a tempo garantito da Home Assistant, umidità del terreno, programmi." },
@@ -1177,6 +1178,362 @@ function trendTimeLabel(t, hours) {
   if (hours > 72) return d.getDate() + "/" + (d.getMonth() + 1);
   if (hours > 2) return two(d.getHours()) + ":00";
   return two(d.getHours()) + ":" + two(d.getMinutes());
+}
+
+/* ==========================================================================
+ * CONSUMI PER DISPOSITIVO (0.77.0)
+ *
+ * Nata da una domanda precisa: «stanotte alle 3 il contatore segnava 3 kW,
+ * chi e' stato?». La card Andamento disegnava una linea per grandezza e non
+ * sapeva rispondere: le linee si incrociano, non si sommano, e quello che
+ * nessuna presa misura non compariva da nessuna parte.
+ *
+ * Qui il generale e' la PILA: i carichi misurati uno sopra l'altro, e in cima
+ * «Non misurato» = generale - somma dei carichi. E' l'unico modo onesto di
+ * disegnare una casa senza un misuratore su ogni linea, ed e' proprio la fascia
+ * che la notte del 24/11 mostrava 1,5 kW che nessuna presa vedeva.
+ *
+ * Modello visivo: il grafico «Storico» di Sentinella (stesso autore, stesse
+ * scelte: SVG scritto alla larghezza VERA, zoom trascinando, mirino col
+ * dettaglio, nessuna animazione, nessuna libreria).
+ * ========================================================================== */
+
+const CONS_RANGES = [
+  { h: 6, l: "6 ore" }, { h: 24, l: "24 ore" }, { h: 72, l: "3 giorni" },
+  { h: 168, l: "7 giorni" }, { h: 720, l: "30 giorni" },
+];
+/** Massimo di carichi impilati: oltre, i colori si ripeterebbero. Mirrors schema.py. */
+const MAX_CONS_LOADS = 12;
+/** Grigio di «Non misurato»: non e' un dispositivo, non deve sembrarlo. */
+const CONS_REST_COLOR = "#8a94a6";
+
+/**
+ * Da dove leggere, secondo quanto tempo si guarda.
+ *
+ * - fino a 3 ore: lo STORICO GREZZO. Il picco di stanotte durava secondi: in
+ *   una media di 5 minuti diventa una gobba di 150 W, nel grezzo e' 2,26 kW.
+ * - fino a 3 giorni: statistiche a 5 minuti, MA solo dentro la loro vita.
+ *   Home Assistant le cancella dopo `keep_days` del recorder (10 di
+ *   fabbrica, verificato su core 2026.11.1): oltre, chiederle restituisce
+ *   niente, e un grafico vuoto direbbe «nessun consumo». Margine di mezzo
+ *   giorno perche' il purge gira di notte.
+ * - fino a 62 giorni: statistiche orarie, che sono permanenti.
+ * - oltre: giornaliere.
+ */
+function consResolution(spanMs, t0, now, keepDays) {
+  const H = 3600000;
+  if (spanMs <= 3 * H) return "raw";
+  const keep = (Number(keepDays) > 0 ? Number(keepDays) : 10) - 0.5;
+  if (spanMs <= 72 * H && t0 >= now - keep * 24 * H) return "5minute";
+  if (spanMs <= 62 * 24 * H) return "hour";
+  return "day";
+}
+
+/** Un orario dalla risposta delle statistiche: millisecondi (2026.x) o ISO. */
+function consTime(v) {
+  if (typeof v === "number") return v < 1e12 ? v * 1000 : v;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * Le righe di `statistics_during_period` come bucket {t0, t1, mean, max}.
+ * Una riga senza media non e' uno zero: e' un buco, e resta tale.
+ */
+function consBucketsFromStats(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    const a = consTime(r.start), b = consTime(r.end);
+    const mean = num(r.mean);
+    if (a === null || mean === null) continue;
+    const mx = num(r.max);
+    out.push({ t0: a, t1: b === null ? a : b, mean, max: mx === null ? mean : mx });
+  }
+  return out.sort((p, q) => p.t0 - q.t0);
+}
+
+/**
+ * Lo storico grezzo (campioni a gradino) diviso in `n` bucket uguali, con la
+ * media PESATA SUL TEMPO e il massimo di ogni bucket.
+ *
+ * Pesata sul tempo e non sui campioni: uno Shelly che manda dieci letture in
+ * un secondo durante uno spunto e una sola nei cinque minuti di quiete dopo
+ * farebbe della media aritmetica il valore dello spunto.
+ *
+ * Il valore di un campione vale fino al campione dopo. Dopo l'ultimo vale
+ * fino a `now`, non fino a fine finestra: oltre adesso non si sa niente.
+ */
+function consBucketsFromHistory(points, t0, t1, n, now) {
+  const pts = (points || []).filter((p) => p && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+    .sort((a, b) => a[0] - b[0]);
+  const step = (t1 - t0) / n;
+  const acc = Array.from({ length: n }, (_, i) => ({
+    t0: t0 + i * step, t1: t0 + (i + 1) * step, w: 0, dur: 0, max: null }));
+  const stop = Math.min(t1, now === undefined ? t1 : now);
+  for (let k = 0; k < pts.length; k++) {
+    const a = Math.max(pts[k][0], t0);
+    const b = Math.min(k + 1 < pts.length ? pts[k + 1][0] : stop, stop);
+    if (b <= a) continue;
+    const v = pts[k][1];
+    let i = Math.max(0, Math.floor((a - t0) / step));
+    for (; i < n && acc[i].t0 < b; i++) {
+      const lo = Math.max(a, acc[i].t0), hi = Math.min(b, acc[i].t1);
+      if (hi <= lo) continue;
+      acc[i].w += v * (hi - lo);
+      acc[i].dur += hi - lo;
+      acc[i].max = acc[i].max === null ? v : Math.max(acc[i].max, v);
+    }
+  }
+  // Un bucket coperto per meno di un terzo non ha una media credibile.
+  return acc.filter((b) => b.dur > step / 3)
+    .map((b) => ({ t0: b.t0, t1: b.t1, mean: b.w / b.dur, max: b.max }));
+}
+
+/**
+ * La pila, bucket per bucket.
+ *
+ * `total` e ogni `loads[i]` sono liste di bucket {t0, mean, max}. La griglia
+ * e' quella del generale: senza generale non c'e' pila da fare.
+ *
+ * Restituisce per ogni bucket le potenze dei carichi (null = nessun dato, che
+ * NON e' zero), il generale, il resto e `over` quando i carichi sommano piu'
+ * del generale oltre la tolleranza. In quel caso il resto vale zero e il
+ * bucket lo dice: un «Non misurato» negativo sarebbe un numero che non sta in
+ * piedi (vincolo 9), e di solito vuol dire un carico contato due volte.
+ */
+function consStack(total, loads) {
+  const idx = loads.map((list) => {
+    const m = new Map();
+    for (const b of list || []) m.set(Math.round(b.t0 / 1000), b);
+    return m;
+  });
+  return (total || []).map((b) => {
+    const key = Math.round(b.t0 / 1000);
+    const vals = idx.map((m) => {
+      const x = m.get(key);
+      return x ? Math.max(0, x.mean) : null;
+    });
+    const maxs = idx.map((m) => {
+      const x = m.get(key);
+      return x ? Math.max(0, x.max) : null;
+    });
+    const sum = vals.reduce((s, v) => s + (v || 0), 0);
+    const tot = Math.max(0, b.mean);
+    const gap = tot - sum;
+    const over = gap < -Math.max(50, tot * 0.1);
+    return { t0: b.t0, t1: b.t1, total: tot, totalMax: Math.max(tot, b.max ?? tot),
+      loads: vals, loadMax: maxs, rest: Math.max(0, gap), over };
+  });
+}
+
+/**
+ * La BASE di una serie: il 20esimo percentile. Non la mediana: l'asciugatrice
+ * della notte del 24/11 e' stata accesa per piu' di meta' della finestra, e
+ * con la mediana la sua «base» era 700 W - cioe' il ciclo stesso, che cosi'
+ * non risultava piu' un ciclo.
+ */
+function consBase(values) {
+  const v = values.filter((x) => x !== null && Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return 0;
+  return v[Math.floor((v.length - 1) * 0.2)];
+}
+
+/** Mediana, per il passo tipico dei campioni. */
+function consMedian(values) {
+  const v = values.filter((x) => x !== null && Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+/**
+ * Energia in kWh di una serie di bucket (media x durata).
+ * Il bucket in corso conta solo fino ad adesso.
+ */
+function consKwh(rows, pick, now) {
+  let wh = 0;
+  for (const r of rows) {
+    const v = pick(r);
+    if (v === null || !Number.isFinite(v)) continue;
+    const end = Math.min(r.t1, now === undefined ? r.t1 : now);
+    if (end > r.t0) wh += v * (end - r.t0) / 3600000;
+  }
+  return wh / 1000;
+}
+
+/**
+ * Cosa e' successo nella finestra, trovato dai dati: i cicli dei carichi e i
+ * picchi che nessun carico misurato spiega.
+ *
+ * Ciclo = il carico sopra la sua soglia per almeno 10 minuti. La soglia e'
+ * max(40 W, 3 x la sua base): la presa del bagno che assorbe 25 W tutto il
+ * giorno non e' un evento, l'asciugatrice che sale a 700 W si'. Due tratti
+ * separati da un solo bucket sotto soglia sono lo stesso ciclo (le resistenze
+ * dell'asciugatrice staccano e riattaccano).
+ *
+ * Picco non misurato = il massimo del generale meno quello che i carichi
+ * spiegano in quel bucket, oltre max(800 W, 3 x la base del generale).
+ * Con le statistiche il massimo del generale e la media dei carichi non sono
+ * nello stesso istante: per questo il picco si chiama «fino a», non «di».
+ */
+function consEvents(stack, names, minMinutes) {
+  const out = [];
+  const minDur = (minMinutes || 10) * 60000;
+  names.forEach((name, i) => {
+    const series = stack.map((b) => b.loads[i]);
+    const thr = Math.max(40, 3 * consBase(series));
+    let cur = null, gap = 0;
+    const close = () => {
+      if (cur && cur.t1 - cur.t0 >= minDur && cur.kwh >= 0.05) out.push(cur);
+      cur = null; gap = 0;
+    };
+    stack.forEach((b) => {
+      const v = b.loads[i];
+      if (v !== null && v > thr) {
+        if (!cur) cur = { kind: "load", index: i, name, t0: b.t0, t1: b.t1, kwh: 0, peak: 0 };
+        cur.t1 = b.t1; gap = 0;
+        cur.kwh += v * (b.t1 - b.t0) / 3.6e9;
+        cur.peak = Math.max(cur.peak, b.loadMax[i] ?? v);
+      } else if (cur && gap < 1) {
+        gap++;
+      } else {
+        close();
+      }
+    });
+    close();
+  });
+  // Il «Non misurato» che dura: la cena delle 17-21 col forno e il piano,
+  // nessuno dei due su una presa. Non e' un picco, e' un consumo: si conta in
+  // kWh come un ciclo, e i suoi bucket non generano picchi.
+  const restSeries = stack.map((b) => b.rest);
+  const thrRest = Math.max(300, 3 * consBase(restSeries));
+  let run = null, rgap = 0;
+  const closeRun = () => {
+    if (run && run.t1 - run.t0 >= Math.max(minDur, 15 * 60000) && run.kwh >= 0.1) out.push(run);
+    run = null; rgap = 0;
+  };
+  stack.forEach((b) => {
+    if (b.rest > thrRest) {
+      if (!run) run = { kind: "rest", index: -1, name: "Non misurato", t0: b.t0, t1: b.t1, kwh: 0, peak: 0 };
+      run.t1 = b.t1; rgap = 0;
+      run.kwh += b.rest * (b.t1 - b.t0) / 3.6e9;
+      run.peak = Math.max(run.peak, b.rest);
+    } else if (run && rgap < 1) rgap++;
+    else closeRun();
+  });
+  closeRun();
+  const inRest = (b) => out.some((e) => e.kind === "rest" && b.t0 >= e.t0 && b.t0 < e.t1);
+
+  const base = consBase(stack.map((b) => b.total));
+  const thrPeak = Math.max(800, 3 * base);
+  let peak = null;
+  stack.forEach((b) => {
+    if (inRest(b)) { peak = null; return; }
+    const known = b.loads.reduce((s, v) => s + (v || 0), 0);
+    const extra = b.totalMax - known;
+    if (extra > thrPeak) {
+      if (peak && b.t0 - peak.t1 <= (b.t1 - b.t0)) {
+        peak.t1 = b.t1;
+        if (extra > peak.peak) { peak.peak = extra; peak.at = b.t0; peak.total = b.totalMax; }
+      } else {
+        peak = { kind: "peak", name: "Picco non misurato", t0: b.t0, t1: b.t1,
+          peak: extra, at: b.t0, total: b.totalMax };
+        out.push(peak);
+      }
+    } else if (peak && b.t0 - peak.t1 > (b.t1 - b.t0)) {
+      peak = null;
+    }
+  });
+  return out.sort((a, b) => a.t0 - b.t0);
+}
+
+/**
+ * Passo «tondo» della scala (1, 2, 2,5, 5 x 10^n), come in Sentinella.
+ * Le cifre decimali dell'etichetta vengono DAL PASSO: Sentinella scriveva
+ * «3 A, 5 A, 8 A» con passo 2,5 arrotondando a zero decimali (difetto aperto
+ * nel suo dossier, qui non ricopiato).
+ */
+function consNiceStep(max) {
+  const raw = Math.max(max, 1e-9) / 4;
+  const pot = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map((k) => k * pot).find((s) => s >= raw);
+}
+
+function consDecimals(step) {
+  if (step >= 1 && Math.abs(step - Math.round(step)) < 1e-9) return 0;
+  const s = step < 1 ? step : step % 1;
+  return Math.min(3, Math.max(1, Math.ceil(-Math.log10(s) + 1e-9)));
+}
+
+/** Etichetta dell'asse delle potenze: «2,5 kW», «500 W», decimali dal passo. */
+function consAxisLabel(v, step) {
+  const it = (x, d) => x.toLocaleString("it-IT", { minimumFractionDigits: d, maximumFractionDigits: d });
+  if (v === 0) return "0";
+  if (step >= 1000 || Math.abs(v) >= 1000) return it(v / 1000, consDecimals(step / 1000)) + " kW";
+  return it(v, consDecimals(step)) + " W";
+}
+
+/** Una potenza in un'etichetta: «734 W», «2,26 kW». */
+function consWatts(w) {
+  if (w === null || w === undefined || !Number.isFinite(w)) return "—";
+  const a = Math.abs(w);
+  const it = (x, d) => x.toLocaleString("it-IT", { minimumFractionDigits: d, maximumFractionDigits: d });
+  if (a >= 1000) return it(w / 1000, a >= 10000 ? 1 : 2) + " kW";
+  return it(w, a >= 10 ? 0 : 1) + " W";
+}
+
+function consKwhLabel(k) {
+  if (k === null || !Number.isFinite(k)) return "—";
+  return k.toLocaleString("it-IT", { minimumFractionDigits: k < 10 ? 2 : 1, maximumFractionDigits: k < 10 ? 2 : 1 }) + " kWh";
+}
+
+/**
+ * Tacche dell'asse del tempo, sull'ora locale: il passo «tondo» piu' piccolo
+ * che sta nello spazio (un'etichetta ogni ~80 px). Le mezzanotti sono forti e
+ * portano il giorno, perche' su tre giorni «12:00» da solo non dice quale.
+ */
+function consTimeTicks(t0, t1, width) {
+  const M = 60000;
+  const steps = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map((m) => m * M);
+  const room = Math.max(3, Math.floor(width / 80));
+  const step = steps.find((s) => (t1 - t0) / s <= room) || steps[steps.length - 1];
+  const out = [];
+  const start = new Date(t0);
+  if (step >= 1440 * M) start.setHours(0, 0, 0, 0);
+  else if (step >= 60 * M) start.setMinutes(0, 0, 0);
+  else {
+    // multipli del passo dentro l'ora: 01:40 con passo 30' parte da 01:30
+    const m = step / M;
+    start.setSeconds(0, 0);
+    start.setMinutes(Math.floor(start.getMinutes() / m) * m);
+  }
+  const two = (n) => String(n).padStart(2, "0");
+  // Si avanza per CALENDARIO e non sommando millisecondi: nel giorno del
+  // cambio d'ora 24 ore non portano alla mezzanotte dopo.
+  for (let guard = 0; guard < 400; guard++) {
+    const t = start.getTime();
+    if (t > t1) break;
+    if (t >= t0) {
+      const d = new Date(t);
+      const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+      const day = d.toLocaleDateString("it-IT", { weekday: "short", day: "numeric" });
+      const aligned = step < 60 * M || (d.getHours() * 60 + d.getMinutes()) % Math.min(step / M, 1440) === 0;
+      if (aligned) {
+        out.push({ t, strong: midnight,
+          label: step >= 1440 * M || midnight ? day : two(d.getHours()) + ":" + two(d.getMinutes()) });
+      }
+    }
+    if (step >= 1440 * M) start.setDate(start.getDate() + step / (1440 * M));
+    else start.setTime(start.getTime() + step);
+  }
+  return out;
+}
+
+/** «24/11 01:40 – 04:15», oppure «24/11 01:40 – 25/11 03:00». */
+function consSpanLabel(a, b) {
+  const d = (t) => new Date(t).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
+  const h = (t) => new Date(t).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+  return d(a) + " " + h(a) + " – " + (d(a) === d(b) ? "" : d(b) + " ") + h(b);
 }
 
 /** Ready-made colours, so setting a scene does not require a colour picker. */
@@ -1404,7 +1761,7 @@ const ROW_ACTION_TYPES = new Set(["active", "room", "lights"]);
 
 /** Card types that stand on their own instead of displaying one entity. */
 const COMPOSITE_TYPES = new Set(["energyflow", "active", "notifications", "people",
-  "monitor", "system", "camera", "calendar", "shifts", "waste", "economy", "lights", "irrigation", "trend", "room", "ev",
+  "monitor", "system", "camera", "calendar", "shifts", "waste", "economy", "lights", "irrigation", "trend", "consumption", "room", "ev",
   "comfort", "thermostat"]);
 
 const COMPOSITE_META = {
@@ -1412,6 +1769,7 @@ const COMPOSITE_META = {
   ev:            ["Auto elettrica", "Ricarica e stato batteria", "mdi:car-electric", "lg"],
   room:          ["Stanza", "Dispositivi della stanza", "mdi:home-floor-g", "md"],
   trend:         ["Confronto andamenti", "Storico a confronto", "mdi:chart-multiple", "lg"],
+  consumption:   ["Consumi per dispositivo", "Chi ha consumato e quando", "mdi:chart-areaspline", "xl"],
   lights:        ["Luci", "Illuminazione della casa", "mdi:lightbulb-group", "lg"],
   irrigation:    ["Irrigazione", "Zone e programmi", "mdi:sprinkler-variant", "lg"],
   energyflow:    ["Flusso energetico", "Potenza in tempo reale", "mdi:transit-connection-variant", "lg"],
@@ -2952,6 +3310,14 @@ class CyborgDashboard extends HTMLElement {
               + ":" + (rs.attributes.current_position ?? "") : "?"));
           }
           parts.push("rl:" + JSON.stringify(this._lightOpen || {}));
+        }
+        if (it.type === "consumption") {
+          // Niente stati qui: la card disegna lo storico e si ridisegna da
+          // sola quando arriva. Ridisegnarla a ogni lettura del contatore
+          // farebbe saltare il mirino sotto il dito (Sentinella, trappola 10).
+          const cw = this._consWindow(it);
+          parts.push("cs:" + JSON.stringify([it.hours, it.total, it.loads])
+            + ":" + (cw.live && !cw.zoom ? Math.floor(Date.now() / cw.ttl) : ""));
         }
         if (it.type === "trend") {
           parts.push("tr:" + (it.hours || 24) + ":" + this._trendSeries(it).map((r) => {
@@ -8246,6 +8612,676 @@ class CyborgDashboard extends HTMLElement {
     return null;
   }
 
+  /* ------------------------------------------------------------------------
+   * CONSUMI PER DISPOSITIVO
+   * ---------------------------------------------------------------------- */
+
+  /** I sensori di potenza che hanno senso qui: una lettura in W/kW, non diagnostica. */
+  _consPowerSensors() {
+    const cat = (this._registry && this._registry.category) || {};
+    return Object.keys(this._hass.states).filter((id) => {
+      if (!id.startsWith("sensor.") || cat[id]) return false;
+      const st = this._hass.states[id];
+      const unit = String(st.attributes.unit_of_measurement || "").trim();
+      const isPower = st.attributes.device_class === "power"
+        || ["W", "kW", "MW"].includes(unit);
+      return isPower && powerWatts(st) !== null;
+    });
+  }
+
+  /**
+   * Il contatore che fa da «casa», in ordine di probabilita'. Solo un
+   * SUGGERIMENTO (vincolo 7): la card lo propone, l'utente lo sceglie.
+   */
+  _consTotalCandidates() {
+    const flowIds = new Set();
+    for (const page of (this._dashboard && this._dashboard.pages) || []) {
+      for (const sec of page.sections || []) {
+        for (const it of sec.items || []) {
+          if (it.type === "energyflow" && it.flow) {
+            for (const k of ["home", "main", "grid"]) if (it.flow[k]) flowIds.add(it.flow[k]);
+          }
+        }
+      }
+    }
+    const re = /generale|contatore|totale|main|house|casa|grid|rete|consumo/;
+    const score = (id) => {
+      const st = this._hass.states[id];
+      const hay = (id + " " + (st.attributes.friendly_name || "")).toLowerCase();
+      return (flowIds.has(id) ? 4 : 0) + (re.test(hay) ? 2 : 0) + (powerWatts(st) > 50 ? 1 : 0);
+    };
+    return this._consPowerSensors().map((id) => ({ id, s: score(id) }))
+      .filter((r) => r.s >= 2).sort((a, b) => b.s - a.s || a.id.localeCompare(b.id)).map((r) => r.id);
+  }
+
+  /**
+   * La configurazione risolta: generale, carichi vivi coi loro colori e chi
+   * sta dentro chi.
+   *
+   * Un carico il cui padre (dalla gerarchia condivisa, la stessa del flusso e
+   * dell'economia) e' ANCHE fra i carichi scelti non si impila: e' gia' dentro
+   * la lettura del padre, e impilarlo due volte inventerebbe consumo e
+   * farebbe sparire il «Non misurato». Resta nel dettaglio, sotto il padre.
+   */
+  _consConfig(item) {
+    const st = (id) => this._hass.states[id];
+    const total = item.total && st(item.total) ? item.total : null;
+    const declared = (Array.isArray(item.loads) ? item.loads : []).filter((r) => r && r.entity);
+    const live = declared.filter((r) => st(r.entity) && r.entity !== total).slice(0, MAX_CONS_LOADS);
+    const ids = new Set(live.map((r) => r.entity));
+    const loads = live.map((r, i) => {
+      const p = this._parentOf(r.entity, null);
+      return {
+        entity: r.entity,
+        name: r.name || st(r.entity).attributes.friendly_name || r.entity,
+        color: SERIES_COLORS[i % SERIES_COLORS.length],
+        parent: p && p !== r.entity && ids.has(p) ? p : null,
+      };
+    });
+    return { total, loads, roots: loads.filter((l) => !l.parent),
+      gone: declared.filter((r) => !st(r.entity)).length,
+      totalGone: !!item.total && !total };
+  }
+
+  /** La finestra che si guarda: periodo, spostamento indietro, zoom. */
+  _consWindow(item) {
+    const hours = CONS_RANGES.some((r) => r.h === item.hours) ? item.hours : 24;
+    const span = hours * 3600000;
+    // Il «adesso» si arrotonda al passo della cache: cosi' la chiave resta la
+    // stessa per tutta la sua durata e non si rilegge lo storico a ogni minuto.
+    const ttl = Math.max(30000, Math.min(300000, span / 60));
+    const now = Date.now();
+    this._consEnd = this._consEnd || {};
+    this._consZoom = this._consZoom || {};
+    const end = this._consEnd[item.id];
+    const live = end === undefined || end === null;
+    const t1 = live ? Math.ceil(now / ttl) * ttl : end;
+    let t0 = t1 - span, z1 = t1;
+    const zoom = this._consZoom[item.id];
+    if (zoom) { t0 = zoom[0]; z1 = zoom[1]; }
+    return { hours, span, ttl, live, t0, t1: z1, baseT1: t1, zoom: !!zoom, now };
+  }
+
+  _consLoad(item, cfg, win) {
+    const ids = [cfg.total, ...cfg.loads.map((l) => l.entity)];
+    const res = consResolution(win.t1 - win.t0, win.t0, win.now, item.keep_days);
+    const key = [item.id, res, Math.round(win.t0), Math.round(win.t1), ids.join(",")].join("|");
+    this._cons = this._cons || {};
+    const cached = this._cons[key];
+    // Una finestra chiusa nel passato non cambia piu': si tiene 10 minuti.
+    const ttl = win.t1 > win.now ? win.ttl : 600000;
+    if (cached && (cached.error ? Date.now() - cached.ts < 30000 : Date.now() - cached.ts < ttl)) return cached;
+    this._consPending = this._consPending || {};
+    if (this._consPending[key]) return cached || this._consLast(item.id);
+    this._consPending[key] = true;
+    const start = new Date(win.t0).toISOString(), end = new Date(win.t1).toISOString();
+    const done = (out) => {
+      out.ts = Date.now(); out.key = key;
+      this._cons[key] = out;
+      this._consLastKey = this._consLastKey || {};
+      this._consLastKey[item.id] = key;
+      delete this._consPending[key];
+      this._touch(true);
+    };
+    const fail = (err) => done({ error: true, message: (err && err.message) || "storico non disponibile" });
+
+    if (res === "raw") {
+      this._hass.callWS({
+        type: "history/history_during_period", start_time: start, end_time: end,
+        entity_ids: ids, minimal_response: true, no_attributes: true,
+        significant_changes_only: false,
+      }).then((r) => {
+        const n = Math.max(24, Math.min(480, Math.round((win.t1 - win.t0) / 15000)));
+        const data = {};
+        for (const id of ids) {
+          // Il fattore dell'unita' ATTUALE: un sensore in kW non diventa 2 W.
+          const s = this._hass.states[id];
+          const unit = String((s && s.attributes.unit_of_measurement) || "W").trim();
+          const f = Object.prototype.hasOwnProperty.call(POWER_UNIT_FACTOR, unit) ? POWER_UNIT_FACTOR[unit] : 1;
+          const pts = ((r && r[id]) || []).map((pt) => {
+            const v = parseFloat(pt.s !== undefined ? pt.s : pt.state);
+            const t = pt.lu !== undefined ? pt.lu * 1000 : (pt.last_updated ? Date.parse(pt.last_updated) : NaN);
+            return Number.isFinite(v) && Number.isFinite(t) ? [t, v * f] : null;
+          }).filter(Boolean);
+          data[id] = consBucketsFromHistory(pts, win.t0, win.t1, n, Date.now());
+        }
+        done({ res, data, t0: win.t0, t1: win.t1 });
+      }).catch(fail);
+      return cached || this._consLast(item.id);
+    }
+
+    const ask = (period) => this._hass.callWS({
+      type: "recorder/statistics_during_period", start_time: start, end_time: end,
+      statistic_ids: ids, period, types: ["mean", "max"],
+      // Verificato su core 2026.11.1 (UNIT_SCHEMA): converte kW e MW in W
+      // lato server, cosi' la pila somma grandezze nella stessa unita'.
+      units: { power: "W" },
+    });
+    ask(res).then((r) => {
+      const empty = !((r && r[cfg.total]) || []).length;
+      // Le statistiche a 5 minuti vivono quanto il recorder: se non ci sono
+      // piu' si scende alle orarie e LO SI DICE, invece di disegnare il vuoto.
+      if (res === "5minute" && empty) {
+        return ask("hour").then((r2) => {
+          const data = {};
+          for (const id of ids) data[id] = consBucketsFromStats(r2 && r2[id]);
+          done({ res: "hour", degraded: true, data, t0: win.t0, t1: win.t1 });
+        });
+      }
+      const data = {};
+      for (const id of ids) data[id] = consBucketsFromStats(r && r[id]);
+      done({ res, data, t0: win.t0, t1: win.t1 });
+      return null;
+    }).catch(fail);
+    return cached || this._consLast(item.id);
+  }
+
+  /**
+   * Mentre arriva la finestra nuova si continua a mostrare la vecchia: un
+   * grafico che sparisce a ogni tocco delle frecce e' un grafico che salta.
+   */
+  _consLast(cardId) {
+    const k = this._consLastKey && this._consLastKey[cardId];
+    const old = k && this._cons && this._cons[k];
+    return old && !old.error ? Object.assign({ stale: true }, old) : null;
+  }
+
+  _consSuggestLoads(cfg) {
+    const chosen = new Set(cfg.loads.map((l) => l.entity));
+    return this._consPowerSensors().filter((id) => id !== cfg.total && !chosen.has(id)
+      && !this._consTotalCandidates().slice(0, 1).includes(id));
+  }
+
+  _consBody(item) {
+    const cfg = this._consConfig(item);
+    const win = this._consWindow(item);
+    const nav = this._consNav(item, win);
+
+    if (!cfg.total) {
+      const cands = this._consTotalCandidates().slice(0, 3);
+      return `<div class="cs">${nav}<div class="ov-empty"><ha-icon icon="mdi:meter-electric-outline"></ha-icon>
+        <span>${cfg.totalGone ? "<strong>Il contatore scelto non esiste più in Home Assistant.</strong> " : ""}Serve il <strong>contatore generale</strong>: è la cima della pila, e quello che i dispositivi non spiegano diventa «Non misurato».</span>
+        ${cands.length ? `<div class="cs-setup">${cands.map((id) => `<button class="mini" data-cons-settotal="${esc(item.id)}|${esc(id)}">
+          <ha-icon icon="mdi:check"></ha-icon> Usa ${esc(this._hass.states[id].attributes.friendly_name || id)} · ${esc(consWatts(powerWatts(this._hass.states[id])))}</button>`).join("")}</div>`
+          : `<span class="hint">Nessun sensore di potenza ha un nome da contatore: sceglilo dall'editor.</span>`}
+      </div></div>`;
+    }
+
+    const data = this._consLoad(item, cfg, win);
+    if (!data) {
+      return `<div class="cs">${nav}<div class="ov-empty"><ha-icon icon="mdi:progress-clock"></ha-icon><span>Lettura dello storico…</span></div></div>`;
+    }
+    if (data.error) {
+      return `<div class="cs">${nav}<div class="ov-empty"><ha-icon icon="mdi:database-alert-outline"></ha-icon>
+        <span>${esc(data.message)}. Serve il recorder attivo sul contatore e sulle prese.</span></div></div>`;
+    }
+    const totalRows = data.data[cfg.total] || [];
+    if (!totalRows.length) {
+      return `<div class="cs">${nav}<div class="ov-empty"><ha-icon icon="mdi:chart-areaspline"></ha-icon>
+        <span>Nessun dato del contatore in questa finestra.${data.res !== "raw"
+          ? " Se il contatore non ha <code>state_class: measurement</code> Home Assistant non ne tiene le statistiche: in quel caso funzionano solo le finestre fino a 3 ore." : ""}</span></div></div>`;
+    }
+
+    const off = new Set((this._consOff && this._consOff[item.id]) || []);
+    const stack = consStack(totalRows, cfg.loads.map((l) => data.data[l.entity] || []));
+    const rootIdx = cfg.loads.map((l, i) => (l.parent ? -1 : i)).filter((i) => i >= 0);
+    // La pila usa SOLO le radici: il resto si ricalcola su di loro.
+    for (const b of stack) {
+      const sumRoots = rootIdx.reduce((s, i) => s + (b.loads[i] || 0), 0);
+      const gap = b.total - sumRoots;
+      b.rest = Math.max(0, gap);
+      b.over = gap < -Math.max(50, b.total * 0.1);
+    }
+    const now = Date.now();
+    const kwhTotal = consKwh(stack, (b) => b.total, now);
+    const kwhLoad = cfg.loads.map((l, i) => consKwh(stack, (b) => b.loads[i], now));
+    const kwhRest = consKwh(stack, (b) => b.rest, now);
+    const rootsOnly = stack.map((b) => Object.assign({}, b, {
+      loads: b.loads.map((v, i) => (rootIdx.includes(i) ? v : null)),
+      loadMax: b.loadMax.map((v, i) => (rootIdx.includes(i) ? v : null)) }));
+    const events = consEvents(rootsOnly, cfg.loads.map((l) => l.name));
+
+    // ---- geometria, alla larghezza VERA (Sentinella, trappola 1)
+    this._consW = this._consW || {};
+    const W = Math.max(280, this._consW[item.id] || 640), H = 250;
+    const sx = 52, dx = 10, su = 18, giu = 22;
+    const t0 = win.t0, t1 = win.t1;
+    const x = (t) => sx + (W - sx - dx) * ((t - t0) / Math.max(1, t1 - t0));
+    const mid = (b) => Math.min(Math.max((b.t0 + b.t1) / 2, t0), t1);
+    const visRoots = rootIdx.filter((i) => !off.has(cfg.loads[i].entity));
+    const showRest = !off.has("__rest");
+    const tops = stack.map((b) => visRoots.reduce((s, i) => s + (b.loads[i] || 0), 0) + (showRest ? b.rest : 0));
+    const envelope = stack.some((b) => b.totalMax > b.total * 1.15 + 30);
+    let maxV = Math.max(1, ...tops, ...stack.map((b) => b.total), ...(envelope ? stack.map((b) => b.totalMax) : []));
+    const step = consNiceStep(maxV);
+    const hi = Math.ceil(maxV / step) * step;
+    const y = (v) => H - giu - (H - su - giu) * (v / hi);
+
+    // segmenti contigui: un buco nei dati resta un buco (passo tipico = mediana)
+    const typ = consMedian(stack.map((b) => b.t1 - b.t0)) || 300000;
+    const segs = [];
+    let cur = null;
+    stack.forEach((b, i) => {
+      if (!cur || b.t0 - stack[i - 1].t1 > typ * 0.5) { cur = []; segs.push(cur); }
+      cur.push(i);
+    });
+    const area = (lower, upper, color, cls) => segs.map((sg) => {
+      if (sg.length === 1) {
+        const i = sg[0], b = stack[i];
+        const xa = x(b.t0), xb = x(Math.min(b.t1, t1));
+        return `<rect class="${cls}" x="${xa.toFixed(1)}" y="${y(upper[i]).toFixed(1)}" width="${Math.max(1, xb - xa).toFixed(1)}" height="${Math.max(0, y(lower[i]) - y(upper[i])).toFixed(1)}" style="fill:${color}"/>`;
+      }
+      const up = sg.map((i) => `${x(mid(stack[i])).toFixed(1)},${y(upper[i]).toFixed(1)}`);
+      const dn = sg.slice().reverse().map((i) => `${x(mid(stack[i])).toFixed(1)},${y(lower[i]).toFixed(1)}`);
+      return `<path class="${cls}" d="M${up.join("L")}L${dn.join("L")}Z" style="fill:${color}"/>`;
+    }).join("");
+    const line = (vals, cls) => segs.filter((sg) => sg.length > 1).map((sg) =>
+      `<path class="${cls}" d="M${sg.map((i) => `${x(mid(stack[i])).toFixed(1)},${y(vals[i]).toFixed(1)}`).join("L")}"/>`).join("");
+
+    let layers = "";
+    let base = stack.map(() => 0);
+    for (const i of visRoots) {
+      const upper = stack.map((b, k) => base[k] + (b.loads[i] || 0));
+      layers += area(base, upper, cfg.loads[i].color, "cs-layer");
+      base = upper;
+    }
+    if (showRest) {
+      const upper = stack.map((b, k) => base[k] + b.rest);
+      layers += area(base, upper, CONS_REST_COLOR, "cs-layer cs-rest");
+    }
+    layers += line(stack.map((b) => b.total), "cs-total");
+    if (envelope) layers += line(stack.map((b) => b.totalMax), "cs-peakline");
+
+    let axes = "";
+    for (let v = 0; v <= hi + 1e-9; v += step) {
+      axes += `<line class="cs-grid" x1="${sx}" x2="${W - dx}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
+        <text class="cs-ylab" x="${sx - 7}" y="${(y(v) + 3).toFixed(1)}">${esc(consAxisLabel(v, step))}</text>`;
+    }
+    const ticks = consTimeTicks(t0, t1, W - sx - dx);
+    ticks.forEach((tc) => {
+      const px = x(tc.t);
+      if (px < sx - 1 || px > W - dx + 1) return;
+      if (tc.strong) axes += `<line class="cs-gridx" x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${su}" y2="${H - giu}"/>`;
+      const anchor = px < sx + 20 ? "start" : px > W - dx - 20 ? "end" : "middle";
+      axes += `<text class="cs-xlab${tc.strong ? " strong" : ""}" x="${px.toFixed(1)}" y="${H - 7}" text-anchor="${anchor}">${esc(tc.label)}</text>`;
+    });
+    if (now > t0 && now < t1) {
+      const px = x(now).toFixed(1);
+      axes += `<line class="cs-now" x1="${px}" x2="${px}" y1="${su}" y2="${H - giu}"/>
+        <text class="cs-now-l" x="${px}" y="${su + 10}" text-anchor="end" dx="-4">adesso</text>`;
+    }
+    // la striscia degli eventi, sopra l'area: i cicli nel colore del carico,
+    // i picchi non misurati come triangoli
+    let marks = "";
+    for (const e of events) {
+      const xa = Math.max(sx, x(e.t0)), xb = Math.min(W - dx, x(e.t1));
+      if (xb < sx || xa > W - dx) continue;
+      if (e.kind !== "peak") {
+        marks += `<rect class="cs-ev" x="${xa.toFixed(1)}" y="${su - 12}" width="${Math.max(3, xb - xa).toFixed(1)}" height="4" rx="2" style="fill:${e.kind === "rest" ? CONS_REST_COLOR : cfg.loads[e.index].color}"><title>${esc(e.name)} ${esc(consSpanLabel(e.t0, e.t1))} · ${esc(consKwhLabel(e.kwh))}</title></rect>`;
+      } else {
+        const px = x(Math.min(Math.max(e.at, t0), t1));
+        marks += `<path class="cs-peak" d="M${(px - 5).toFixed(1)},${su - 4}l5,-9l5,9z"><title>${esc(e.name)} fino a ${esc(consWatts(e.peak))}</title></path>`;
+      }
+    }
+    const svgId = "cs-" + item.id;
+    this._consGeom = this._consGeom || {};
+    this._consGeom[item.id] = { W, H, sx, dx, su, giu, t0, t1, stack, cfg, off, res: data.res,
+      envelope, minZoom: data.res === "raw" ? 120000 : 600000, events };
+
+    const resNote = { raw: "storico grezzo", "5minute": "medie di 5 minuti", hour: "medie orarie", day: "medie giornaliere" }[data.res];
+    const overN = stack.filter((b) => b.over).length;
+    const notes = [];
+    if (data.degraded) notes.push("Le medie di 5 minuti di questo periodo non ci sono più: Home Assistant le tiene quanto il recorder (10 giorni di fabbrica). Disegnate le <strong>medie orarie</strong>.");
+    if (overN > stack.length * 0.1) notes.push(`In <strong>${overN}</strong> intervalli i dispositivi sommano più del generale: di solito una presa è dentro un'altra e va dichiarata nella <strong>gerarchia dei carichi</strong>, oppure il generale non è il contatore a monte di tutto.`);
+    if (cfg.gone) notes.push(`<strong>${cfg.gone}</strong> ${cfg.gone === 1 ? "dispositivo scelto non esiste" : "dispositivi scelti non esistono"} più in Home Assistant: toglili dall'editor.`);
+    const noStats = data.res !== "raw" ? cfg.loads.filter((l) => !(data.data[l.entity] || []).length) : [];
+    if (noStats.length) notes.push(`Senza dati in questa finestra: ${noStats.map((l) => `<strong>${esc(l.name)}</strong>`).join(", ")}. Non è zero: il suo consumo è finito in «Non misurato».`);
+
+    const sugg = cfg.loads.length ? [] : this._consSuggestLoads(cfg);
+    const setup = !cfg.loads.length ? `<div class="cs-note"><ha-icon icon="mdi:information-outline"></ha-icon><span>Nessun dispositivo scelto: tutto il generale è «Non misurato».${sugg.length
+      ? ` <button class="mini" data-cons-addall="${esc(item.id)}"><ha-icon icon="mdi:plus"></ha-icon> Aggiungi le ${sugg.length} prese misurate</button>` : ""}</span></div>` : "";
+
+    // Chip: i cicli e i consumi non misurati per energia (al massimo quattro),
+    // piu' il picco breve piu' alto. Gli altri picchi brevi si CONTANO in un
+    // chip solo: un carico che parte ogni ora (sbrinamento, pompa) faceva
+    // cinque chip identici che non dicevano niente.
+    const runs = events.filter((e) => e.kind !== "peak").sort((a, b) => b.kwh - a.kwh).slice(0, 4);
+    const peaks = events.filter((e) => e.kind === "peak").sort((a, b) => b.peak - a.peak);
+    const top = runs.concat(peaks.slice(0, 1)).sort((a, b) => a.t0 - b.t0);
+    const colorOf = (e) => (e.kind === "load" ? cfg.loads[e.index].color : e.kind === "rest" ? CONS_REST_COLOR : "#ffb703");
+    const morePeaks = peaks.length > 1 ? `<span class="cs-chip more" style="--sc:#ffb703"><ha-icon icon="mdi:alert-outline"></ha-icon>
+      <span>altri ${peaks.length - 1} picchi brevi non misurati</span><b>fino a ${esc(consWatts(peaks[1].peak))}</b></span>` : "";
+    const chips = top.length ? `<div class="cs-events">${top.map((e) => {
+      const pad = Math.max((e.t1 - e.t0) * 0.25, 10 * 60000);
+      const color = colorOf(e);
+      return `<button class="cs-chip" style="--sc:${esc(color)}" data-cons-zoomto="${esc(item.id)}|${Math.round(e.t0 - pad)}|${Math.round(e.t1 + pad)}" title="Ingrandisci">
+        ${e.kind !== "peak" ? "<i></i>" : `<ha-icon icon="mdi:alert"></ha-icon>`}
+        <span>${esc(e.name)}</span><em>${esc(consSpanLabel(e.t0, e.t1).replace(/^\d\d\/\d\d /, win.span > 26 * 3600000 || win.zoom ? "$&" : ""))}</em>
+        <b>${esc(e.kind !== "peak" ? consKwhLabel(e.kwh) : "fino a " + consWatts(e.peak))}</b></button>`;
+    }).join("")}${morePeaks}</div>` : "";
+
+    const pct = (k) => (kwhTotal > 0 ? Math.round((k / kwhTotal) * 100) : 0);
+    const legend = `<div class="cs-legend">
+      <span class="cs-leg total"><i></i><span>Generale</span><b>${esc(consKwhLabel(kwhTotal))}</b></span>
+      ${cfg.loads.map((l, i) => l.parent ? `<span class="cs-leg child" title="Già contato dentro ${esc(cfg.loads.find((p) => p.entity === l.parent).name)}"><span>↳ ${esc(l.name)}</span><b>${esc(consKwhLabel(kwhLoad[i]))}</b></span>`
+        : `<button class="cs-leg${off.has(l.entity) ? " off" : ""}" style="--sc:${esc(l.color)}" data-cons-toggle="${esc(item.id)}|${esc(l.entity)}" aria-pressed="${!off.has(l.entity)}">
+          <i></i><span>${esc(l.name)}</span><b>${esc(consKwhLabel(kwhLoad[i]))}</b><em>${pct(kwhLoad[i])}%</em></button>`).join("")}
+      <button class="cs-leg rest${off.has("__rest") ? " off" : ""}" style="--sc:${CONS_REST_COLOR}" data-cons-toggle="${esc(item.id)}|__rest" aria-pressed="${!off.has("__rest")}">
+        <i></i><span>Non misurato</span><b>${esc(consKwhLabel(kwhRest))}</b><em>${pct(kwhRest)}%</em></button>
+      ${envelope ? `<span class="cs-leg peakline"><i></i><span>Picco del generale</span></span>` : ""}
+    </div>`;
+
+    return `<div class="cs">
+      ${nav}
+      ${win.zoom ? `<div class="cs-zoombar"><ha-icon icon="mdi:magnify-plus-outline"></ha-icon><span>Zoom <strong>${esc(consSpanLabel(t0, t1))}</strong></span>
+        <button class="mini" data-cons-unzoom="${esc(item.id)}">Togli zoom</button></div>`
+        : `<div class="cs-hint">Trascina sul grafico da un orario all'altro per ingrandire · ${esc(resNote)}${data.stale ? " · aggiornamento…" : ""}</div>`}
+      ${setup}${chips}
+      <div class="cs-plot">
+        <svg class="cs-svg" id="${esc(svgId)}" data-cons-svg="${esc(item.id)}" viewBox="0 0 ${W} ${H}" style="height:${H}px" role="img"
+             aria-label="Consumi per dispositivo, ${esc(consSpanLabel(t0, t1))}">
+          <defs><clipPath id="clip-${esc(svgId)}"><rect x="${sx}" y="0" width="${W - sx - dx}" height="${H}"/></clipPath></defs>
+          ${axes}<g clip-path="url(#clip-${esc(svgId)})">${layers}</g>${marks}
+          <line class="cs-cursor" y1="${su}" y2="${H - giu}" style="display:none"/>
+          <rect class="cs-sel" y="${su}" height="${H - giu - su}" width="0" style="display:none"/>
+        </svg>
+        <div class="cs-tip" hidden></div>
+      </div>
+      ${notes.map((n) => `<div class="cs-note"><ha-icon icon="mdi:information-outline"></ha-icon><span>${n}</span></div>`).join("")}
+      ${legend}
+    </div>`;
+  }
+
+  /** Periodo, frecce e titolo: sempre disegnati, anche a grafico vuoto. */
+  _consNav(item, win) {
+    const title = win.live && !win.zoom
+      ? "Ultime " + (CONS_RANGES.find((r) => r.h === win.hours) || { l: "" }).l
+      : consSpanLabel(win.t0, win.t1);
+    return `<div class="cs-nav">
+      <div class="tr-tabs">${CONS_RANGES.map((r) => `<button class="eco-tab ${r.h === win.hours ? "on" : ""}" data-cons-hours="${esc(item.id)}|${r.h}">${esc(r.l)}</button>`).join("")}</div>
+      <div class="cs-move">
+        <button class="mini" data-cons-shift="${esc(item.id)}|-1" title="Periodo precedente" aria-label="Periodo precedente"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+        <span class="cs-title">${esc(title)}</span>
+        <button class="mini" data-cons-shift="${esc(item.id)}|1" title="Periodo successivo" aria-label="Periodo successivo" ${win.live ? "disabled" : ""}><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+        ${win.live ? "" : `<button class="mini" data-cons-shift="${esc(item.id)}|0">Adesso</button>`}
+      </div>
+    </div>`;
+  }
+
+  /** Il dettaglio di un istante: generale, poi chi c'era, dal piu' grande. */
+  _consTipHtml(g, b) {
+    const f = (t) => new Date(t).toLocaleTimeString("it-IT", g.res === "raw"
+      ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
+    const day = new Date(b.t0).toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "short" });
+    const when = g.res === "day" ? day : day + " · " + f(b.t0) + "–" + f(b.t1);
+    const rows = g.cfg.loads.map((l, i) => ({ l, i, v: b.loads[i] }))
+      .filter((r) => !r.l.parent && r.v !== null && r.v >= 1).sort((a, c) => c.v - a.v);
+    const kids = (p) => g.cfg.loads.map((l, i) => ({ l, v: b.loads[i] }))
+      .filter((r) => r.l.parent === p && r.v !== null && r.v >= 1);
+    const missing = g.cfg.loads.filter((l, i) => !l.parent && b.loads[i] === null);
+    return `<b class="cs-tip-t">${esc(when)}</b>
+      <div class="cs-tip-r strong"><span>Generale</span><b>${esc(consWatts(b.total))}</b></div>
+      ${b.totalMax > b.total * 1.15 + 30 ? `<div class="cs-tip-r dim"><span>picco nell'intervallo</span><b>${esc(consWatts(b.totalMax))}</b></div>` : ""}
+      ${rows.map((r) => `<div class="cs-tip-r" style="--sc:${esc(r.l.color)}"><i></i><span>${esc(r.l.name)}</span><b>${esc(consWatts(r.v))}</b></div>
+        ${kids(r.l.entity).map((k) => `<div class="cs-tip-r kid"><span>↳ ${esc(k.l.name)}</span><b>${esc(consWatts(k.v))}</b></div>`).join("")}`).join("")}
+      <div class="cs-tip-r" style="--sc:${CONS_REST_COLOR}"><i></i><span>Non misurato</span><b>${esc(consWatts(b.rest))}</b></div>
+      ${b.over ? `<div class="cs-tip-w">I dispositivi sommano più del generale</div>` : ""}
+      ${missing.length ? `<div class="cs-tip-r dim"><span>senza dato: ${esc(missing.map((l) => l.name).join(", "))}</span></div>` : ""}`;
+  }
+
+  /** Salva una scelta fatta dalla card: in modifica resta in sospeso, fuori si salva. */
+  _consCommit() {
+    if (this._editing) { this._dirty = true; this._touch(); return; }
+    this._touch();
+    clearTimeout(this._consSaveT);
+    this._consSaveT = setTimeout(() => { this._consSaveT = null; this._save(); }, 400);
+  }
+
+  _consBind(all) {
+    all("[data-cons-hours]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, h] = el.getAttribute("data-cons-hours").split("|");
+        const card = this._findCard(id);
+        if (!card) return;
+        card.hours = parseInt(h, 10);
+        if (this._consZoom) delete this._consZoom[id];
+        if (this._consEnd) delete this._consEnd[id];
+        this._touch(true);
+      };
+    });
+    all("[data-cons-shift]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, dir] = el.getAttribute("data-cons-shift").split("|");
+        const card = this._findCard(id);
+        if (!card) return;
+        const win = this._consWindow(card);
+        this._consEnd = this._consEnd || {};
+        if (this._consZoom) delete this._consZoom[id];
+        const d = parseInt(dir, 10);
+        if (d === 0) { delete this._consEnd[id]; this._touch(true); return; }
+        const next = win.baseT1 + d * win.span;
+        if (next >= Date.now()) delete this._consEnd[id]; else this._consEnd[id] = next;
+        this._touch(true);
+      };
+    });
+    all("[data-cons-unzoom]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        if (this._consZoom) delete this._consZoom[el.getAttribute("data-cons-unzoom")];
+        this._touch(true);
+      };
+    });
+    all("[data-cons-zoomto]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, a, b] = el.getAttribute("data-cons-zoomto").split("|");
+        this._consZoom = this._consZoom || {};
+        this._consZoom[id] = [Number(a), Math.min(Number(b), Date.now() + 60000)];
+        this._touch(true);
+      };
+    });
+    all("[data-cons-toggle]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, ent] = el.getAttribute("data-cons-toggle").split("|");
+        this._consOff = this._consOff || {};
+        const s = new Set(this._consOff[id] || []);
+        if (s.has(ent)) s.delete(ent); else s.add(ent);
+        this._consOff[id] = Array.from(s);
+        this._touch(true);
+      };
+    });
+    all("[data-cons-settotal]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const [id, ent] = el.getAttribute("data-cons-settotal").split("|");
+        const card = this._findCard(id);
+        if (!card) return;
+        card.total = ent;
+        if (Array.isArray(card.loads)) card.loads = card.loads.filter((r) => r.entity !== ent);
+        this._consCommit();
+      };
+    });
+    all("[data-cons-addall]").forEach((el) => {
+      el.onclick = (ev) => {
+        ev.stopPropagation();
+        const card = this._findCard(el.getAttribute("data-cons-addall"));
+        if (!card) return;
+        const cfg = this._consConfig(card);
+        const add = this._consSuggestLoads(cfg).slice(0, MAX_CONS_LOADS - cfg.loads.length);
+        card.loads = (Array.isArray(card.loads) ? card.loads : []).concat(add.map((e) => ({ entity: e, name: "" })));
+        this._consCommit();
+      };
+    });
+    // editor
+    all("[data-cons-total]").forEach((el) => {
+      el.onchange = () => {
+        const card = this._findCard(el.getAttribute("data-cons-total"));
+        if (!card) return;
+        card.total = el.value || "";
+        if (Array.isArray(card.loads)) card.loads = card.loads.filter((r) => r.entity !== card.total);
+        this._dirty = true; this._touch();
+      };
+    });
+    all("[data-cons-load]").forEach((el) => {
+      el.onchange = () => {
+        const [id, ent] = el.getAttribute("data-cons-load").split("|");
+        const card = this._findCard(id);
+        if (!card) return;
+        const rows = Array.isArray(card.loads) ? card.loads.filter((r) => r && r.entity) : [];
+        card.loads = el.checked
+          ? (rows.some((r) => r.entity === ent) ? rows : rows.concat([{ entity: ent, name: "" }]))
+          : rows.filter((r) => r.entity !== ent);
+        this._dirty = true; this._touch();
+      };
+    });
+
+    if (!this._consResizeHooked && typeof window !== "undefined" && window.addEventListener) {
+      this._consResizeHooked = true;
+      let timer = null;
+      window.addEventListener("resize", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { this._consW = {}; this._touch(true); }, 250);
+      });
+    }
+
+    all("[data-cons-svg]").forEach((svg) => {
+      const id = svg.getAttribute("data-cons-svg");
+      const g = (this._consGeom || {})[id];
+      const plot = svg.closest(".cs-plot");
+      if (!g || !plot) return;
+      // La larghezza vera: si misura dopo il primo disegno e, se e' diversa,
+      // si ridisegna a quella. Un SVG stirato rimpicciolisce il testo e
+      // deforma i triangoli (Sentinella, trappola 1; qui la 0.54 l'aveva
+      // pagata col testo stirato da preserveAspectRatio="none").
+      const w = Math.round(plot.getBoundingClientRect().width);
+      if (w > 200 && Math.abs(w - g.W) > 6) {
+        this._consW = this._consW || {};
+        this._consW[id] = w;
+        if (!this._consRedraw) {
+          this._consRedraw = setTimeout(() => { this._consRedraw = null; this._touch(true); }, 0);
+        }
+        return;
+      }
+      const tip = plot.querySelector(".cs-tip");
+      const cur = svg.querySelector(".cs-cursor");
+      const sel = svg.querySelector(".cs-sel");
+      const inner = g.W - g.sx - g.dx;
+      // Coordinate del disegno con l'inversa della trasformazione vera, mai
+      // con la larghezza del riquadro (Sentinella, trappola 2).
+      const vxOf = (ev) => {
+        const ctm = svg.getScreenCTM && svg.getScreenCTM();
+        if (!ctm) return null;
+        const p = svg.createSVGPoint();
+        p.x = ev.clientX; p.y = ev.clientY;
+        return Math.min(Math.max(p.matrixTransform(ctm.inverse()).x, g.sx), g.W - g.dx);
+      };
+      const tOf = (vx) => g.t0 + ((vx - g.sx) / inner) * (g.t1 - g.t0);
+      const xOf = (t) => g.sx + inner * ((t - g.t0) / Math.max(1, g.t1 - g.t0));
+      const show = (ev) => {
+        const vx = vxOf(ev);
+        if (vx === null || !g.stack.length) return;
+        const t = tOf(vx);
+        // ricerca binaria del bucket che contiene t (o del piu' vicino)
+        let lo = 0, hi2 = g.stack.length - 1;
+        while (lo < hi2) {
+          const m = (lo + hi2) >> 1;
+          if (g.stack[m].t1 <= t) lo = m + 1; else hi2 = m;
+        }
+        let b = g.stack[lo];
+        if (lo > 0 && Math.abs((g.stack[lo - 1].t0 + g.stack[lo - 1].t1) / 2 - t) < Math.abs((b.t0 + b.t1) / 2 - t)) b = g.stack[lo - 1];
+        const px = xOf(Math.min(Math.max((b.t0 + b.t1) / 2, g.t0), g.t1));
+        cur.setAttribute("x1", px.toFixed(1)); cur.setAttribute("x2", px.toFixed(1));
+        cur.style.display = "";
+        tip.innerHTML = this._consTipHtml(g, b);
+        tip.hidden = false;
+        const box = plot.getBoundingClientRect();
+        const ctm = svg.getScreenCTM();
+        const pt = svg.createSVGPoint(); pt.x = px; pt.y = g.su;
+        const s = pt.matrixTransform(ctm);
+        const left = s.x - box.left;
+        const tw = tip.offsetWidth || 220;
+        // dalla parte dove c'e' spazio, mai fuori dal riquadro
+        const pos = left + 14 + tw <= box.width ? left + 14 : Math.max(0, left - 14 - tw);
+        tip.style.left = pos + "px";
+      };
+      const hide = () => { cur.style.display = "none"; tip.hidden = true; };
+      let start = null;
+      svg.onpointerdown = (ev) => {
+        show(ev);
+        if (this._editing || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+        start = vxOf(ev);
+        try { svg.setPointerCapture(ev.pointerId); } catch (_) { /* si trascina lo stesso */ }
+      };
+      svg.onpointermove = (ev) => {
+        show(ev);
+        if (start === null) return;
+        const x2 = vxOf(ev);
+        if (x2 === null || Math.abs(x2 - start) < 4) return;
+        sel.style.display = "";
+        sel.setAttribute("x", Math.min(start, x2).toFixed(1));
+        sel.setAttribute("width", Math.abs(x2 - start).toFixed(1));
+      };
+      svg.onpointerup = (ev) => {
+        if (start === null) return;
+        const x2 = vxOf(ev);
+        const a = Math.min(start, x2 ?? start), b = Math.max(start, x2 ?? start);
+        start = null; sel.style.display = "none";
+        if (b - a < 8) return;                                  // un tocco, non un trascinamento
+        const ta = tOf(a), tb = tOf(b);
+        if (tb - ta < g.minZoom) return;                        // troppo stretto per questa risoluzione
+        this._consZoom = this._consZoom || {};
+        this._consZoom[id] = [ta, tb];
+        this._touch(true);
+      };
+      svg.onpointercancel = () => { start = null; sel.style.display = "none"; hide(); };
+      svg.onpointerleave = () => { if (start === null) hide(); };
+      svg.ondblclick = (ev) => {
+        ev.stopPropagation();
+        if (this._consZoom && this._consZoom[id]) { delete this._consZoom[id]; this._touch(true); }
+      };
+      svg.onclick = (ev) => ev.stopPropagation();
+    });
+  }
+
+  _consEditor(card) {
+    const cfg = this._consConfig(card);
+    const sensors = this._consPowerSensors();
+    const name = (id) => (this._hass.states[id] && this._hass.states[id].attributes.friendly_name) || id;
+    const sugg = this._consTotalCandidates();
+    const totalOpts = sensors.slice().sort((a, b) => (sugg.includes(b) ? 1 : 0) - (sugg.includes(a) ? 1 : 0) || name(a).localeCompare(name(b)));
+    const chosen = new Set(cfg.loads.map((l) => l.entity));
+    const rows = sensors.filter((id) => id !== cfg.total)
+      .sort((a, b) => (chosen.has(b) ? 1 : 0) - (chosen.has(a) ? 1 : 0) || name(a).localeCompare(name(b)));
+    const full = chosen.size >= MAX_CONS_LOADS;
+    return `<div class="section">
+      <strong>CONTATORE GENERALE</strong>
+      <span class="hint">La cima della pila. Tutto quello che i dispositivi non spiegano diventa <strong>«Non misurato»</strong>: è la fascia che mostra i carichi senza una presa misurata.</span>
+      <label>POTENZA DEL GENERALE<select data-cons-total="${esc(card.id)}">
+        <option value="">— scegli —</option>
+        ${totalOpts.map((id) => `<option value="${esc(id)}" ${card.total === id ? "selected" : ""}>${esc(name(id))}${sugg[0] === id ? " · suggerito" : ""} · ${esc(consWatts(powerWatts(this._hass.states[id])))}</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="section">
+      <strong>DISPOSITIVI</strong>
+      <span class="hint">Fino a ${MAX_CONS_LOADS}, impilati nell'ordine scelto. Chi sta <strong>dentro</strong> un altro dispositivo scelto (gerarchia dei carichi, la stessa del Flusso energetico) non si impila due volte: compare nel dettaglio sotto il suo padre.</span>
+      <div class="cs-pick">${rows.map((id) => {
+        const l = cfg.loads.find((x) => x.entity === id);
+        const parent = l && l.parent ? cfg.loads.find((p) => p.entity === l.parent) : null;
+        return `<label class="cs-pick-row${chosen.has(id) ? " on" : ""}" style="--sc:${esc(l ? l.color : "transparent")}">
+          <input type="checkbox" data-cons-load="${esc(card.id)}|${esc(id)}" ${chosen.has(id) ? "checked" : ""} ${!chosen.has(id) && full ? "disabled" : ""}>
+          <i></i><span>${esc(name(id))}${parent ? ` <em>dentro ${esc(parent.name)}</em>` : ""}</span>
+          <b>${esc(consWatts(powerWatts(this._hass.states[id])))}</b></label>`;
+      }).join("") || `<span class="hint">Nessun sensore di potenza in Home Assistant.</span>`}</div>
+    </div>
+    <div class="section">
+      <strong>RISOLUZIONE</strong>
+      <span class="hint">Fino a 3 ore: storico grezzo, si vedono anche gli spunti di pochi secondi. Fino a 3 giorni: medie di 5 minuti, che Home Assistant conserva quanto il recorder (10 giorni di fabbrica). Oltre: medie orarie, permanenti. Il dispositivo deve avere <code>state_class: measurement</code> per comparire oltre le 3 ore.</span>
+    </div>`;
+  }
+
   _trendBody(item) {
     const series = this._trendSeries(item);
     // Le schede del periodo si disegnano SEMPRE, anche mentre lo storico
@@ -11173,6 +12209,7 @@ class CyborgDashboard extends HTMLElement {
     if (type === "ev") return this._evBody(item);
     if (type === "room") return this._roomCardBody(item);
     if (type === "trend") return this._trendBody(item);
+    if (type === "consumption") return this._consBody(item);
     if (type === "lights") return this._lightsBody(item);
     if (type === "irrigation") return this._irrigationBody(item);
     const attrs = (st && st.attributes) || {};
@@ -11448,6 +12485,7 @@ class CyborgDashboard extends HTMLElement {
   }
 
   _compositeEditor(card) {
+    if (card.type === "consumption") return this._consEditor(card);
     if (card.type === "system") {
       if (!this._registry && !this._registryLoading) this._loadRegistry();
       const reg = this._registry || {};
@@ -14734,6 +15772,7 @@ class CyborgDashboard extends HTMLElement {
     // the user's hands, and the pointer may wander 10 px because a finger
     // never holds perfectly still. The hover readout keeps working: the picker
     // opens on hold, not on move.
+    this._consBind(all);
     all("[data-trend-svg]").forEach((svg) => {
       const cardId = svg.getAttribute("data-trend-svg");
       let timer = null, sx = 0, sy = 0;
@@ -18899,6 +19938,82 @@ button.urgent{animation:saveNudge 2.2s ease-in-out infinite}
 @media(max-width:640px){.rc-strip{grid-template-columns:repeat(auto-fit,minmax(66px,1fr))}}
 
 .tr{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+/* Consumi per dispositivo (0.77.0) */
+.cs{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+.cs-nav{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
+.cs-nav .tr-tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+.cs-nav .eco-tab{flex:0 0 auto;white-space:nowrap;padding:7px 11px}
+.cs-chip.more{cursor:default;opacity:.8}
+.cs-move{display:flex;align-items:center;gap:6px}
+.cs-move .mini ha-icon{--mdc-icon-size:16px}
+.cs-move .mini[disabled]{opacity:.25;pointer-events:none}
+.cs-title{font:10.5px ui-monospace,monospace;letter-spacing:.6px;opacity:.7;min-width:118px;text-align:center}
+.cs-hint{font-size:10.5px;opacity:.45}
+.cs-zoombar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 10px;border-radius:10px;font-size:11px;
+  background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
+.cs-zoombar ha-icon{--mdc-icon-size:16px;color:var(--accent)}
+.cs-zoombar .mini{margin-left:auto}
+.cs-setup{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:6px}
+.cs-note{display:flex;align-items:flex-start;gap:7px;padding:7px 10px;border-radius:10px;font-size:11px;line-height:1.45;
+  background:rgba(255,255,255,.03);border:1px solid var(--divider-color)}
+.cs-note ha-icon{--mdc-icon-size:15px;opacity:.6;flex-shrink:0;margin-top:1px}
+.cs-note .mini{margin-left:6px}
+.cs-events{display:flex;flex-wrap:wrap;gap:6px}
+.cs-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:999px;font-size:11px;cursor:pointer;color:inherit;
+  background:color-mix(in srgb,var(--sc) 10%,transparent);border:1px solid color-mix(in srgb,var(--sc) 40%,transparent)}
+.cs-chip i{width:8px;height:8px;border-radius:2px;background:var(--sc);flex-shrink:0}
+.cs-chip ha-icon{--mdc-icon-size:13px;color:var(--sc)}
+.cs-chip em{font:10px ui-monospace,monospace;font-style:normal;opacity:.6}
+.cs-chip b{font:10.5px ui-monospace,monospace;font-weight:700;color:var(--sc)}
+.cs-chip:hover{background:color-mix(in srgb,var(--sc) 20%,transparent)}
+.cs-plot{position:relative}
+.cs-svg{display:block;width:100%;touch-action:pan-y;cursor:crosshair;overflow:visible;user-select:none;-webkit-user-select:none}
+.cs-grid{stroke:rgba(255,255,255,.07);stroke-width:1}
+.cs-gridx{stroke:rgba(255,255,255,.12);stroke-width:1;stroke-dasharray:2 3}
+.cs-ylab{fill:currentColor;opacity:.4;font:10px ui-monospace,monospace;text-anchor:end}
+.cs-xlab{fill:currentColor;opacity:.35;font:10px ui-monospace,monospace}
+.cs-xlab.strong{opacity:.6}
+.cs-layer{fill-opacity:.55;stroke:none}
+.cs-rest{fill-opacity:.22}
+.cs-total{fill:none;stroke:currentColor;stroke-opacity:.85;stroke-width:1.4;stroke-linejoin:round}
+.cs-peakline{fill:none;stroke:#ffb703;stroke-opacity:.6;stroke-width:1;stroke-dasharray:3 3;stroke-linejoin:round}
+.cs-now{stroke:currentColor;stroke-opacity:.45;stroke-width:1;stroke-dasharray:4 3}
+.cs-now-l{fill:currentColor;opacity:.5;font:9px ui-monospace,monospace}
+.cs-ev{opacity:.9}
+.cs-peak{fill:#ffb703;stroke:var(--card-background-color,#111a24);stroke-width:1}
+.cs-cursor{stroke:currentColor;stroke-opacity:.5;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}
+.cs-sel{fill:var(--accent);fill-opacity:.15;stroke:var(--accent);stroke-width:1;pointer-events:none}
+.cs-tip{position:absolute;top:4px;z-index:3;pointer-events:none;min-width:190px;max-width:280px;padding:8px 10px;border-radius:10px;
+  font-size:11px;background:color-mix(in srgb,var(--card-background-color,#111a24) 92%,transparent);
+  border:1px solid var(--divider-color);box-shadow:0 6px 18px rgba(0,0,0,.35);backdrop-filter:blur(6px)}
+.cs-tip-t{display:block;font:10px ui-monospace,monospace;letter-spacing:.6px;opacity:.6;margin-bottom:5px}
+.cs-tip-r{display:flex;align-items:center;gap:6px;padding:1.5px 0}
+.cs-tip-r i{width:8px;height:8px;border-radius:2px;background:var(--sc);flex-shrink:0}
+.cs-tip-r span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-tip-r b{font:11px ui-monospace,monospace;font-weight:700}
+.cs-tip-r.strong{font-weight:650;padding-bottom:3px;margin-bottom:2px;border-bottom:1px solid var(--divider-color)}
+.cs-tip-r.dim{opacity:.55;font-size:10px}
+.cs-tip-r.kid{opacity:.7;padding-left:14px;font-size:10.5px}
+.cs-tip-w{margin-top:4px;font-size:10px;color:#ffb703}
+.cs-legend{display:flex;flex-wrap:wrap;gap:5px}
+.cs-leg{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;font-size:11px;color:inherit;
+  background:none;border:1px solid var(--divider-color)}
+button.cs-leg{cursor:pointer}
+.cs-leg i{width:9px;height:9px;border-radius:3px;background:var(--sc);flex-shrink:0}
+.cs-leg b{font:10.5px ui-monospace,monospace;font-weight:700}
+.cs-leg em{font:10px ui-monospace,monospace;font-style:normal;opacity:.5}
+.cs-leg.total i{background:none;border:1.5px solid currentColor;width:8px;height:2px;border-radius:0;border-width:0 0 2px}
+.cs-leg.peakline i{background:none;border-bottom:1.5px dashed #ffb703;width:12px;height:0;border-radius:0}
+.cs-leg.child{opacity:.6;font-size:10.5px}
+.cs-leg.off{opacity:.4;text-decoration:line-through}
+.cs-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px;margin-top:6px}
+.cs-pick-row{display:flex;align-items:center;gap:8px;min-height:34px;padding:4px 9px;border-radius:9px;font-size:11.5px;cursor:pointer;
+  border:1px solid var(--divider-color);opacity:.65}
+.cs-pick-row.on{opacity:1;border-color:color-mix(in srgb,var(--sc) 45%,transparent);background:color-mix(in srgb,var(--sc) 9%,transparent)}
+.cs-pick-row i{width:9px;height:9px;border-radius:3px;background:var(--sc);flex-shrink:0}
+.cs-pick-row span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-pick-row em{font-style:normal;opacity:.55;font-size:10px}
+.cs-pick-row b{font:10px ui-monospace,monospace;opacity:.6}
 .tr-tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tr-svg{width:100%;height:auto;max-height:240px;display:block;overflow:visible}
 .tr-grid{stroke:rgba(255,255,255,.07);stroke-width:1}
@@ -19196,7 +20311,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.76.0";
+const CYBORG_BUILD = "0.77.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

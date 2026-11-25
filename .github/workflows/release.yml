@@ -49,6 +49,11 @@ jobs:
       - name: Stanze, termostato, pianta di fondo (0.74)
         run: node tests/frontend074.test.js
 
+      - name: Consumi per dispositivo (0.77)
+        run: |
+          node tests/frontend077.test.js
+          python3 tests/consumption.test.py
+
   release:
     name: Release
     needs: prove
