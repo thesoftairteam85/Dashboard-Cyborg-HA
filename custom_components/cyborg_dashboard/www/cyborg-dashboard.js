@@ -14829,7 +14829,15 @@ class CyborgDashboard extends HTMLElement {
       el.onclick = () => this._moveCard(el.getAttribute("data-sec"), el.getAttribute("data-item"), parseInt(el.getAttribute("data-card-move"), 10));
     });
     all("[data-tap]").forEach((el) => {
-      el.onclick = () => this._tap(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+      el.onclick = (ev) => {
+        // Una riga dentro la card (un sensore dell'elenco dell'allarme) ha il
+        // suo gesto: apre i SUOI dettagli. Il clic sale comunque fino alla
+        // card, e senza questo controllo la card apriva anche i propri,
+        // coprendo quelli del sensore con il pannello della centrale.
+        if (ev && ev.target && ev.target.closest
+            && ev.target.closest("[data-more-info],[data-toggle-entity]")) return;
+        this._tap(el.getAttribute("data-sec"), el.getAttribute("data-item"));
+      };
     });
 
     all("[data-close-editor]").forEach((el) => {
@@ -20311,7 +20319,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.77.0";
+const CYBORG_BUILD = "0.77.1";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

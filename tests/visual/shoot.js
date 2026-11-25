@@ -1845,6 +1845,29 @@ const DEFAULT_DASH = {
      JSON.stringify([alr.cardRight, alr.rows.map((r) => [r.right, r.roleRight])]));
   ok("le righe sono toccabili", alr.rows.every((r) => r.h >= 36), JSON.stringify(alr.rows.map((r) => r.h)));
   ok("lista sensori: nessuno scorrimento orizzontale", alr.scrollW <= alr.winW + 1);
+  // un clic su una riga apre i dettagli del SENSORE, e basta: non anche quelli della centrale
+  const tapRow = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const opened = [];
+    const on = (ev) => opened.push(ev.detail.entityId);
+    el.addEventListener("hass-more-info", on);
+    const row = document.querySelector('.az-r[data-more-info="binary_sensor.vz_porta"]');
+    row.click();
+    await new Promise((r) => setTimeout(r, 50));
+    const afterRow = opened.slice();
+    // e un clic fuori dalle righe continua ad aprire la centrale, come prima
+    const head = document.querySelector(".al-zones").closest(".item").querySelector("[data-tap] .head, .head")
+      || document.querySelector(".al-zones").closest(".item");
+    head.click();
+    await new Promise((r) => setTimeout(r, 50));
+    el.removeEventListener("hass-more-info", on);
+    return { afterRow, all: opened };
+  });
+  ok("il clic su una riga apre UN solo pannello: quello del sensore, non anche la centrale",
+     tapRow.afterRow.length === 1 && tapRow.afterRow[0] === "binary_sensor.vz_porta",
+     JSON.stringify(tapRow.afterRow));
+  ok("il clic sul resto della card apre ancora la centrale",
+     tapRow.all.includes("alarm_control_panel.allarme"), JSON.stringify(tapRow.all));
   await page.screenshot({ path: path.resolve(__dirname, "79b-alarm-sensor-list.png") });
 
   const znEd = await page.evaluate(async () => {

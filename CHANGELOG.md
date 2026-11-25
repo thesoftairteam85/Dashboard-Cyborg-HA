@@ -4,6 +4,19 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.77.1] - 2026-11-25
+
+### Un clic su un sensore apre il sensore, non la centrale
+
+Toccando una riga dell'elenco sensori della card Allarme si apriva prima il
+pannello di Alarmo (disattiva, in casa, fuori casa). Il clic della riga saliva
+fino alla card, che apriva anche i propri dettagli, coprendo quelli del sensore.
+Ora la card ignora i clic che hanno gia' un gesto proprio (`data-more-info`,
+`data-toggle-entity`); il resto della card apre la centrale come prima.
+
+Test: scena visuale su DOM vero (un solo evento «dettagli» per clic; provato
+che fallisce senza la correzione).
+
 ## [0.77.0] - 2026-11-25
 
 ### Nuova card «Consumi per dispositivo»: chi ha consumato, e quando
