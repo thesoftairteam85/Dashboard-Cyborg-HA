@@ -4,6 +4,23 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.76.0] - 2026-11-25
+
+### Anteprime delle videocamere: piccola, media, grande
+
+In Sicurezza una videocamera sola si vedeva minuscola, in Stanza enorme. La
+card Videocamere usava `auto-fill` con colonne da 168 px: su una card larga
+crea colonne vuote e lascia l'unica camera in una sola di esse.
+
+Nuova scelta nell'editor, **GRANDEZZA ANTEPRIME**:
+
+- **Piccola** — la griglia fitta di prima, per tante camere su un tablet.
+- **Media** (predefinita) — una camera fino a 560 px, centrata; due
+  affiancate finché ci stanno.
+- **Grande** — tutta la larghezza, come nella card Stanza.
+
+Lo schema riporta a «media» un valore sconosciuto.
+
 ## [0.75.1] - 2026-11-25
 
 ### I nomi dei due stati li scegli tu, e «a riposo» non esiste piu'

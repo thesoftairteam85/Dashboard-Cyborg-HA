@@ -140,7 +140,12 @@ assert it["c"]["cameras"] == ["camera.a", "camera.b"]
 assert it["c"]["refresh"] == 120, "clamp"
 assert it["c2"]["refresh"] == 10, "default"
 assert "cameras" not in it["s"]
+assert it["c"]["thumb"] == "m", "senza scelta: via di mezzo"
 assert schema.normalize_dashboard(d) == d
+for v, want in (("s", "s"), ("l", "l"), ("enorme", "m"), (None, "m")):
+    x = schema.normalize_dashboard({"pages": [{"sections": [{"items": [
+        {"id": "c", "type": "camera", "thumb": v}]}]}]})
+    assert x["pages"][0]["sections"][0]["items"][0]["thumb"] == want, (v, want)
 print("camera schema: all tests passed")
 
 # ---- economy card ----------------------------------------------------------

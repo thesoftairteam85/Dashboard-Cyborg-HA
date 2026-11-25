@@ -2058,6 +2058,7 @@ const NEVER_TOGGLE = new Set(["sensor", "binary_sensor", "device_tracker", "pers
   "input_datetime", "input_number", "input_select", "input_text", "event", "conversation",
   "stt", "tts", "todo", "calendar", "alarm_control_panel"]);
 const CAMERA_ON_OFF = 1;
+const CAM_SIZES = ["s", "m", "l"];
 
 function canToggle(entityId, st) {
   const d = domainOf(entityId);
@@ -10230,7 +10231,10 @@ class CyborgDashboard extends HTMLElement {
     // update together instead of each pulling on its own timer
     const tick = this._camTick || 0;
     this._scheduleCameraRefresh(item);
-    return `<div class="cams">${ids.map((id) => {
+    // Grandezza delle anteprime: "s" la griglia fitta di prima, "m" la via di
+    // mezzo, "l" piena come nella card Stanza. Sconosciuto = "m".
+    const size = CAM_SIZES.includes(item.thumb) ? item.thumb : "m";
+    return `<div class="cams t-${size}">${ids.map((id) => {
       const st = this._hass.states[id];
       const url = cameraStill(id, st);
       const off = st.state === "unavailable" || !url;
@@ -11766,6 +11770,11 @@ class CyborgDashboard extends HTMLElement {
           `<button type="button" class="dom-chip ${chosen.includes(id) ? "on" : ""}" data-camera-pick="${esc(id)}">
              <ha-icon icon="mdi:cctv"></ha-icon>${esc(this._hass.states[id].attributes.friendly_name || id)}</button>`).join("")}
         </div>
+        <label>GRANDEZZA ANTEPRIME<select data-prop="thumb">
+          ${[["s", "Piccola — tante camere affiancate"], ["m", "Media — via di mezzo"], ["l", "Grande — tutta la larghezza"]]
+            .map(([v, l]) => `<option value="${v}" ${(CAM_SIZES.includes(card.thumb) ? card.thumb : "m") === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select></label>
+        <span class="hint">«Media» tiene una videocamera a metà strada fra la miniatura e la card Stanza; con più videocamere le affianca finché ci stanno.</span>
         <label>AGGIORNAMENTO ANTEPRIME (secondi)<input type="number" min="5" max="120" data-prop="refresh" value="${card.refresh || 10}"></label>
         <label class="check"><input type="checkbox" data-prop="live" ${card.live ? "checked" : ""}> Anteprime sempre in diretta</label>
         <span class="hint">In diretta l'immagine è immediata e non c'è nessun intervallo di aggiornamento, ma ogni riquadro tiene aperto un flusso video: con una o due videocamere è la scelta giusta, con otto satura un tablet da parete.</span>
@@ -17795,7 +17804,11 @@ button.mini.danger.armed ha-icon{color:#fff}
 
 .item.tappable{cursor:pointer}
 .item.tappable:hover{border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
-.cams{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px}
+.cams{margin-top:12px;display:grid;gap:8px}
+.cams.t-s{grid-template-columns:repeat(auto-fill,minmax(168px,1fr))}
+.cams.t-m{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))}
+.cams.t-m .cam{width:100%;max-width:560px;justify-self:center}
+.cams.t-l{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}
 .cam{position:relative;padding:0;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:12px;overflow:hidden;background:#05090f;aspect-ratio:16/9;cursor:pointer;letter-spacing:0}
 .cam:hover{border-color:var(--accent)}
 .cam:disabled{cursor:default;opacity:.5}
@@ -19183,7 +19196,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.75.1";
+const CYBORG_BUILD = "0.76.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

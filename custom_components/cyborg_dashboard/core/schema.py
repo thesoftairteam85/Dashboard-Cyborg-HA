@@ -971,6 +971,9 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             result["refresh"] = max(5, min(120, int(result.get("refresh", 10))))
         except (TypeError, ValueError):
             result["refresh"] = 10
+        # Grandezza delle anteprime: un valore sconosciuto torna alla via di mezzo.
+        if result.get("thumb") not in ("s", "m", "l"):
+            result["thumb"] = "m"
     # La card Turni: il turnario dipinto a dita.
     #
     # Il dato sta QUI, nel dashboard, e non in un'integrazione: e' la ragione
