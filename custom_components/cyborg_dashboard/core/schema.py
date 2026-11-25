@@ -906,6 +906,25 @@ def normalize_item(item: dict[str, Any], index: int) -> dict[str, Any]:
             [i for i in rows if isinstance(i, str) and "." in i][:120]
             if isinstance(rows, list) else []
         )
+        # Nomi scelti dall'utente per i due stati di ogni sensore («Porta aperta» /
+        # «Porta chiusa»). Una mappa entity_id -> {on, off}: tiene solo testo
+        # non vuoto, tagliato a 40 caratteri, e scarta le righe rimaste vuote.
+        labels = result.get("zone_labels")
+        clean_labels: dict[str, dict[str, str]] = {}
+        if isinstance(labels, dict):
+            for key, pair in labels.items():
+                if not isinstance(key, str) or "." not in key or not isinstance(pair, dict):
+                    continue
+                row = {}
+                for state in ("on", "off"):
+                    text = pair.get(state)
+                    if isinstance(text, str) and text.strip():
+                        row[state] = text.strip()[:40]
+                if row:
+                    clean_labels[key] = row
+                if len(clean_labels) >= 120:
+                    break
+        result["zone_labels"] = clean_labels
         try:
             result["battery_warn"] = max(1, min(99, int(float(result.get("battery_warn", 20)))))
         except (TypeError, ValueError):

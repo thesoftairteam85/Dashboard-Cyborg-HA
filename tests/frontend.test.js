@@ -6754,6 +6754,61 @@ console.log("\n== 49. ZONE E SENSORI DELLA CENTRALE ==");
        !el._alarmZones(only).some((z) => z.id === "binary_sensor.z_strano"));
     delete states["binary_sensor.z_strano"];
 
+    // --- 0.75.1: i nomi degli stati li sceglie l'utente
+    // un contatto SENZA device_class (come lo lascia ZHA per i SONOFF)
+    states["binary_sensor.z_senzaclasse"] = S("off", { friendly_name: "Porta finestra cucina" });
+    const noCls = { id: "binary_sensor.z_senzaclasse", dc: "", open: false, unavailable: false };
+    ok("senza classe e senza nome scelto dice ON/OFF, non «a riposo»",
+       el._alarmPhysical(noCls, alCard).text === "OFF"
+       && el._alarmPhysical(Object.assign({}, noCls, { open: true }), alCard).text === "ON");
+    const lab = { zone_labels: { "binary_sensor.z_senzaclasse": { on: "Porta aperta", off: "Porta chiusa" } } };
+    ok("il nome scelto dall'utente per lo stato chiuso vince",
+       el._alarmPhysical(noCls, Object.assign({}, alCard, lab)).text === "Porta chiusa");
+    ok("e quello per lo stato aperto",
+       el._alarmPhysical(Object.assign({}, noCls, { open: true }), Object.assign({}, alCard, lab)).text === "Porta aperta");
+    ok("scritto solo un nome, l'altro stato resta quello automatico",
+       el._alarmPhysical(Object.assign({}, noCls, { open: true }), Object.assign({}, alCard,
+         { zone_labels: { "binary_sensor.z_senzaclasse": { off: "Porta chiusa" } } })).text === "ON");
+    ok("un sensore che non risponde dice «non risponde» anche con i nomi scelti",
+       el._alarmPhysical(Object.assign({}, noCls, { unavailable: true }), Object.assign({}, alCard, lab)).text === "non risponde");
+    ok("il nome scelto non cambia il colore: l'attenzione segue lo stato vero",
+       el._alarmPhysical(noCls, Object.assign({}, alCard, lab)).color
+       === el._alarmPhysical(noCls, alCard).color);
+
+    // il tipo dato in Alarmo fa da ripiego quando HA non ha la classe
+    el._alarmoSensors = Object.assign({}, cfg, { "binary_sensor.z_senzaclasse":
+      { modes: ["away"], always_on: false, enabled: true, type: "door" } });
+    const zNo = el._alarmZones(alCard).find((z) => z.id === "binary_sensor.z_senzaclasse");
+    ok("il tipo «door» di Alarmo diventa la classe del sensore senza device_class",
+       !!zNo && zNo.dc === "door" && zNo.kind === "Porta", JSON.stringify(zNo));
+    ok("e allora la porta chiusa si chiama «chiuso» da sola",
+       el._alarmPhysical(zNo, alCard).text === "chiuso");
+    states["binary_sensor.z_senzaclasse"] = S("on", { friendly_name: "Porta finestra cucina" });
+    const zOp = el._alarmZones(alCard).find((z) => z.id === "binary_sensor.z_senzaclasse");
+    ok("e aperta si chiama «aperto» e conta fra le aperte", zOp.open === true
+       && el._alarmPhysical(zOp, alCard).text === "aperto");
+    states["alarm_control_panel.ajax"] = S("disarmed", alarmoAttrs());
+    const hLab = el._renderCard(Object.assign({}, alCard, lab, { zones: ["binary_sensor.z_senzaclasse"] }), alSec);
+    ok("la card scrive il nome scelto nella riga", /Porta aperta/.test(hLab), (hLab.match(/az-p[^<]*</) || [""])[0]);
+    el._alarmoSensors = Object.assign({}, cfg, { "binary_sensor.z_senzaclasse": { modes: ["away"], always_on: false, enabled: true, type: "other" } });
+    ok("con tipo «other» e nessuna classe resta ON/OFF (non si inventa)",
+       el._alarmZones(alCard).find((z) => z.id === "binary_sensor.z_senzaclasse").dc === "");
+
+    // editor: i due campi per sensore, e salvataggio nella card
+    el._dashboard.pages[0].sections = [alSec];
+    alCard.zone_labels = undefined;
+    el._selected = { kind: "card", sectionId: "als", itemId: "al1" };
+    el._editing = true; el._signature = ""; el.render();
+    const eL = el.innerHTML;
+    ok("l'editor offre i due nomi per ogni sensore mostrato",
+       (eL.match(/data-zlabel="/g) || []).length >= 2 * mineIds.length, String((eL.match(/data-zlabel="/g) || []).length));
+    ok("e mostra il nome automatico come suggerimento", /placeholder="OFF"/.test(eL) || /placeholder="chiuso"/.test(eL));
+    el._editing = false;
+
+    delete states["binary_sensor.z_senzaclasse"];
+    el._alarmoSensors = null;
+    states["alarm_control_panel.ajax"] = S("armed_home", alarmoAttrs({ arm_mode: "home" }));
+
     // il caricamento vero, su un oggetto a parte: nessuna interferenza con el
     const mkLoader = (ws) => ({ _hass: { callWS: ws }, _touch() { this.touched = true; },
       _alarmoShape: el._alarmoShape, _alarmoSensors: null, _alarmoAt: 0, _alarmoLoading: false });

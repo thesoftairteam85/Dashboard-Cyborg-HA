@@ -942,6 +942,16 @@ assert len(_al(zones=["binary_sensor.z%d" % i for i in range(200)])["zones"]) ==
 assert _al(battery_warn=0)["battery_warn"] == 1
 assert _al(battery_warn=150)["battery_warn"] == 99
 assert _al(battery_warn="boh")["battery_warn"] == 20
+# i nomi scelti per gli stati: solo testo, tagliato, senza righe vuote
+assert _al()["zone_labels"] == {}
+zl = _al(zone_labels={"binary_sensor.a": {"on": " Porta aperta ", "off": "Porta chiusa", "x": "no"},
+                      "binary_sensor.b": {"on": "", "off": "   "},
+                      "rotto": {"on": "x"}, "binary_sensor.c": "testo", 5: {"on": "x"}})["zone_labels"]
+assert zl == {"binary_sensor.a": {"on": "Porta aperta", "off": "Porta chiusa"}}, zl
+assert len(_al(zone_labels={"binary_sensor.z%d" % i: {"on": "a"} for i in range(200)})["zone_labels"]) == 120
+assert len(_al(zone_labels={"binary_sensor.a": {"on": "x" * 100}})["zone_labels"]["binary_sensor.a"]["on"]) == 40
+assert _al(zone_labels="boh")["zone_labels"] == {}
+print("schema: nomi degli stati ok")
 # una card che NON punta a una centrale non si porta dietro queste chiavi
 altro = schema.normalize_item({"id": "x", "type": "entity", "entity_id": "light.sala"}, 0)
 assert "zones" not in altro and "battery_warn" not in altro

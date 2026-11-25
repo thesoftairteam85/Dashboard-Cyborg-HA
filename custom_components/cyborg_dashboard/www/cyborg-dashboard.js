@@ -7075,7 +7075,7 @@ class CyborgDashboard extends HTMLElement {
     return ids.map((id) => {
       const st = this._hass.states[id];
       if (!st) return { id, name: id, missing: true };
-      const dc = st.attributes.device_class || "";
+      const dc = st.attributes.device_class || this._alarmoTypeClass(id);
       // La batteria sta quasi sempre su un'ENTITA' SORELLA dello stesso
       // apparecchio, non fra gli attributi del contatto. Cercarla solo negli
       // attributi vuol dire non trovarla quasi mai.
@@ -7151,6 +7151,20 @@ class CyborgDashboard extends HTMLElement {
     this._touch();
   }
 
+  /**
+   * Il tipo che l'utente ha dato al sensore dentro Alarmo (porta, finestra,
+   * movimento, manomissione), tradotto nella classe che la card gia' conosce.
+   * Serve ai contatti che Home Assistant lascia senza device_class: chi li
+   * ha censiti in Alarmo ha gia' detto che cosa sono, e chiederlo una seconda
+   * volta sarebbe un lavoro inutile. Vale solo come ripiego: la device_class,
+   * quando c'e', vince.
+   */
+  _alarmoTypeClass(id) {
+    const c = this._alarmoSensors && this._alarmoSensors[id];
+    const map = { door: "door", window: "window", motion: "motion", tamper: "tamper" };
+    return (c && map[c.type]) || "";
+  }
+
   /** La modalita' in cui il pannello e' armato adesso, o null se non lo e'. */
   _alarmCurrentMode(st) {
     if (!st) return null;
@@ -7162,8 +7176,17 @@ class CyborgDashboard extends HTMLElement {
   }
 
   /** Cosa dice il contatto, in parole: dipende da cio' che misura. */
-  _alarmPhysical(z) {
+  _alarmPhysical(z, item) {
     if (z.unavailable) return { text: "non risponde", color: "#c77dff" };
+    const base = this._alarmPhysicalDefault(z);
+    // I nomi li sceglie chi conosce la casa: «Porta aperta» / «Porta chiusa»
+    // dicono molto piu' di qualunque parola che la card possa indovinare.
+    const lab = item && item.zone_labels && item.zone_labels[z.id];
+    const mine = lab && (z.open ? lab.on : lab.off);
+    return mine ? { text: String(mine), color: base.color } : base;
+  }
+
+  _alarmPhysicalDefault(z) {
     const on = z.open;
     const OK = "#06d6a0";
     switch (z.dc) {
@@ -7186,7 +7209,9 @@ class CyborgDashboard extends HTMLElement {
       case "safety": case "problem":
         return on ? { text: "problema", color: "#ff3d71" } : { text: "ok", color: OK };
       default:
-        return on ? { text: "attivo", color: "#ffd166" } : { text: "a riposo", color: OK };
+        // Senza classe la card non sa che cos'e': dice lo stato com'e', ON/OFF,
+        // invece di inventare una parola che su una porta suona sbagliata.
+        return on ? { text: "ON", color: "#ffd166" } : { text: "OFF", color: OK };
     }
   }
 
@@ -7308,7 +7333,7 @@ class CyborgDashboard extends HTMLElement {
       || String(a.name).localeCompare(String(b.name), "it"));
 
     const line = (z) => {
-      const p = this._alarmPhysical(z);
+      const p = this._alarmPhysical(z, item);
       const r = roleOf(z);
       const sub = [z.area, z.kind, z.battery !== null ? "batt. " + z.battery.toFixed(0) + "%" : ""]
         .filter(Boolean).join(" · ");
@@ -11628,6 +11653,25 @@ class CyborgDashboard extends HTMLElement {
             }).join("")}</div>
           </details>`;
         })()}
+        ${shown.length ? `<details class="al-extra al-labels" ${
+            card.zone_labels && Object.keys(card.zone_labels).length ? "open" : ""}>
+          <summary>NOMI DEGLI STATI${
+            card.zone_labels && Object.keys(card.zone_labels).length
+              ? ` · ${Object.keys(card.zone_labels).length} scelti da te` : ""}</summary>
+          <span class="hint">Come vuoi che si chiamino i due stati di ogni sensore: ad esempio <em>Porta aperta</em> e <em>Porta chiusa</em>. Lasciando vuoto resta il nome automatico (in grigio). Il colore non cambia: l'attenzione segue lo stato vero del sensore.</span>
+          <div class="eco-dev-list" data-keep-scroll="alarm-labels">${shown.map((z) => {
+            const dflt = (o) => this._alarmPhysicalDefault(Object.assign({}, z, { open: o })).text;
+            const cur = (card.zone_labels && card.zone_labels[z.id]) || {};
+            return `<div class="eco-dev-edit zl-row">
+              <div class="ede-txt"><strong>${esc(z.name)}</strong>
+                <small>${esc(z.kind)}${z.area ? " · " + esc(z.area) : ""}</small></div>
+              <label class="zl"><span>ON</span><input type="text" maxlength="40" data-zlabel="${esc(z.id)}"
+                data-zl="on" value="${esc(cur.on || "")}" placeholder="${esc(dflt(true))}"></label>
+              <label class="zl"><span>OFF</span><input type="text" maxlength="40" data-zlabel="${esc(z.id)}"
+                data-zl="off" value="${esc(cur.off || "")}" placeholder="${esc(dflt(false))}"></label>
+            </div>`;
+          }).join("")}</div>
+        </details>` : ""}
         ${chosen ? `<button class="secondary wide" data-alarm-zone-auto>TORNA A TROVARLI DA SOLO</button>` : ""}
         <span class="hint">${shown.length} sensori mostrati adesso.</span>
       </div>`;
@@ -16156,6 +16200,20 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
     });
+    all("[data-zlabel]").forEach((el) => {
+      el.onchange = () => {
+        if (!card) return;
+        const id = el.getAttribute("data-zlabel");
+        const which = el.getAttribute("data-zl") === "on" ? "on" : "off";
+        const labels = Object.assign({}, card.zone_labels || {});
+        const row = Object.assign({}, labels[id] || {});
+        const v = el.value.trim().slice(0, 40);
+        if (v) row[which] = v; else delete row[which];
+        if (row.on || row.off) labels[id] = row; else delete labels[id];
+        card.zone_labels = labels;
+        this._touch();
+      };
+    });
     const alarmZoneAuto = q("[data-alarm-zone-auto]");
     if (alarmZoneAuto && card) alarmZoneAuto.onclick = () => { card.zones = []; this._touch(); };
     const sysGauges = q("[data-sys-gauges]");
@@ -17618,6 +17676,11 @@ button.mini.danger.armed ha-icon{color:#fff}
 .az-sum{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:var(--sc,#06d6a0)}
 .az-sum ha-icon{--mdc-icon-size:15px;flex-shrink:0}
 .az-note{font-size:10px;opacity:.55}
+.zl-row{flex-wrap:wrap;gap:6px 10px}
+.zl-row .ede-txt{flex:1 1 100%}
+.zl{display:flex;flex:1 1 130px;align-items:center;gap:6px;font-size:10px;opacity:.9}
+.zl span{font:600 9px ui-monospace,monospace;opacity:.55;min-width:22px}
+.zl input{flex:1;min-width:0}
 .az-all{display:flex;flex-direction:column}
 .az-r{display:grid;grid-template-columns:10px minmax(0,1fr) auto;grid-template-areas:"dot name phys" ". role role";
   column-gap:9px;row-gap:3px;align-items:center;width:100%;padding:8px 0;background:transparent;border:0;
@@ -19120,7 +19183,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.75.0";
+const CYBORG_BUILD = "0.75.1";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

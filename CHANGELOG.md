@@ -4,6 +4,29 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.75.1] - 2026-11-25
+
+### I nomi dei due stati li scegli tu, e «a riposo» non esiste piu'
+
+Un contatto SONOFF senza `device_class` (ZHA lo lascia cosi') compariva come
+«a riposo»: su una porta non vuol dire niente.
+
+- **Nomi scelti da te.** Nell'editor della card, «NOMI DEGLI STATI»: per ogni
+  sensore due caselle, ON e OFF (ad esempio «Porta aperta» / «Porta chiusa»).
+  Vuoto = nome automatico, mostrato in grigio come suggerimento. Il colore non
+  cambia: l'attenzione segue lo stato vero, non la parola. Un sensore che non
+  risponde dice sempre «non risponde». Salvati nella card (`zone_labels`,
+  max 40 caratteri, validati dallo schema).
+- **Senza classe e senza nome scelto: ON / OFF**, lo stato com'e', invece di una
+  parola inventata.
+- **Il tipo dato in Alarmo fa da ripiego.** Se in Alarmo hai detto che il
+  sensore e' una porta, una finestra, un movimento o una manomissione e Home
+  Assistant non ha la classe, la card usa quel tipo: la porta chiusa si legge
+  «chiuso» da sola. La `device_class`, quando c'e', vince; il tipo «other» non
+  inventa nulla.
+
+Test: frontend 1713, schema, visual.
+
 ## [0.75.0] - 2026-11-24
 
 ### La card Sicurezza elenca ogni sensore e dice cosa fa per l'allarme
