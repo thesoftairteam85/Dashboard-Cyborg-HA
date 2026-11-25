@@ -5789,13 +5789,13 @@ class CyborgDashboard extends HTMLElement {
       </div>
       <div class="section">
         <strong>CAMERA</strong>
-        <label>ROTAZIONE · ${Math.round(view.yaw)}°<input type="range" min="0" max="359" step="1" data-view-prop="yaw" value="${view.yaw}"></label>
-        <label>INCLINAZIONE · ${Math.round(view.pitch)}°<input type="range" min="0" max="85" step="1" data-view-prop="pitch" value="${view.pitch}"></label>
-        <label>ZOOM · ${Number(view.zoom).toFixed(2)}×<input type="range" min="0.3" max="3" step="0.05" data-view-prop="zoom" value="${view.zoom}"></label>
-        <label>ALTEZZA MURI · ${view.wall_height}<input type="range" min="0" max="200" step="2" data-view-prop="wall_height" value="${view.wall_height}"></label>
-        <label>SPESSORE MURI · ${view.wall_thickness ?? 9}<input type="range" min="3" max="30" step="1" data-view-prop="wall_thickness" value="${view.wall_thickness ?? 9}"></label>
+        <label>ROTAZIONE · <span data-view-lab="yaw">${Math.round(view.yaw)}°</span><input type="range" min="0" max="359" step="1" data-view-prop="yaw" value="${view.yaw}"></label>
+        <label>INCLINAZIONE · <span data-view-lab="pitch">${Math.round(view.pitch)}°</span><input type="range" min="0" max="85" step="1" data-view-prop="pitch" value="${view.pitch}"></label>
+        <label>ZOOM · <span data-view-lab="zoom">${Number(view.zoom).toFixed(2)}×</span><input type="range" min="0.3" max="3" step="0.05" data-view-prop="zoom" value="${view.zoom}"></label>
+        <label>ALTEZZA MURI · <span data-view-lab="wall_height">${view.wall_height}</span><input type="range" min="0" max="200" step="2" data-view-prop="wall_height" value="${view.wall_height}"></label>
+        <label>SPESSORE MURI · <span data-view-lab="wall_thickness">${view.wall_thickness ?? 9}</span><input type="range" min="3" max="30" step="1" data-view-prop="wall_thickness" value="${view.wall_thickness ?? 9}"></label>
         <span class="hint">Lo spessore è quello che si vede dall'alto: senza, un muro è un foglio di carta e la casa sembra di cartoncino.</span>
-        <label>DISTANZA TRA I PIANI · ${view.level_gap}<input type="range" min="40" max="400" step="5" data-view-prop="level_gap" value="${view.level_gap}"></label>
+        <label>DISTANZA TRA I PIANI · <span data-view-lab="level_gap">${view.level_gap}</span><input type="range" min="40" max="400" step="5" data-view-prop="level_gap" value="${view.level_gap}"></label>
         <label class="check"><input type="checkbox" data-view-prop="show_walls" ${view.show_walls ? "checked" : ""}> Mostra muri</label>
         <label class="check"><input type="checkbox" data-view-prop="show_labels" ${view.show_labels ? "checked" : ""}> Mostra nomi stanze</label>
         <label>ETICHETTE SOPRA LE STANZE<select data-view-badges>
@@ -15165,17 +15165,38 @@ class CyborgDashboard extends HTMLElement {
         this._touch();
       };
       el.onchange = apply;
-      // Sliders feel dead without live feedback, but a full re-render per
-      // input event would be wasteful: update the CSS variable directly and
-      // only commit state on change.
+      // UN CURSORE NON RIDISEGNA MAI LA PAGINA MENTRE LO SI TRASCINA.
+      //
+      // Qui prima c'era `else apply()`: tre cursori su sei - altezza muri,
+      // spessore muri, distanza fra i piani - cadevano in quel ramo e
+      // facevano un render COMPLETO a ogni evento `input`, cioe' decine al
+      // secondo. Due conseguenze, e la seconda e' quella che si vedeva:
+      //
+      // 1. l'<input> viene distrutto e ricreato sotto il dito, quindi il
+      //    trascinamento si interrompe da solo;
+      // 2. quei tre valori cambiano l'ALTEZZA della mappa, quindi cambia
+      //    l'altezza della pagina: il ripristino dello scorrimento viene
+      //    tagliato sulla nuova altezza piu' bassa e la vista salta in cima.
+      //    E' il "dopo un po' torna in alto".
+      //
+      // La regola e' quella che le aperture e gli altri cursori seguivano
+      // gia': dal vivo si aggiorna solo cio' che costa niente - una variabile
+      // CSS e il numero nell'etichetta - e si salva al rilascio, su `change`.
+      // Era scritta in quattro posti e in uno era sbagliata.
       if (el.type === "range") {
         el.oninput = () => {
           const key = el.getAttribute("data-view-prop");
+          const lab = q(`[data-view-lab="${key}"]`);
+          if (lab) {
+            const v = Number(el.value);
+            lab.textContent = key === "zoom" ? v.toFixed(2) + "\u00d7"
+              : (key === "yaw" || key === "pitch") ? Math.round(v) + "\u00b0"
+              : String(Math.round(v));
+          }
           const vp = q("[data-fp-viewport]");
           if (!vp) return;
           if (key === "yaw" || key === "pitch") vp.style.setProperty("--" + key, el.value + "deg");
           else if (key === "zoom") vp.style.setProperty("--zoom", el.value);
-          else apply();
         };
       }
     });
@@ -15200,12 +15221,20 @@ class CyborgDashboard extends HTMLElement {
         view.underlay[key] = parseFloat(el.value);
         // Mentre si trascina si sposta solo l'immagine, senza ridisegnare la
         // pagina: un ridisegno a ogni pixel ricrea il cursore sotto il dito.
-        const img = q(".fp-underlay");
-        if (img && !commit) {
-          const u = view.underlay;
-          img.style.left = u.x + "px"; img.style.top = u.y + "px";
-          img.style.width = u.width + "px"; img.style.opacity = u.opacity;
-          img.style.transform = `translateZ(-2px) rotate(${u.rotate}deg)`;
+        if (!commit) {
+          // Nessuna caduta nel ridisegno completo quando l'immagine non c'e'.
+          // Prima, se `.fp-underlay` non era nel documento - per esempio
+          // perche' il robot non ha ancora pubblicato la mappa - ogni pixel
+          // di trascinamento faceva un render intero e il cursore spariva da
+          // sotto il dito. Senza immagine da muovere non si muove niente: si
+          // aspetta il rilascio.
+          const img = q(".fp-underlay");
+          if (img) {
+            const u = view.underlay;
+            img.style.left = u.x + "px"; img.style.top = u.y + "px";
+            img.style.width = u.width + "px"; img.style.opacity = u.opacity;
+            img.style.transform = `translateZ(-2px) rotate(${u.rotate}deg)`;
+          }
           return;
         }
         this._touch();
@@ -20319,7 +20348,7 @@ if (!customElements.get("cyborg-dashboard-card")) {
  * document.currentScript is null for modules and import.meta is a syntax error
  * outside one, so neither survives both loading paths and the test harness.
  */
-const CYBORG_BUILD = "0.77.1";
+const CYBORG_BUILD = "0.78.0";
 
 if (typeof window !== "undefined") {
   // First copy to load wins the element name; record which one that was.

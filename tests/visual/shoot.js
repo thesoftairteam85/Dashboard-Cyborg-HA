@@ -3685,6 +3685,171 @@ const DEFAULT_DASH = {
   ok("fuori modifica le schede restano navigabili", clean.tabs === 4, String(clean.tabs));
   ok("fuori modifica il cursore non promette un trascinamento", clean.grab);
 
+  // ---- l'editor non deve tornare in cima mentre lo si scorre -------------
+  //
+  // "Se vado giu' col cursore, dopo un po' mi torna in alto." Dopo un po'
+  // significa: e' arrivato uno stato nuovo. In una casa vera arriva ogni
+  // pochi secondi, quindi configurare una card lunga diventa impossibile.
+  //
+  // Qui si scorre l'editor, si fa arrivare uno stato come succede in casa, e
+  // si misura DOVE e' rimasto. Non e' una schermata: e' un numero.
+  console.log("\n== L'EDITOR RESTA DOVE LO HAI LASCIATO ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, system: true, selectSystem: true, editing: true });
+  await page.waitForTimeout(600);
+  const scorri = await page.evaluate(async () => {
+    const ed = () => document.querySelector("[data-keep-scroll=editor]");
+    const e0 = ed();
+    if (!e0) return { errore: "nessun editor aperto" };
+    const alto = e0.scrollHeight - e0.clientHeight;
+    e0.scrollTop = Math.min(300, Math.max(0, alto));
+    const prima = e0.scrollTop;
+    // Uno stato nuovo, come in casa: una potenza che cambia.
+    const el = window.__EL__;
+    const h = el._hass;
+    const nuovo = Object.assign({}, h, { states: Object.assign({}, h.states) });
+    const k = Object.keys(nuovo.states).find((x) => x.startsWith("sensor."));
+    nuovo.states[k] = Object.assign({}, nuovo.states[k], { state: String(40 + Math.random()) });
+    el.hass = nuovo;
+    await new Promise((r) => setTimeout(r, 400));
+    return { scorrevole: alto, prima, dopo: (ed() || {}).scrollTop };
+  });
+  ok("l'editor della card Sistema e' piu' alto della finestra, se no la prova non prova niente",
+     scorri.scorrevole > 100, JSON.stringify(scorri));
+  ok("scorrendolo ci si sposta davvero", scorri.prima > 100, JSON.stringify(scorri));
+  ok("e uno stato nuovo NON lo riporta in cima",
+     scorri.dopo === scorri.prima, JSON.stringify(scorri));
+
+  // Lo scenario vero: telefono, e gli stati che arrivano di continuo per
+  // qualche secondo mentre si sta fermi in fondo all'editor.
+  const tel = await browser.newPage({ viewport: { width: 414, height: 896 }, deviceScaleFactor: 2 });
+  tel.on("pageerror", (e) => errors.push("PAGEERROR: " + e.message));
+  await tel.goto("http://127.0.0.1:8899/harness.html");
+  await tel.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await tel.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await tel.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 0, autoCompose: true, system: true, selectSystem: true, editing: true });
+  await tel.waitForTimeout(600);
+  const raffica = await tel.evaluate(async () => {
+    const ed = () => document.querySelector("[data-keep-scroll=editor]");
+    const e0 = ed();
+    if (!e0) return { errore: "nessun editor" };
+    const alto = e0.scrollHeight - e0.clientHeight;
+    e0.scrollTop = Math.min(400, Math.max(0, alto));
+    const prima = e0.scrollTop;
+    const el = window.__EL__;
+    const storia = [];
+    // Dieci stati in due secondi: e' quello che fa una casa con un paio di
+    // prese che misurano la potenza.
+    for (let i = 0; i < 10; i += 1) {
+      const h = el._hass;
+      const nuovo = Object.assign({}, h, { states: Object.assign({}, h.states) });
+      const k = Object.keys(nuovo.states).filter((x) => x.startsWith("sensor."))[i % 3];
+      nuovo.states[k] = Object.assign({}, nuovo.states[k], { state: String(10 + i) });
+      el.hass = nuovo;
+      await new Promise((r) => setTimeout(r, 200));
+      storia.push((ed() || {}).scrollTop);
+    }
+    return { alto, prima, storia, fine: (ed() || {}).scrollTop };
+  });
+  ok("da telefono l'editor e' scorrevole", raffica.alto > 100, JSON.stringify(raffica));
+  ok("e dopo dieci stati di fila e' ancora dove lo hai lasciato",
+     raffica.storia.every((x) => x === raffica.prima),
+     JSON.stringify(raffica));
+
+  // E una LISTA DENTRO l'editor: la scelta delle temperature della card
+  // Sistema e' lunga, e si scorre quella, non il pannello.
+  const dentro = await tel.evaluate(async () => {
+    const liste = Array.from(document.querySelectorAll("[data-keep-scroll]"))
+      .filter((x) => x.getAttribute("data-keep-scroll") !== "editor"
+                  && x.scrollHeight - x.clientHeight > 30);
+    if (!liste.length) return { saltato: "nessuna lista interna scorrevole" };
+    const chiave = liste[0].getAttribute("data-keep-scroll");
+    const quante = document.querySelectorAll(`[data-keep-scroll="${chiave}"]`).length;
+    liste[0].scrollTop = 60;
+    const prima = liste[0].scrollTop;
+    const el = window.__EL__;
+    const h = el._hass;
+    const nuovo = Object.assign({}, h, { states: Object.assign({}, h.states) });
+    const k = Object.keys(nuovo.states).find((x) => x.startsWith("sensor."));
+    nuovo.states[k] = Object.assign({}, nuovo.states[k], { state: "77" });
+    el.hass = nuovo;
+    await new Promise((r) => setTimeout(r, 400));
+    const dopo = document.querySelector(`[data-keep-scroll="${chiave}"]`);
+    return { chiave, quante, prima, dopo: dopo ? dopo.scrollTop : -1 };
+  });
+  console.log("    lista interna: " + JSON.stringify(dentro));
+  if (!dentro.saltato) {
+    ok("anche una lista dentro l'editor resta dove l'hai lasciata",
+       dentro.dopo === dentro.prima, JSON.stringify(dentro));
+    // Due contenitori con la stessa chiave: la cattura scrive sull'ultimo e
+    // il ripristino applica al primo, quindi uno dei due salta.
+    ok("e nessuna chiave di scorrimento e' usata due volte sulla stessa schermata",
+       dentro.quante === 1, JSON.stringify(dentro));
+  }
+  await tel.close();
+
+  // ---- un cursore non ridisegna la pagina mentre lo si trascina ----------
+  //
+  // "Se vado giu' col cursore, dopo un po' torna in alto."
+  //
+  // Tre cursori della mappa - altezza muri, spessore muri, distanza fra i
+  // piani - facevano un render COMPLETO a ogni evento `input`. L'<input>
+  // veniva distrutto e ricreato sotto il dito, e siccome quei tre valori
+  // cambiano l'altezza della mappa cambiava l'altezza della pagina: il
+  // ripristino dello scorrimento veniva tagliato sulla nuova altezza e la
+  // vista saltava in cima.
+  //
+  // Si contano i ridisegni, non si guarda una schermata: e' un numero.
+  console.log("\n== UN CURSORE NON RIDISEGNA MENTRE LO TRASCINI ==");
+  await page.goto("http://127.0.0.1:8899/harness.html");
+  await page.waitForFunction("window.__ready === true", { timeout: 15000 });
+  await page.evaluate((d) => { window.__DEFAULT = d; }, DEFAULT_DASH);
+  await page.evaluate((o) => window.__mount(JSON.parse(JSON.stringify(window.__DEFAULT)), o),
+    { pageIndex: 1, autoRooms: true, editing: true });
+  await page.waitForTimeout(600);
+  const trascina = await page.evaluate(async () => {
+    const el = window.__EL__;
+    const ed = document.querySelector("[data-keep-scroll=editor]");
+    const cur = document.querySelector('[data-view-prop="wall_height"]');
+    if (!cur) return { errore: "nessun cursore altezza muri" };
+    if (ed) ed.scrollTop = Math.min(200, Math.max(0, ed.scrollHeight - ed.clientHeight));
+    const scrollPrima = ed ? ed.scrollTop : -1;
+    const vero = el.render.bind(el);
+    let n = 0;
+    el.render = () => { n += 1; return vero(); };
+    // Venti passi di trascinamento, come un dito che scorre il cursore.
+    for (let i = 0; i < 20; i += 1) {
+      cur.value = String(60 + i * 4);
+      cur.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const durante = n;
+    const etichetta = (document.querySelector('[data-view-lab="wall_height"]') || {}).textContent;
+    // Il rilascio: QUI si salva e si ridisegna, una volta sola.
+    cur.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    const dopo = n;
+    el.render = vero;
+    const ed2 = document.querySelector("[data-keep-scroll=editor]");
+    return { durante, dopo, etichetta, scrollPrima,
+      scrollDopo: ed2 ? ed2.scrollTop : -1,
+      valore: el._page().view.wall_height };
+  });
+  ok("venti passi di trascinamento non ridisegnano la pagina nemmeno una volta",
+     trascina.durante === 0, JSON.stringify(trascina));
+  // Senza etichetta viva il numero resterebbe fermo e il cursore sembrerebbe
+  // rotto: la via a buon mercato deve esserci, se no si torna a ridisegnare.
+  ok("ma il numero nell'etichetta segue il cursore",
+     trascina.etichetta === "136", JSON.stringify(trascina));
+  ok("al rilascio si salva, una volta sola",
+     trascina.dopo === 1 && trascina.valore === 136, JSON.stringify(trascina));
+  ok("e l'editor e' rimasto dove stava", trascina.scrollDopo === trascina.scrollPrima,
+     JSON.stringify(trascina));
+
   console.log("\n" + (errors.length ? "ERRORS:\n" + errors.join("\n") : "nessun errore console/pagina"));
   console.log(pass + " passati, " + fail + " falliti");
   await browser.close();

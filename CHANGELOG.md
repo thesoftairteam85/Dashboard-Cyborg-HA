@@ -4,6 +4,72 @@ Tutte le modifiche rilevanti a questo progetto sono elencate qui, più recenti
 in cima. Formato libero, in italiano, pensato per un riepilogo rapido prima
 di aggiornare via HACS — non un changelog automatico.
 
+## [0.78.0] - 2026-11-25
+
+«Quando configuro una card, se vado giù col cursore dopo un po' torna in
+alto.» Non era lo scorrimento: erano i **cursori**.
+
+### Tre cursori ridisegnavano tutta la pagina a ogni movimento
+
+In `[data-view-prop]` il ramo di fallback era `else apply()`. Tre cursori della
+mappa — **altezza muri**, **spessore muri**, **distanza fra i piani** — cadevano
+lì e facevano un render **completo** a ogni evento `input`: misurato,
+**venti passi di trascinamento = venti ridisegni**.
+
+Due conseguenze, e la seconda è quella che si vedeva:
+
+1. l'`<input>` viene distrutto e ricreato **sotto il dito**, quindi il
+   trascinamento si interrompe da solo;
+2. quei tre valori cambiano l'**altezza della mappa**, quindi cambia l'altezza
+   della pagina. Il ripristino dello scorrimento viene tagliato sulla nuova
+   altezza e la vista salta in cima. È il *«dopo un po' torna in alto»*.
+
+### La regola c'era già, scritta in quattro posti, e in uno era sbagliata
+
+Gli altri cursori la rispettavano, con tanto di commento: *«onchange sul
+rilascio: quello salva e ridisegna tutto»*, *«un render completo qui
+sostituirebbe il cursore che si sta tenendo premuto»*. Dal vivo si aggiorna
+solo ciò che costa niente — una variabile CSS, il numero nell'etichetta — e si
+salva al rilascio.
+
+Ora vale per tutti. I numeri nelle etichette della camera hanno un bersaglio
+(`data-view-lab`) che segue il cursore: senza, il numero resterebbe fermo
+durante il trascinamento e il cursore sembrerebbe rotto — ed è così che si
+finisce per rimettere il ridisegno.
+
+### Lo stesso difetto, nascosto, nella pianta di fondo
+
+`[data-underlay-prop]` muoveva l'immagine dal vivo **se la trovava**, e
+altrimenti cadeva su `this._touch()`. Quando `.fp-underlay` non è nel documento
+— per esempio perché il robot non ha ancora pubblicato la mappa — ogni pixel di
+trascinamento faceva un render intero. Senza immagine da muovere ora non si
+muove niente: si aspetta il rilascio.
+
+### Cosa ho escluso, con misure
+
+Prima di trovarlo ho provato a riprodurre lo scorrimento che salta, e **non si
+riproduce**: dieci stati di fila da computer e da telefono lasciano l'editor
+esattamente dove sta. Quelle tre asserzioni restano nella suite, perché ora
+coprono una strada che prima non guardava nessuno.
+
+Escluso anche il `ResizeObserver` dell'impaccamento (richiama solo la misura,
+mai un render) e il timer «torna a casa» del chiosco (`_isKiosk()` è vero solo
+per gli utenti non amministratori).
+
+### Verifica
+
+Quattro asserzioni nuove che contano i **ridisegni**, non guardano una
+schermata: zero durante venti passi, l'etichetta che segue, **uno** al
+rilascio, e l'editor fermo. Rimesso `else apply()`, la suite cade con
+`{"durante":20,"dopo":21}`.
+
+Da dire con onestà: nel banco di prova il salto dello scorrimento non si vede
+nemmeno col difetto rimesso, perché la finestra è più corta della pagina vera.
+Quello che il test misura è la **causa** — i venti ridisegni — non il sintomo.
+
+- frontend 1713, visiva **500**, pannello 28, raccolta 23, impianti 49,
+  consumi 8, rinomine 26, websocket 23, rilascio 10
+
 ## [0.77.1] - 2026-11-25
 
 ### Un clic su un sensore apre il sensore, non la centrale
